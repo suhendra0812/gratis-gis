@@ -2050,7 +2050,7 @@ export function EditorRuntime({
           users who arrive here from the items list have a
           consistent escape. Owners get a separate "Configure"
           link that takes them to the editor's detail/config page. */}
-      <header className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-border bg-surface-1 px-3 py-2">
+      <header className="relative z-30 flex shrink-0 flex-wrap items-center justify-between gap-2 overflow-visible border-b border-border bg-surface-1 px-3 py-2">
         <div className="flex min-w-0 items-center gap-3">
           {/* "Back to items" only renders for editors. Viewers --
               especially anonymous public-share visitors -- don't have
@@ -2092,7 +2092,7 @@ export function EditorRuntime({
             </span>
           ) : null}
         </div>
-        <div className="flex max-w-full items-center gap-2 overflow-x-auto text-xs text-muted">
+        <div className="flex max-w-full flex-wrap items-center justify-end gap-2 overflow-visible text-xs text-muted">
           {/* Editor tools (Add, Edit, Delete, Select, Snap, Measure,
               Undo, Redo) used to live in a header pill here. They
               now live in the right-docked Editor pane below, which

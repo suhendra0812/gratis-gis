@@ -314,7 +314,7 @@ export function BuilderShell({
       {/* Top bar. Keeps roughly the same height as the portal chrome's
           top bar so the visual context shift between portal and
           builder feels intentional rather than abrupt. */}
-      <header className="flex h-12 max-md:h-auto shrink-0 flex-wrap items-center gap-2 border-b border-border bg-surface-1 px-3 py-1">
+      <header className="relative z-30 flex min-h-12 shrink-0 flex-wrap items-center gap-2 overflow-visible border-b border-border bg-surface-1 px-3 py-1">
         <Link
           href={backHref}
           className="inline-flex h-8 w-8 items-center justify-center rounded-md text-muted transition-colors hover:bg-surface-2 hover:text-ink-0"
@@ -326,7 +326,7 @@ export function BuilderShell({
         {icon ? <span className="shrink-0">{icon}</span> : null}
         <h1 className="min-w-0 flex-1 truncate text-sm font-medium">{title}</h1>
         {toolbarRight ? (
-          <div className="ml-auto flex max-w-full items-center gap-2 overflow-x-auto max-md:ml-0 max-md:basis-full">
+          <div className="ml-auto flex max-w-full flex-wrap items-center justify-end gap-2 overflow-visible max-md:ml-0 max-md:basis-full">
             {toolbarRight}
           </div>
         ) : null}
