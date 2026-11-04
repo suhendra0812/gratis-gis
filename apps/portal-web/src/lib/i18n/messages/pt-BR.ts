@@ -1181,6 +1181,18 @@ export const ptBR: Partial<CatalogShape> = {
     fieldFmtExample: '{{field | fmt}}',
     lineBreakInsert: '+ quebra de linha',
   },
+  mapPopupRelated: {
+    heading: "Registros relacionados",
+    loading: "Carregando…",
+    none: "Nenhum ainda.",
+    failed: "Não foi possível carregar os registros relacionados.",
+    showingFirst: "Mostrando os primeiros {count}.",
+    loadFailed: "Não foi possível ler as tabelas relacionadas desta camada.",
+    noChildren: "Esta camada não tem tabelas relacionadas. Adicione na camada de dados uma tabela com esta camada como pai para listar as linhas aqui.",
+    fields: "Campos por linha",
+    fieldsDefault: "Os três primeiros campos",
+    maxRows: "Linhas a exibir",
+  },
   mapLabelsEditor: {
     showLabels: 'Mostrar rótulos',
     labelText: 'Texto do rótulo',

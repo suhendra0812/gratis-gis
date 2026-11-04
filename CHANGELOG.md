@@ -14,6 +14,12 @@ versioning policy is in [docs/VERSIONING.md](./docs/VERSIONING.md).
   fields you changed), **Edit shape** starts a geometry edit on that
   feature, and **Delete** removes it after a confirm. Changing one
   value no longer means opening the attribute table first.
+- Map popups can list related records. In the layer's Popup tab,
+  **Related records** offers each table of the same data layer that
+  has this layer as its parent (for example inspections of an
+  asset); pick the fields per row and how many rows to show. Rows
+  load when the popup opens, with "Showing first N" when there are
+  more.
 - Home NAS installs run the point-cloud worker when `GRATIS_ANALYSIS`
   is `on` (the default) and sleep it when set to `off`. Admin backups
   are stored on a volume that survives recreating the API container.

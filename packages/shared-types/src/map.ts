@@ -989,7 +989,36 @@ export interface MapLayerPopup {
   fields: string[];
   titleTemplate: string;
   bodyTemplate: string;
+  /**
+   * Related-record sections listed under the attributes, one per
+   * child table, e.g. the inspections of an asset. Rows are fetched
+   * when the popup opens, never for a hover. Absent or empty: none.
+   */
+  related?: MapLayerPopupRelated[];
 }
+
+/**
+ * One related table shown in a feature popup. Only sublayers of the
+ * same v3 data_layer item that name this layer as their parent
+ * (`parentLayerId` + `parentFkColumn`) can be related; the rows are
+ * read with the layer's `parentFk` / `parentId` filter.
+ */
+export interface MapLayerPopupRelated {
+  /** Child sublayer id within the same data_layer item. */
+  layerKey: string;
+  /** Section heading; set from the sublayer's label when picked. */
+  label: string;
+  /** Child column that holds the parent row's `_global_id`. */
+  fkColumn: string;
+  /** Child fields to show per row, in order. Empty: the first three. */
+  fields: string[];
+  /** Rows to list before "Showing first N" (1 to 20). */
+  limit: number;
+}
+
+/** Bounds for MapLayerPopupRelated.limit. */
+export const POPUP_RELATED_MAX_ROWS = 20;
+export const POPUP_RELATED_DEFAULT_ROWS = 5;
 
 /**
  * Per-layer interaction toggles. `hoverHighlight` swaps to a lighter

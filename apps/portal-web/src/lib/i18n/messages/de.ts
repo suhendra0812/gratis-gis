@@ -1183,6 +1183,18 @@ export const de: Partial<CatalogShape> = {
     fieldFmtExample: '{{field | fmt}}',
     lineBreakInsert: '+ Zeilenumbruch',
   },
+  mapPopupRelated: {
+    heading: "Verknüpfte Datensätze",
+    loading: "Wird geladen…",
+    none: "Noch keine.",
+    failed: "Verknüpfte Datensätze konnten nicht geladen werden.",
+    showingFirst: "Die ersten {count} werden angezeigt.",
+    loadFailed: "Die verknüpften Tabellen dieses Layers konnten nicht gelesen werden.",
+    noChildren: "Dieser Layer hat keine verknüpften Tabellen. Legen Sie im Datenlayer eine Tabelle mit diesem Layer als übergeordnetem Layer an, um ihre Zeilen hier aufzulisten.",
+    fields: "Felder pro Zeile",
+    fieldsDefault: "Die ersten drei Felder",
+    maxRows: "Anzuzeigende Zeilen",
+  },
   mapLabelsEditor: {
     showLabels: 'Beschriftungen anzeigen',
     labelText: 'Beschriftungstext',

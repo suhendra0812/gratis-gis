@@ -29,8 +29,13 @@ text.
  formatting (date format, number precision, percent).
 - **Attachments section.** Toggle on if the layer has attachments;
  thumbnails open in a lightbox.
-- **Related-table section.** Toggle on if the layer has child
- sublayers; each related row becomes a sub-item in the popup.
+- **Related records.** For a data layer with related tables (other
+ layers in the same data layer item that have this layer as their
+ parent, such as inspections of an asset), tick each table to list
+ under the attributes. For each one, pick the fields shown per row
+ (default: the first three) and how many rows to list (up to 20).
+ The rows load when the popup opens; when there are more, the
+ section says "Showing first N".
 - **Actions.** Buttons at the bottom of the popup, under the
  attributes. **Zoom to** is always there. In the map builder, on a
  data layer you may edit, the popup also offers:

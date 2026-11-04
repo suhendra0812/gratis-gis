@@ -1183,6 +1183,18 @@ export const fr: Partial<CatalogShape> = {
     fieldFmtExample: '{{field | fmt}}',
     lineBreakInsert: '+ saut de ligne',
   },
+  mapPopupRelated: {
+    heading: "Enregistrements liés",
+    loading: "Chargement…",
+    none: "Aucun pour l’instant.",
+    failed: "Impossible de charger les enregistrements liés.",
+    showingFirst: "Affichage des {count} premiers.",
+    loadFailed: "Impossible de lire les tables liées de cette couche.",
+    noChildren: "Cette couche n’a pas de table liée. Ajoutez dans la couche de données une table dont cette couche est le parent pour lister ses lignes ici.",
+    fields: "Champs par ligne",
+    fieldsDefault: "Les trois premiers champs",
+    maxRows: "Lignes à afficher",
+  },
   mapLabelsEditor: {
     showLabels: 'Afficher les étiquettes',
     labelText: 'Texte d’étiquette',

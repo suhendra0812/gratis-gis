@@ -1184,6 +1184,18 @@ export const es: Partial<CatalogShape> = {
     fieldFmtExample: '{{field | fmt}}',
     lineBreakInsert: '+ salto de línea',
   },
+  mapPopupRelated: {
+    heading: "Registros relacionados",
+    loading: "Cargando…",
+    none: "Ninguno todavía.",
+    failed: "No se pudieron cargar los registros relacionados.",
+    showingFirst: "Se muestran los primeros {count}.",
+    loadFailed: "No se pudieron leer las tablas relacionadas de esta capa.",
+    noChildren: "Esta capa no tiene tablas relacionadas. Agregue en la capa de datos una tabla con esta capa como principal para listar sus filas aquí.",
+    fields: "Campos por fila",
+    fieldsDefault: "Los tres primeros campos",
+    maxRows: "Filas a mostrar",
+  },
   mapLabelsEditor: {
     showLabels: 'Mostrar etiquetas',
     labelText: 'Texto de etiqueta',

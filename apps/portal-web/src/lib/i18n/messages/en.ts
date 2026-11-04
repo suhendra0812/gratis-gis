@@ -1226,6 +1226,18 @@ export const en = {
     fieldFmtExample: '{{field | fmt}}',
     lineBreakInsert: '+line break',
   },
+  mapPopupRelated: {
+    heading: "Related records",
+    loading: "Loading…",
+    none: "None yet.",
+    failed: "Could not load related records.",
+    showingFirst: "Showing first {count}.",
+    loadFailed: "Could not read this layer’s related tables.",
+    noChildren: "This layer has no related tables. Add a table with this layer as its parent in the data layer to list its rows here.",
+    fields: "Fields per row",
+    fieldsDefault: "First three fields",
+    maxRows: "Rows to show",
+  },
   mapLabelsEditor: {
     /** Labels tab controls (#162). */
     showLabels: 'Show labels',

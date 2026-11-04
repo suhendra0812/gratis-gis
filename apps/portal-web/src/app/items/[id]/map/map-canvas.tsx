@@ -20,6 +20,8 @@ import type {
   MapLayerFilterClause,
 } from '@gratis-gis/shared-types';
 import {
+  POPUP_RELATED_DEFAULT_ROWS,
+  POPUP_RELATED_MAX_ROWS,
   ZOOM_MAX,
   ZOOM_MIN,
   dashArrayFor,
@@ -1708,6 +1710,14 @@ export const MapCanvas = forwardRef<MapCanvasHandle, Props>(function MapCanvas(
       const showFeature = (props: Record<string, unknown>) =>
         popupBody(
           renderPopupHtml(popupLayer, props, localeRef.current),
+          popupRelatedSections(popupLayer, props, localeRef.current, () => {
+            // The rows arrive after MapLibre placed the popup for its
+            // shorter self; re-setting the position re-runs its anchor
+            // choice so the taller card flips to the side that fits
+            // instead of running off the top of the map.
+            const p = popupRef.current;
+            if (p) p.setLngLat(p.getLngLat());
+          }),
           popupActionBar({
             layer: popupLayer,
             properties: props,
@@ -1729,6 +1739,7 @@ export const MapCanvas = forwardRef<MapCanvasHandle, Props>(function MapCanvas(
           isMvtFeature
             ? popupBody(
                 '<div class="gg-popup-loading" style="padding:8px;color:#666;font-size:12px;">Loading…</div>',
+                null,
                 null,
               )
             : showFeature(fallbackProps),
@@ -4275,14 +4286,125 @@ function sourceData(
  * Keeping the buttons out of the HTML string means no markup from a
  * feature's attributes can ever reach a click handler.
  */
-function popupBody(html: string, actionBar: HTMLElement | null): HTMLElement {
+function popupBody(
+  html: string,
+  related: HTMLElement | null,
+  actionBar: HTMLElement | null,
+): HTMLElement {
   const el = document.createElement('div');
   el.innerHTML = html;
-  if (actionBar) {
-    // Inside .gg-popup so it shares the card's padding and type.
-    (el.querySelector('.gg-popup') ?? el).appendChild(actionBar);
-  }
+  // Inside .gg-popup so they share the card's padding and type.
+  const card = el.querySelector('.gg-popup') ?? el;
+  if (related) card.appendChild(related);
+  if (actionBar) card.appendChild(actionBar);
   return el;
+}
+
+/**
+ * Related-record sections (popup.related): one per configured child
+ * table, each filling itself in when its rows arrive. Rows are read
+ * through the child layer's `parentFk` / `parentId` filter, which the
+ * server validates against the layer schema and scopes to what the
+ * viewer may read. Every value is set as text, never as markup.
+ */
+function popupRelatedSections(
+  layer: MapLayer,
+  props: Record<string, unknown>,
+  locale: SupportedLocale,
+  onFilled: () => void,
+): HTMLElement | null {
+  const related = layer.popup.related ?? [];
+  if (related.length === 0 || layer.source.kind !== 'data-layer') return null;
+  const parentId = props._global_id;
+  if (typeof parentId !== 'string' || !parentId) return null;
+  const { itemId } = layer.source;
+
+  const wrap = document.createElement('div');
+  wrap.className = 'gg-popup-related';
+  for (const rel of related) {
+    const section = document.createElement('section');
+    section.className = 'gg-popup-related-section';
+    const heading = document.createElement('div');
+    heading.className = 'gg-popup-related-title';
+    heading.textContent = rel.label;
+    const body = document.createElement('div');
+    body.className = 'gg-popup-related-note';
+    body.textContent = t('mapPopupRelated.loading', undefined, locale);
+    section.append(heading, body);
+    wrap.appendChild(section);
+
+    const limit = Math.min(
+      Math.max(Math.floor(rel.limit) || POPUP_RELATED_DEFAULT_ROWS, 1),
+      POPUP_RELATED_MAX_ROWS,
+    );
+    const qs = new URLSearchParams({
+      parentFk: rel.fkColumn,
+      parentId,
+      limit: String(limit),
+    });
+    fetch(
+      `/api/portal/items/${itemId}/layers/${encodeURIComponent(rel.layerKey)}/features?${qs}`,
+      { cache: 'no-store' },
+    )
+      .then((res) => (res.ok ? res.json() : Promise.reject(new Error(String(res.status)))))
+      .then(
+        (fc: {
+          features?: Array<{ properties?: Record<string, unknown> }>;
+          nextCursor?: string | null;
+        }) => {
+          const rows = (fc.features ?? []).map((f) => f.properties ?? {});
+          const more = Boolean(fc.nextCursor);
+          heading.textContent = `${rel.label} (${rows.length}${more ? '+' : ''})`;
+          if (rows.length === 0) {
+            body.textContent = t('mapPopupRelated.none', undefined, locale);
+            onFilled();
+            return;
+          }
+          const list = document.createElement('ul');
+          list.className = 'gg-popup-related-list';
+          for (const row of rows) {
+            const li = document.createElement('li');
+            const keys =
+              rel.fields.length > 0
+                ? rel.fields
+                : Object.keys(row)
+                    .filter((k) => !k.startsWith('_') && k !== rel.fkColumn)
+                    .slice(0, 3);
+            for (const k of keys) {
+              const v = row[k];
+              if (v === null || v === undefined || v === '') continue;
+              const pair = document.createElement('span');
+              pair.className = 'gg-popup-related-pair';
+              const name = document.createElement('span');
+              name.className = 'gg-popup-related-key';
+              name.textContent = k;
+              const value = document.createElement('span');
+              value.textContent = String(v);
+              pair.append(name, value);
+              li.appendChild(pair);
+            }
+            if (li.childElementCount > 0) list.appendChild(li);
+          }
+          body.replaceWith(list);
+          if (more) {
+            const note = document.createElement('div');
+            note.className = 'gg-popup-related-note';
+            note.textContent = t(
+              'mapPopupRelated.showingFirst',
+              { count: rows.length },
+              locale,
+            );
+            section.appendChild(note);
+          }
+          onFilled();
+        },
+      )
+      .catch(() => {
+        body.textContent = t('mapPopupRelated.failed', undefined, locale);
+        onFilled();
+      });
+  }
+  return wrap;
 }
 
 /** The row's stable id: `_global_id` on data-layer features. */
