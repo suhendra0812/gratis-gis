@@ -8,6 +8,12 @@ versioning policy is in [docs/VERSIONING.md](./docs/VERSIONING.md).
 
 ### Added
 
+- Map builder: the feature popup has action buttons, as in ArcGIS
+  Online. **Zoom to** is always there; on a data layer you may edit,
+  **Edit** opens the feature's attributes in a form (saving only the
+  fields you changed), **Edit shape** starts a geometry edit on that
+  feature, and **Delete** removes it after a confirm. Changing one
+  value no longer means opening the attribute table first.
 - Home NAS installs run the point-cloud worker when `GRATIS_ANALYSIS`
   is `on` (the default) and sleep it when set to `off`. Admin backups
   are stored on a volume that survives recreating the API container.

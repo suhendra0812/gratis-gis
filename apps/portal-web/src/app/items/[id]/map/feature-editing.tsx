@@ -50,6 +50,7 @@ import {
   X,
 } from 'lucide-react';
 import type { FeatureField, MapLayer, PickListData } from '@gratis-gis/shared-types';
+import { changedValues } from '@/lib/feature-attribute-diff';
 import { toast } from '@/lib/toast';
 import { parseApiError } from '@/lib/api-error';
 import { useT } from '@/lib/i18n/locale-context';
@@ -73,7 +74,7 @@ import {
   type GeometryEditRequest,
 } from './use-terra-draw';
 import { fetchFeatureFromServer } from './fetch-feature';
-import type { MapCanvasHandle } from './map-canvas';
+import type { MapCanvasHandle, PopupActions } from './map-canvas';
 
 export type FeatureEditTool = 'off' | 'edit' | 'add' | 'delete';
 
@@ -111,6 +112,12 @@ export interface FeatureEditing {
   /** Leave whatever tool is active, discarding an unsaved sketch or edit. */
   deactivate: () => void;
   canvasProps: CanvasProps;
+  /**
+   * Edit / Edit shape / Delete for the click popup. Undefined when
+   * the viewer can edit no layer on this map, so the popup stays
+   * read-only (Zoom to only).
+   */
+  popupActions: PopupActions | undefined;
   overlay: ReactNode;
 }
 
@@ -270,12 +277,85 @@ export function useFeatureEditing({
     [tool, leaveTool, pendingCreate, clearSketch],
   );
 
+  // Delete one feature after a confirm. Shared by the Delete tool and
+  // the popup's Delete button.
+  const deleteFeature = useCallback(
+    async (layer: MapLayer, featureId: string) => {
+      const src = dataLayerSource(layer);
+      if (!src) return;
+      const ok = await confirm({
+        title: t('featureEdit.deleteConfirmTitle'),
+        message: t('featureEdit.deleteConfirmMessage', { layer: layer.title }),
+        confirmLabel: t('featureEdit.deleteAction'),
+        variant: 'danger',
+      });
+      if (!ok) return;
+      setBusy(true);
+      try {
+        const res = await fetch(
+          `/api/portal/items/${src.itemId}/layers/${encodeURIComponent(src.layerKey)}/features/${encodeURIComponent(featureId)}`,
+          { method: 'DELETE' },
+        );
+        if (!res.ok && res.status !== 204) {
+          throw new Error(await parseApiError(res, t('featureEdit.deleteFailed')));
+        }
+        canvasRef.current?.refreshLayerSource(layer.id);
+        toast.success(t('featureEdit.featureDeleted'));
+      } catch (err) {
+        toast.error(err instanceof Error ? err.message : t('featureEdit.deleteFailed'));
+      } finally {
+        setBusy(false);
+      }
+    },
+    [confirm, canvasRef, t],
+  );
+
+  // Open a geometry edit session on one feature. Shared by the Edit
+  // shape tool and the popup's Edit shape button.
+  const beginShapeEdit = useCallback(
+    async (layer: MapLayer, featureId: string) => {
+      const src = dataLayerSource(layer);
+      if (!src) return;
+      const gt = layerInfo[layer.id]?.geometryType;
+      if (!gt) {
+        toast.error(t('featureEdit.noGeometry'));
+        return;
+      }
+      setLoadingFeature(true);
+      setSaveError(null);
+      try {
+        const full = await fetchFeatureFromServer(
+          src.itemId,
+          src.layerKey,
+          featureId,
+          t('featureEdit.loadFailed'),
+        );
+        if (!full) {
+          toast.error(t('featureEdit.notFound'));
+          return;
+        }
+        setPendingEdit({
+          key: layer.id,
+          featureId,
+          geometryType: gt,
+          geometry: roundCoordsToPrecision(full.geometry),
+          properties: full.properties,
+          layerTitle: layer.title,
+        });
+      } catch (err) {
+        toast.error(err instanceof Error ? err.message : t('featureEdit.loadFailed'));
+      } finally {
+        setLoadingFeature(false);
+      }
+    },
+    [layerInfo, t],
+  );
+
   const onEditClaimedClick = useCallback(
     (info: { layerId: string; featureId: string | number; properties: Record<string, unknown> }) => {
       if (tool !== 'edit' && tool !== 'delete') return;
       const layer = layers.find((l) => l.id === info.layerId);
-      const src = dataLayerSource(layer);
-      if (!layer || !src) return;
+      if (!layer || !dataLayerSource(layer)) return;
       // The tile carries _global_id; MapCanvas's generateId rewrite
       // means info.featureId may be a sequential number instead.
       const featureId =
@@ -290,31 +370,7 @@ export function useFeatureEditing({
       }
 
       if (tool === 'delete') {
-        void (async () => {
-          const ok = await confirm({
-            title: t('featureEdit.deleteConfirmTitle'),
-            message: t('featureEdit.deleteConfirmMessage', { layer: layer.title }),
-            confirmLabel: t('featureEdit.deleteAction'),
-            variant: 'danger',
-          });
-          if (!ok) return;
-          setBusy(true);
-          try {
-            const res = await fetch(
-              `/api/portal/items/${src.itemId}/layers/${encodeURIComponent(src.layerKey)}/features/${encodeURIComponent(featureId)}`,
-              { method: 'DELETE' },
-            );
-            if (!res.ok && res.status !== 204) {
-              throw new Error(await parseApiError(res, t('featureEdit.deleteFailed')));
-            }
-            canvasRef.current?.refreshLayerSource(layer.id);
-            toast.success(t('featureEdit.featureDeleted'));
-          } catch (err) {
-            toast.error(err instanceof Error ? err.message : t('featureEdit.deleteFailed'));
-          } finally {
-            setBusy(false);
-          }
-        })();
+        void deleteFeature(layer, featureId);
         return;
       }
 
@@ -322,42 +378,131 @@ export function useFeatureEditing({
       // mis-click, not a request to switch features. Switching would
       // discard the unsaved edit without a word; Cancel is explicit.
       if (pendingEdit || loadingFeature) return;
-      const gt = layerInfo[layer.id]?.geometryType;
-      if (!gt) {
-        toast.error(t('featureEdit.noGeometry'));
-        return;
-      }
+      void beginShapeEdit(layer, featureId);
+    },
+    [tool, layers, pendingEdit, loadingFeature, deleteFeature, beginShapeEdit, t],
+  );
+
+  // ---- Attribute edit from the popup --------------------------------
+  //
+  // The popup's Edit button. Before this, changing one value on a
+  // feature meant opening the attribute table and finding the row.
+  // The form is the editor item's AttributeForm, seeded from the
+  // server's copy of the row (a tile carries only `_global_id`).
+  const [pendingAttrEdit, setPendingAttrEdit] = useState<PendingAttributeEdit | null>(null);
+
+  const beginAttributeEdit = useCallback(
+    async (layer: MapLayer, featureId: string) => {
+      const src = dataLayerSource(layer);
+      if (!src) return;
       setLoadingFeature(true);
       setSaveError(null);
-      void (async () => {
-        try {
-          const full = await fetchFeatureFromServer(
-            src.itemId,
-            src.layerKey,
-            featureId,
-            t('featureEdit.loadFailed'),
-          );
-          if (!full) {
-            toast.error(t('featureEdit.notFound'));
-            return;
-          }
-          setPendingEdit({
-            key: layer.id,
-            featureId,
-            geometryType: gt,
-            geometry: roundCoordsToPrecision(full.geometry),
-            properties: full.properties,
-            layerTitle: layer.title,
-          });
-        } catch (err) {
-          toast.error(err instanceof Error ? err.message : t('featureEdit.loadFailed'));
-        } finally {
-          setLoadingFeature(false);
+      try {
+        const full = await fetchFeatureFromServer(
+          src.itemId,
+          src.layerKey,
+          featureId,
+          t('featureEdit.loadFailed'),
+        );
+        if (!full) {
+          toast.error(t('featureEdit.notFound'));
+          return;
         }
-      })();
+        setPendingAttrEdit({
+          layerId: layer.id,
+          featureId,
+          layerTitle: layer.title,
+          initial: full.properties,
+        });
+      } catch (err) {
+        toast.error(err instanceof Error ? err.message : t('featureEdit.loadFailed'));
+      } finally {
+        setLoadingFeature(false);
+      }
     },
-    [tool, layers, layerInfo, confirm, canvasRef, pendingEdit, loadingFeature, t],
+    [t],
   );
+
+  const saveAttributes = useCallback(
+    async (values: Record<string, unknown>) => {
+      if (!pendingAttrEdit) return;
+      const layer = layers.find((l) => l.id === pendingAttrEdit.layerId);
+      const src = dataLayerSource(layer);
+      if (!layer || !src) return;
+      // Send only what changed (see changedValues for why).
+      const changed = changedValues(pendingAttrEdit.initial, values);
+      if (Object.keys(changed).length === 0) {
+        setPendingAttrEdit(null);
+        return;
+      }
+      setBusy(true);
+      setSaveError(null);
+      try {
+        const res = await fetch(
+          `/api/portal/items/${src.itemId}/layers/${encodeURIComponent(src.layerKey)}/features/${encodeURIComponent(pendingAttrEdit.featureId)}`,
+          {
+            method: 'PATCH',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ properties: changed }),
+          },
+        );
+        if (!res.ok) {
+          setSaveError(await parseApiError(res, t('featureEdit.saveFailed')));
+          return;
+        }
+        setPendingAttrEdit(null);
+        canvasRef.current?.refreshLayerSource(layer.id);
+        toast.success(t('featureEdit.attributesSaved'));
+      } catch (err) {
+        setSaveError(err instanceof Error ? err.message : t('featureEdit.saveFailed'));
+      } finally {
+        setBusy(false);
+      }
+    },
+    [pendingAttrEdit, layers, canvasRef, t],
+  );
+
+  const cancelAttributeEdit = useCallback(() => {
+    setPendingAttrEdit(null);
+    setSaveError(null);
+  }, []);
+
+  const popupActions: PopupActions | undefined = useMemo(() => {
+    if (editableLayerIds.size === 0) return undefined;
+    const layerOf = (id: string) => layers.find((l) => l.id === id);
+    return {
+      canEdit: (layerId) =>
+        editableLayerIds.has(layerId) && dataLayerSource(layerOf(layerId)) !== null,
+      canEditShape: (layerId) => Boolean(layerInfo[layerId]?.geometryType),
+      onEditAttributes: (ref) => {
+        const layer = layerOf(ref.layerId);
+        if (layer) void beginAttributeEdit(layer, ref.featureId);
+      },
+      onEditShape: (ref) => {
+        const layer = layerOf(ref.layerId);
+        if (!layer) return;
+        // The shape session needs the Edit tool armed: it is what
+        // suppresses popups and keeps the click on the handles.
+        if (pendingCreate) clearSketch(pendingCreate.sketchId);
+        setPendingCreate(null);
+        setTool('edit');
+        void beginShapeEdit(layer, ref.featureId);
+      },
+      onDelete: (ref) => {
+        const layer = layerOf(ref.layerId);
+        if (layer) void deleteFeature(layer, ref.featureId);
+      },
+    };
+  }, [
+    editableLayerIds,
+    layers,
+    layerInfo,
+    beginAttributeEdit,
+    beginShapeEdit,
+    deleteFeature,
+    pendingCreate,
+    clearSketch,
+  ]);
 
   const saveGeometry = useCallback(async () => {
     if (!pendingEdit || !geometryEdit.currentGeometry) return;
@@ -514,6 +659,35 @@ export function useFeatureEditing({
           </div>
         ) : null}
         <Dialog
+          open={pendingAttrEdit !== null}
+          onOpenChange={(open) => {
+            if (!open) cancelAttributeEdit();
+          }}
+        >
+          <DialogContent hideCloseButton>
+            <DialogHeader>
+              <DialogTitle>{t('featureEdit.editFeatureTitle')}</DialogTitle>
+            </DialogHeader>
+            {pendingAttrEdit ? (
+              <AttributeForm
+                // A different feature is a fresh form, not a re-seed.
+                key={`${pendingAttrEdit.layerId}:${pendingAttrEdit.featureId}`}
+                fields={layerInfo[pendingAttrEdit.layerId]?.fields ?? []}
+                editableFieldNames={null}
+                pickLists={pickLists}
+                initial={pendingAttrEdit.initial}
+                layerTitle={pendingAttrEdit.layerTitle}
+                submitting={busy}
+                errorMessage={saveError}
+                onCancel={cancelAttributeEdit}
+                onSubmit={(values) => void saveAttributes(values)}
+                submitLabel={t('featureEdit.saveAttributes')}
+                title={t('featureEdit.editFeatureAttributes')}
+              />
+            ) : null}
+          </DialogContent>
+        </Dialog>
+        <Dialog
           open={pendingCreate !== null}
           onOpenChange={(open) => {
             if (!open) cancelCreate();
@@ -544,10 +718,18 @@ export function useFeatureEditing({
       </>
     );
 
-  return { tool, active, deactivate: leaveTool, canvasProps, overlay };
+  return { tool, active, deactivate: leaveTool, canvasProps, popupActions, overlay };
 }
 
 const EMPTY_SET: ReadonlySet<string> = new Set();
+
+interface PendingAttributeEdit {
+  layerId: string;
+  featureId: string;
+  layerTitle: string;
+  /** The row as the server returned it when the form opened. */
+  initial: Record<string, unknown>;
+}
 
 function Hint({ children }: { children: ReactNode }) {
   return (

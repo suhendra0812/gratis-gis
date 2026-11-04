@@ -31,11 +31,15 @@ text.
  thumbnails open in a lightbox.
 - **Related-table section.** Toggle on if the layer has child
  sublayers; each related row becomes a sub-item in the popup.
-- **Actions.** Buttons that appear at the bottom of the popup.
- Built-ins: "Zoom to", "Open in detail page", "Edit", "Run
- report" (if a report template is configured), "Copy link to
- feature". Custom actions: a button that opens a URL with field
- values interpolated.
+- **Actions.** Buttons at the bottom of the popup, under the
+ attributes. **Zoom to** is always there. In the map builder, on a
+ data layer you may edit, the popup also offers:
+ - **Edit**: opens the feature's attributes in a form; Save writes
+   only the fields you changed.
+ - **Edit shape**: switches on the Edit tool for that feature so
+   you can drag its vertices, then **Save shape**.
+ - **Delete**: removes the feature after a confirmation.
+ These are not configurable per layer yet.
 
 ## How to set it
 
