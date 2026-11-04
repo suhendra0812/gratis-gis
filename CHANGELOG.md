@@ -33,6 +33,13 @@ versioning policy is in [docs/VERSIONING.md](./docs/VERSIONING.md).
   asset); pick the fields per row and how many rows to show. Rows
   load when the popup opens, with "Showing first N" when there are
   more.
+- Data layers can declare relationships to tables in other data
+  layers (Structure tab, **Relationships**): a layer, the related data
+  layer and table, and the related table's text field holding the
+  feature's ID. Map popups, the map's Edit feature panel and the field
+  app list and add related rows through these and through in-item
+  event-tracking tables alike, from one resolver
+  (`relatedTableRefs`).
 - Home NAS installs run the point-cloud worker when `GRATIS_ANALYSIS`
   is `on` (the default) and sleep it when set to `off`. Admin backups
   are stored on a volume that survives recreating the API container.
@@ -51,6 +58,10 @@ versioning policy is in [docs/VERSIONING.md](./docs/VERSIONING.md).
 
 ### Fixed
 
+- Field app: a related table is listed only under its own parent
+  layer. Every table with a link column used to appear under every
+  spatial layer of the data layer, so one asset's inspections showed
+  up under unrelated layers.
 - Map builder: the basemap menu opens again. The toolbar scrolled
   sideways (`overflow-x-auto`), which also clips vertically, so the
   menu dropping below the header was cut off. The toolbar wraps

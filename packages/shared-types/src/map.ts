@@ -1004,7 +1004,13 @@ export interface MapLayerPopup {
  * read with the layer's `parentFk` / `parentId` filter.
  */
 export interface MapLayerPopupRelated {
-  /** Child sublayer id within the same data_layer item. */
+  /**
+   * data_layer item holding the related table, when it is not the
+   * layer's own item (a relationship declared to another item).
+   * Absent: the layer's own item.
+   */
+  itemId?: string;
+  /** Sublayer id of the related table within its item. */
   layerKey: string;
   /** Section heading; set from the sublayer's label when picked. */
   label: string;

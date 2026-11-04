@@ -12,7 +12,7 @@ import {
 } from '@gratis-gis/shared-types';
 import type { LayerMetadata } from './layer-metadata';
 import { TemplateInput } from './template-input';
-import { useChildTables } from './related-tables';
+import { relatedTableKey, useRelatedTables, type RelatedTable } from './related-tables';
 import { useT } from '@/lib/i18n/locale-context';
 
 interface Props {
@@ -109,10 +109,10 @@ export function PopupEditor({ value, metadata, onChange, source }: Props) {
 }
 
 /**
- * Related records: child tables of this sublayer (same data_layer
- * item, `parentLayerId` pointing here) that the popup lists under the
- * attributes. Children are discovered from the item, so a layer with
- * none shows a one-line note instead of an empty picker.
+ * Related records: the related tables of this sublayer (in-item
+ * children and relationships declared to other items, see
+ * resolveRelatedTables) that the popup lists under the attributes. A
+ * layer with none shows a one-line note instead of an empty picker.
  */
 function RelatedEditor({
   value,
@@ -126,10 +126,13 @@ function RelatedEditor({
   onPatch: (p: Partial<MapLayerPopup>) => void;
 }) {
   const t = useT();
-  const { children, failed } = useChildTables(itemId, layerKey);
+  const { tables, failed } = useRelatedTables(itemId, layerKey);
 
   const related = value.related ?? [];
   const setRelated = (next: MapLayerPopupRelated[]) => onPatch({ related: next });
+  // A popup entry with no itemId is in the layer's own item.
+  const matches = (r: MapLayerPopupRelated, table: RelatedTable) =>
+    r.layerKey === table.layer.id && (r.itemId ?? itemId) === table.itemId;
 
   return (
     <div className="space-y-2 border-t border-border pt-3">
@@ -138,19 +141,22 @@ function RelatedEditor({
       </label>
       {failed ? (
         <p className="text-2xs text-danger">{t('mapPopupRelated.loadFailed')}</p>
-      ) : children === null ? (
+      ) : tables === null ? (
         <p className="text-2xs text-muted">{t('mapPopupEditor.loading')}</p>
-      ) : children.length === 0 ? (
+      ) : tables.length === 0 ? (
         <p className="text-2xs text-muted">{t('mapPopupRelated.noChildren')}</p>
       ) : (
         <ul className="space-y-2">
-          {children.map((child) => {
-            const cfg = related.find((r) => r.layerKey === child.id);
-            const childFields = child.fields
+          {tables.map((table) => {
+            const cfg = related.find((r) => matches(r, table));
+            const childFields = table.layer.fields
               .map((f) => f.name)
-              .filter((n) => n !== child.parentFkColumn);
+              .filter((n) => n !== table.fkColumn);
             return (
-              <li key={child.id} className="rounded-md border border-border bg-surface-1 p-2">
+              <li
+                key={relatedTableKey(table)}
+                className="rounded-md border border-border bg-surface-1 p-2"
+              >
                 <label className="flex items-center gap-2 text-xs text-ink-1">
                   <input
                     type="checkbox"
@@ -160,26 +166,27 @@ function RelatedEditor({
                         setRelated([
                           ...related,
                           {
-                            layerKey: child.id,
-                            label: child.label,
-                            fkColumn: child.parentFkColumn!,
+                            ...(table.itemId !== itemId ? { itemId: table.itemId } : {}),
+                            layerKey: table.layer.id,
+                            label: table.label,
+                            fkColumn: table.fkColumn,
                             fields: [],
                             limit: POPUP_RELATED_DEFAULT_ROWS,
                           },
                         ]);
                       } else {
-                        setRelated(related.filter((r) => r.layerKey !== child.id));
+                        setRelated(related.filter((r) => !matches(r, table)));
                       }
                     }}
                   />
-                  <span className="font-medium">{child.label}</span>
+                  <span className="font-medium">{table.label}</span>
                 </label>
                 {cfg ? (
                   <RelatedRowSettings
                     cfg={cfg}
                     fields={childFields}
                     onChange={(next) =>
-                      setRelated(related.map((r) => (r.layerKey === child.id ? next : r)))
+                      setRelated(related.map((r) => (matches(r, table) ? next : r)))
                     }
                   />
                 ) : null}

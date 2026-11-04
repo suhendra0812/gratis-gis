@@ -2084,6 +2084,27 @@ export const fr: Partial<CatalogShape> = {
     dataIntro:
       'Parcourez les lignes de chaque couche, ajoutez des données ou téléchargez-les.',
   },
+  v3Relationships: {
+    heading: "Relations",
+    intro: "Tables liées d’une couche, dans cette couche de données ou une autre. Les fenêtres contextuelles, le panneau Modifier l’entité de la carte et l’app de terrain listent d’ici les lignes liées d’une entité.",
+    add: "Ajouter une relation",
+    none: "Aucune relation déclarée ici. Les tables créées avec « Add event-tracking layer » sont déjà liées.",
+    thisItem: "Cette couche de données",
+    remove: "Retirer la relation",
+    newHeading: "Nouvelle relation",
+    parentLayer: "Couche",
+    relatedItem: "Couche de données liée",
+    relatedTable: "Table liée",
+    linkField: "Champ de liaison",
+    linkFieldHint: "Le champ texte de la table liée qui contient l’identifiant de l’entité.",
+    noTextFields: "Cette table n’a aucun champ texte pour la liaison",
+    label: "Nom",
+    pick: "Choisir…",
+    loading: "Chargement…",
+    loadFailed: "Impossible de charger les couches de données.",
+    cancel: "Annuler",
+    addConfirm: "Ajouter",
+  },
   layerExport: {
     format: {
       csv: 'CSV',

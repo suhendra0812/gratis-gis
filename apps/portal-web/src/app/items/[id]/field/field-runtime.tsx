@@ -188,12 +188,26 @@ export interface EditableLayer {
    *  the child layer in the picker. Only children whose layerKey
    *  also appears in editableLayers should get a wired Add button --
    *  others are visible as descriptive lines but Add is disabled. */
-  childLayers?: Array<{
-    layerKey: string;
-    layerLabel: string;
-    geometryType: LayerGeometryType;
-    parentFkColumn: string;
-  }>;
+  childLayers?: Array<RelatedChildLayer>;
+}
+
+/**
+ * A related table of an editable layer (see `childLayers`). It lives
+ * in the parent's data_layer unless `dataLayerId` names another one: a
+ * relationship declared to a table in a different item.
+ */
+export interface RelatedChildLayer {
+  layerKey: string;
+  layerLabel: string;
+  geometryType: LayerGeometryType;
+  parentFkColumn: string;
+  /** The related table's data_layer, when not the parent's. */
+  dataLayerId?: string;
+}
+
+/** State key for a related table, unique across items. */
+function childKey(c: { layerKey: string; dataLayerId?: string }): string {
+  return c.dataLayerId ? `${c.dataLayerId}:${c.layerKey}` : c.layerKey;
 }
 
 /**
@@ -232,14 +246,7 @@ type RelatedRowsState = {
 function useRelatedRowsByChild(args: {
   parentDataLayerId: string | null;
   parentId: string | null;
-  childLayers:
-    | Array<{
-        layerKey: string;
-        layerLabel: string;
-        geometryType: LayerGeometryType;
-        parentFkColumn: string;
-      }>
-    | undefined;
+  childLayers: RelatedChildLayer[] | undefined;
   dataCollectionId: string;
   isOnline: boolean;
   /** Pending child rows are read from the offline queue, which is
@@ -264,7 +271,7 @@ function useRelatedRowsByChild(args: {
     setState((prev) => {
       const next: Record<string, RelatedRowsState> = { ...prev };
       for (const c of children) {
-        next[c.layerKey] = { loading: true, error: null, rows: [] };
+        next[childKey(c)] = { loading: true, error: null, rows: [] };
       }
       return next;
     });
@@ -278,7 +285,7 @@ function useRelatedRowsByChild(args: {
           for (const q of all) {
             if (q.op !== 'insert') continue;
             if (q.syncStatus !== 'pending') continue;
-            if (q.dataLayerId !== parentDataLayerId) continue;
+            if (q.dataLayerId !== (c.dataLayerId ?? parentDataLayerId)) continue;
             if (q.layerKey !== c.layerKey) continue;
             const props = (q.properties ?? {}) as Record<string, unknown>;
             if (props[c.parentFkColumn] !== parentId) continue;
@@ -289,7 +296,7 @@ function useRelatedRowsByChild(args: {
               _pending: true,
             });
           }
-          out.set(c.layerKey, matches);
+          out.set(childKey(c), matches);
         }
       } catch (err) {
         // eslint-disable-next-line no-console
@@ -306,10 +313,10 @@ function useRelatedRowsByChild(args: {
         setState((prev) => {
           const next: Record<string, RelatedRowsState> = { ...prev };
           for (const c of children) {
-            next[c.layerKey] = {
+            next[childKey(c)] = {
               loading: false,
               error: null,
-              rows: queuedByLayer.get(c.layerKey) ?? [],
+              rows: queuedByLayer.get(childKey(c)) ?? [],
             };
           }
           return next;
@@ -319,10 +326,10 @@ function useRelatedRowsByChild(args: {
 
       await Promise.all(
         children.map(async (c) => {
-          const queued = queuedByLayer.get(c.layerKey) ?? [];
+          const queued = queuedByLayer.get(childKey(c)) ?? [];
           try {
             const url =
-              `/api/portal/items/${parentDataLayerId}/layers/${c.layerKey}` +
+              `/api/portal/items/${c.dataLayerId ?? parentDataLayerId}/layers/${c.layerKey}` +
               `/features?parentFk=${encodeURIComponent(c.parentFkColumn)}` +
               `&parentId=${encodeURIComponent(parentId)}`;
             const res = await fetch(url, {
@@ -351,13 +358,13 @@ function useRelatedRowsByChild(args: {
             const rows = [...stillPending, ...synced];
             setState((prev) => ({
               ...prev,
-              [c.layerKey]: { loading: false, error: null, rows },
+              [childKey(c)]: { loading: false, error: null, rows },
             }));
           } catch (err) {
             if ((err as { name?: string })?.name === 'AbortError') return;
             setState((prev) => ({
               ...prev,
-              [c.layerKey]: {
+              [childKey(c)]: {
                 loading: false,
                 error:
                   err instanceof Error ? err.message : 'Failed to load',
@@ -4639,13 +4646,13 @@ function FormModal({
                 {(modal.layer.childLayers ?? []).map((c) => {
                   const childEditable = editableLayers.find(
                     (e) =>
-                      e.dataLayerId === modal.layer.dataLayerId &&
+                      e.dataLayerId === (c.dataLayerId ?? modal.layer.dataLayerId) &&
                       e.layerKey === c.layerKey,
                   );
-                  const state = relatedRowsByChild[c.layerKey];
+                  const state = relatedRowsByChild[childKey(c)];
                   const count = state?.rows.length ?? 0;
                   return (
-                    <div key={c.layerKey} className="space-y-2">
+                    <div key={childKey(c)} className="space-y-2">
                       {/* #247 / #249.21: per-child header row. Bumped
                           to text-base for the layer name + thumb-
                           friendly Add button, since this is a primary
@@ -5197,12 +5204,14 @@ function FieldFeaturePopupSheet({
                 <div className="border-t border-border bg-surface-0/50">
                   {(parentEditable.childLayers ?? []).map((c) => {
                     const child = editableLayers.find(
-                      (e) => e.layerKey === c.layerKey,
+                      (e) =>
+                        e.dataLayerId === (c.dataLayerId ?? parentEditable.dataLayerId) &&
+                        e.layerKey === c.layerKey,
                     );
-                    const rowsState = relatedRowsByChild[c.layerKey];
+                    const rowsState = relatedRowsByChild[childKey(c)];
                     return (
                       <section
-                        key={c.layerKey}
+                        key={childKey(c)}
                         className="border-t border-border first:border-t-0 px-3 py-3"
                       >
                         <div className="mb-2 flex items-baseline justify-between gap-2">

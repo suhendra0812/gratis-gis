@@ -30,6 +30,18 @@ Maps reference data layers; data layers reference nothing.
 - **Optional related sublayers**. Non-spatial tables whose rows
  reference a parent feature. Used for one-to-many attribute data,
  inspection histories, photo metadata, etc.
+- **Optional relationships to other data layers**. On the
+ **Structure** tab, **Relationships** → **Add relationship** links a
+ layer here to a table in another data layer (or this one): pick the
+ layer, the related data layer and table, and the related table's
+ text field that holds the feature's ID. Inspections or work orders
+ kept in their own data layer, shared by several asset layers, are
+ the usual case. Tables made with **Add event-tracking layer** are
+ related already and need no entry. Map popups, the map's Edit
+ feature panel and the field app list and add related rows through
+ both kinds alike. Declaring one needs edit rights here only; who
+ can read or change the related rows is still that data layer's
+ sharing.
 - **Optional attachments**. Files (typically photos) bound to a
  specific feature. Stored in MinIO, the metadata row in the
  `feature_attachment` table.

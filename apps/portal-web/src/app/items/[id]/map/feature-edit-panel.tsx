@@ -11,8 +11,9 @@
  *    in one PATCH (the parent hook owns that call).
  *  - The shape is live on the map as soon as the panel opens; this
  *    panel only reports whether it changed.
- *  - Related records are the rows of each related table (sublayers of
- *    the same item whose parent is this layer). A row opens its own
+ *  - Related records are the rows of each related table: in-item
+ *    children and relationships declared to other data_layer items
+ *    (resolveRelatedTables). A row opens its own
  *    form in place of the feature's, the way the Editor widget drills
  *    into a related record; Back returns with the feature's unsaved
  *    edits intact, because its form stays mounted (hidden) meanwhile.
@@ -21,14 +22,14 @@
 
 import { useCallback, useEffect, useState } from 'react';
 import { ChevronRight, Loader2, Plus, Trash2 } from 'lucide-react';
-import type { DataLayerSublayer, FeatureField, PickListData } from '@gratis-gis/shared-types';
+import type { FeatureField, PickListData } from '@gratis-gis/shared-types';
 import { toast } from '@/lib/toast';
 import { parseApiError } from '@/lib/api-error';
 import { useT } from '@/lib/i18n/locale-context';
 import { useConfirm } from '@/components/dialog-provider';
 import { changedValues } from '@/lib/feature-attribute-diff';
 import { AttributeForm } from '../editor/attribute-form';
-import { useChildTables } from './related-tables';
+import { relatedTableKey, useRelatedTables, type RelatedTable } from './related-tables';
 
 /** Most related rows listed per table; the panel is not a table view. */
 const RELATED_ROW_LIMIT = 50;
@@ -55,8 +56,8 @@ export interface FeatureEditPanelProps {
 
 type View =
   | { kind: 'feature' }
-  | { kind: 'related-edit'; table: DataLayerSublayer; row: Record<string, unknown> }
-  | { kind: 'related-add'; table: DataLayerSublayer };
+  | { kind: 'related-edit'; table: RelatedTable; row: Record<string, unknown> }
+  | { kind: 'related-add'; table: RelatedTable };
 
 export function FeatureEditPanel(props: FeatureEditPanelProps) {
   const t = useT();
@@ -72,15 +73,16 @@ export function FeatureEditPanel(props: FeatureEditPanelProps) {
     setRelatedError(null);
   }, []);
 
-  const rowUrl = (table: DataLayerSublayer, rowId?: string) =>
-    `/api/portal/items/${props.itemId}/layers/${encodeURIComponent(table.id)}/features${
+  // A related table may sit in another data_layer item.
+  const rowUrl = (table: RelatedTable, rowId?: string) =>
+    `/api/portal/items/${table.itemId}/layers/${encodeURIComponent(table.layer.id)}/features${
       rowId ? `/${encodeURIComponent(rowId)}` : ''
     }`;
 
   const saveRelated = async (values: Record<string, unknown>) => {
     if (view.kind === 'feature') return;
     const table = view.table;
-    const fk = table.parentFkColumn!;
+    const fk = table.fkColumn;
     setRelatedBusy(true);
     setRelatedError(null);
     try {
@@ -158,8 +160,8 @@ export function FeatureEditPanel(props: FeatureEditPanelProps) {
     }
   };
 
-  const childFields = (table: DataLayerSublayer) =>
-    table.fields.filter((f) => f.name !== table.parentFkColumn);
+  const childFields = (table: RelatedTable) =>
+    table.layer.fields.filter((f) => f.name !== table.fkColumn);
 
   return (
     <aside
@@ -216,7 +218,7 @@ export function FeatureEditPanel(props: FeatureEditPanelProps) {
             key={
               view.kind === 'related-edit'
                 ? `edit:${String(view.row._global_id)}`
-                : `add:${view.table.id}`
+                : `add:${relatedTableKey(view.table)}`
             }
             fields={childFields(view.table)}
             editableFieldNames={null}
@@ -292,17 +294,16 @@ function RelatedRecords({
   layerKey: string;
   parentId: string;
   version: number;
-  onOpen: (table: DataLayerSublayer, row: Record<string, unknown>) => void;
-  onAdd: (table: DataLayerSublayer) => void;
+  onOpen: (table: RelatedTable, row: Record<string, unknown>) => void;
+  onAdd: (table: RelatedTable) => void;
 }) {
-  const { children, failed } = useChildTables(itemId, layerKey);
-  if (failed || !children || children.length === 0) return null;
+  const { tables, failed } = useRelatedTables(itemId, layerKey);
+  if (failed || !tables || tables.length === 0) return null;
   return (
     <>
-      {children.map((table) => (
-        <RelatedTable
-          key={table.id}
-          itemId={itemId}
+      {tables.map((table) => (
+        <RelatedTableSection
+          key={relatedTableKey(table)}
           table={table}
           parentId={parentId}
           version={version}
@@ -314,16 +315,14 @@ function RelatedRecords({
   );
 }
 
-function RelatedTable({
-  itemId,
+function RelatedTableSection({
   table,
   parentId,
   version,
   onOpen,
   onAdd,
 }: {
-  itemId: string;
-  table: DataLayerSublayer;
+  table: RelatedTable;
   parentId: string;
   version: number;
   onOpen: (row: Record<string, unknown>) => void;
@@ -333,7 +332,7 @@ function RelatedTable({
   const [rows, setRows] = useState<Record<string, unknown>[] | null>(null);
   const [more, setMore] = useState(false);
   const [failed, setFailed] = useState(false);
-  const fk = table.parentFkColumn!;
+  const fk = table.fkColumn;
 
   useEffect(() => {
     const ctrl = new AbortController();
@@ -344,7 +343,7 @@ function RelatedTable({
       limit: String(RELATED_ROW_LIMIT),
     });
     fetch(
-      `/api/portal/items/${itemId}/layers/${encodeURIComponent(table.id)}/features?${qs}`,
+      `/api/portal/items/${table.itemId}/layers/${encodeURIComponent(table.layer.id)}/features?${qs}`,
       { cache: 'no-store', signal: ctrl.signal },
     )
       .then((res) => (res.ok ? res.json() : Promise.reject(new Error(String(res.status)))))
@@ -361,11 +360,11 @@ function RelatedTable({
         if ((err as { name?: string }).name !== 'AbortError') setFailed(true);
       });
     return () => ctrl.abort();
-  }, [itemId, table.id, fk, parentId, version]);
+  }, [table.itemId, table.layer.id, fk, parentId, version]);
 
   // Adding needs no geometry only on an attribute table; a spatial
   // related layer is added by drawing, which this panel does not do.
-  const canAdd = table.geometryType === null;
+  const canAdd = table.layer.geometryType === null;
 
   return (
     <section className="rounded-md border border-border">
@@ -420,10 +419,10 @@ function RelatedTable({
 }
 
 /** First three filled values of a related row, in declared field order. */
-function rowSummary(row: Record<string, unknown>, table: DataLayerSublayer): string {
+function rowSummary(row: Record<string, unknown>, table: RelatedTable): string {
   const parts: string[] = [];
-  for (const f of table.fields) {
-    if (f.name === table.parentFkColumn) continue;
+  for (const f of table.layer.fields) {
+    if (f.name === table.fkColumn) continue;
     const v = row[f.name];
     if (v === null || v === undefined || v === '') continue;
     parts.push(String(v));

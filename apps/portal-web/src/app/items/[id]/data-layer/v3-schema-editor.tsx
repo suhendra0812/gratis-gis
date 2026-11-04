@@ -13,6 +13,7 @@ import { DataLayerBuilder } from '@/app/items/new/data-layer-builder';
 import { useT } from '@/lib/i18n/locale-context';
 import { useV3Editor } from './v3-editor-context';
 import { V3LayerDataPanel } from './v3-layer-data-panel';
+import { RelationshipsEditor } from './relationships-editor';
 
 /**
  * Detail-page editing surfaces for v3 data_layer items, split across
@@ -155,6 +156,15 @@ export function V3StructureSection({
       >
         <DataLayerBuilder value={data} onChange={setData} />
       </fieldset>
+
+      {/* Relationships declared from a parent layer, including to
+          tables in other data layers. Saved with the schema. */}
+      <RelationshipsEditor
+        itemId={itemId}
+        data={data}
+        onChange={setData}
+        canEdit={canEdit}
+      />
 
       {error ? (
         <p role="alert" className="text-sm text-danger">

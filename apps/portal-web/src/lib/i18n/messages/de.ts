@@ -2084,6 +2084,27 @@ export const de: Partial<CatalogShape> = {
     dataIntro:
       'Durchsuchen Sie die Zeilen jedes Layers, fügen Sie Daten hinzu oder laden Sie sie herunter.',
   },
+  v3Relationships: {
+    heading: "Beziehungen",
+    intro: "Verknüpfte Tabellen eines Layers, in diesem oder einem anderen Datenlayer. Karten-Popups, das Bearbeitungsfenster der Karte und die Feld-App zeigen die verknüpften Zeilen eines Features von hier.",
+    add: "Beziehung hinzufügen",
+    none: "Hier sind keine Beziehungen deklariert. Mit „Add event-tracking layer“ erstellte Tabellen sind bereits verknüpft.",
+    thisItem: "Dieser Datenlayer",
+    remove: "Beziehung entfernen",
+    newHeading: "Neue Beziehung",
+    parentLayer: "Layer",
+    relatedItem: "Verknüpfter Datenlayer",
+    relatedTable: "Verknüpfte Tabelle",
+    linkField: "Verknüpfungsfeld",
+    linkFieldHint: "Das Textfeld der verknüpften Tabelle, das die ID des Features enthält.",
+    noTextFields: "Diese Tabelle hat kein Textfeld zum Verknüpfen",
+    label: "Name",
+    pick: "Auswählen…",
+    loading: "Wird geladen…",
+    loadFailed: "Datenlayer konnten nicht geladen werden.",
+    cancel: "Abbrechen",
+    addConfirm: "Hinzufügen",
+  },
   layerExport: {
     format: {
       csv: 'CSV',

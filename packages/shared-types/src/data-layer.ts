@@ -219,6 +219,89 @@ export interface DataLayerDataV2 {
  */
 export type LayerGeometryType = 'point' | 'line' | 'polygon' | null;
 
+/**
+ * A related table declared on a parent sublayer: the rows of
+ * `childItemId` / `childLayerId` whose `fkColumn` holds a parent
+ * feature's `_global_id`. The child may live in another data_layer
+ * item (inspections kept in their own item, shared by several asset
+ * layers). Declaring it needs edit rights on the parent only; reading
+ * or writing the rows is still governed by the child item's sharing.
+ */
+export interface SublayerRelationship {
+  /** Stable id, unique within the parent sublayer. */
+  id: string;
+  /** Display name for the related table, e.g. "Inspections". */
+  label: string;
+  /** data_layer item holding the related table; may be this item. */
+  childItemId: string;
+  /** Sublayer id of the related table within `childItemId`. */
+  childLayerId: string;
+  /**
+   * DECLARED field on the related table holding the parent's
+   * `_global_id`. It must be declared: the feature API silently drops
+   * a parentFk filter on an undeclared column and would return every
+   * row of the table.
+   */
+  fkColumn: string;
+}
+
+/** One related table of a sublayer, from either declaration style. */
+export interface RelatedTableRef {
+  itemId: string;
+  layerId: string;
+  fkColumn: string;
+  /** Label to show; the in-item child's own label or the relationship's. */
+  label: string;
+}
+
+/**
+ * Every related table of `layerKey` in a v3 item: in-item children
+ * (`parentLayerId` + `parentFkColumn` on the child) first, then the
+ * relationships the parent declares, deduplicated.
+ *
+ * Legacy in-item children saved before `parentLayerId` existed carry
+ * only `parentFkColumn`. They are attributed to the item's single
+ * spatial layer when there is exactly one, and to none otherwise:
+ * the old field app treated them as children of EVERY spatial layer,
+ * which listed one asset's inspections under unrelated layers.
+ */
+export function relatedTableRefs(
+  itemId: string,
+  layers: readonly DataLayerSublayer[],
+  layerKey: string,
+): RelatedTableRef[] {
+  const out: RelatedTableRef[] = [];
+  const seen = new Set<string>();
+  const push = (ref: RelatedTableRef) => {
+    const key = `${ref.itemId}:${ref.layerId}:${ref.fkColumn}`;
+    if (seen.has(key) || !ref.fkColumn) return;
+    seen.add(key);
+    out.push(ref);
+  };
+  const spatial = layers.filter((l) => l.geometryType !== null);
+  for (const l of layers) {
+    if (l.id === layerKey || !l.parentFkColumn) continue;
+    const parentOk =
+      l.parentLayerId !== undefined
+        ? l.parentLayerId === layerKey
+        : spatial.length === 1 && spatial[0]!.id === layerKey;
+    if (!parentOk) continue;
+    push({ itemId, layerId: l.id, fkColumn: l.parentFkColumn, label: l.label || l.id });
+  }
+  const parent = layers.find((l) => l.id === layerKey);
+  for (const r of parent?.relationships ?? []) {
+    if (!r.childItemId || !r.childLayerId) continue;
+    if (r.childItemId === itemId && r.childLayerId === layerKey) continue;
+    push({
+      itemId: r.childItemId,
+      layerId: r.childLayerId,
+      fkColumn: r.fkColumn,
+      label: r.label || r.childLayerId,
+    });
+  }
+  return out;
+}
+
 export interface DataLayerSublayer {
   /** Stable within the item. Used in table name + API paths. */
   id: string;
@@ -253,6 +336,13 @@ export interface DataLayerSublayer {
   parentLayerId?: string;
   /** Column on this layer's table holding the parent's global_id. */
   parentFkColumn?: string;
+  /**
+   * Related tables declared from THIS (parent) side, including tables
+   * in other data_layer items. In-item children that name this layer
+   * through `parentLayerId` are related too; `relatedTableRefs` merges
+   * both, and is the one place either is read.
+   */
+  relationships?: SublayerRelationship[];
   /** Per-layer feature counts / bbox, populated after ingest. */
   featureCount?: number;
   bbox?: [number, number, number, number] | null;

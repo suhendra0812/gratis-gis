@@ -2213,6 +2213,27 @@ export const en = {
     dataTitle: 'Layer data',
     dataIntro: 'Browse the rows in each layer, add more data, or download it.',
   },
+  v3Relationships: {
+    heading: "Relationships",
+    intro: "Related tables of a layer, in this data layer or another one. Map popups, the map’s Edit feature panel and the field app list a feature’s related rows from here.",
+    add: "Add relationship",
+    none: "No relationships declared here. Tables made with “Add event-tracking layer” are related already.",
+    thisItem: "This data layer",
+    remove: "Remove relationship",
+    newHeading: "New relationship",
+    parentLayer: "Layer",
+    relatedItem: "Related data layer",
+    relatedTable: "Related table",
+    linkField: "Link field",
+    linkFieldHint: "The text field on the related table that holds the feature’s ID.",
+    noTextFields: "This table has no text field to link with",
+    label: "Name",
+    pick: "Choose…",
+    loading: "Loading…",
+    loadFailed: "Could not load data layers.",
+    cancel: "Cancel",
+    addConfirm: "Add",
+  },
   // Client side export of loaded rows (attribute table, feature
   // browser). Format names are catalogued so a locale can pick its
   // own spelling of "Excel".

@@ -4298,8 +4298,9 @@ function popupBody(
 }
 
 /**
- * Related-record sections (popup.related): one per configured child
- * table, each filling itself in when its rows arrive. Rows are read
+ * Related-record sections (popup.related): one per configured related
+ * table (in this item or another), each filling itself in when its
+ * rows arrive. Rows are read
  * through the child layer's `parentFk` / `parentId` filter, which the
  * server validates against the layer schema and scopes to what the
  * viewer may read. Every value is set as text, never as markup.
@@ -4339,8 +4340,10 @@ function popupRelatedSections(
       parentId,
       limit: String(limit),
     });
+    // A related table may sit in another data_layer item.
+    const relItemId = rel.itemId ?? itemId;
     fetch(
-      `/api/portal/items/${itemId}/layers/${encodeURIComponent(rel.layerKey)}/features?${qs}`,
+      `/api/portal/items/${relItemId}/layers/${encodeURIComponent(rel.layerKey)}/features?${qs}`,
       { cache: 'no-store' },
     )
       .then((res) => (res.ok ? res.json() : Promise.reject(new Error(String(res.status)))))

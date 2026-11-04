@@ -1,18 +1,24 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { notFound } from 'next/navigation';
 import type { Metadata } from 'next';
-import type {
-  BasemapData,
-  DataCollectionData,
-  DataLayerData,
-  Item,
-  MapData,
-  PickListData,
+import {
+  relatedTableRefs,
+  type BasemapData,
+  type DataCollectionData,
+  type DataLayerData,
+  type Item,
+  type MapData,
+  type PickListData,
+  type RelatedTableRef,
 } from '@gratis-gis/shared-types';
 import type { FormSchema } from '@gratis-gis/form-schema';
 import type { CustomBasemap } from '@/lib/custom-basemap';
 import { apiFetch, hasSession, publicApiFetch } from '@/lib/api';
-import { FieldRuntime, type EditableLayer } from './field-runtime';
+import {
+  FieldRuntime,
+  type EditableLayer,
+  type RelatedChildLayer,
+} from './field-runtime';
 
 interface Props {
   params: Promise<{ id: string }>;
@@ -263,6 +269,13 @@ export default async function FieldRuntimePage(props: Props) {
   // Track (dataLayerId, layerKey) we've already pushed so the
   // table-sublayer pass below doesn't duplicate spatial entries.
   const seenLayerKey = new Set<string>();
+  // Related tables of each spatial editable layer pushed below (by its
+  // index in editableLayers), held until they can be resolved.
+  const pendingChildren: Array<{
+    index: number;
+    dataLayerId: string;
+    refs: RelatedTableRef[];
+  }> = [];
   for (const ref of dataLayerRefs) {
     const dlItem = dataLayerById.get(ref.dataLayerId);
     if (!dlItem) continue;
@@ -295,27 +308,14 @@ export default async function FieldRuntimePage(props: Props) {
     const addable =
       sublayer.editingEnabled !== false && ref.mapLayerEditable !== false;
     const binding = dc.formBindings?.[sublayer.id];
-    // Phase C: enumerate child layers within the same data_layer
-    // item that reference this layer via parentFkColumn. Used by
-    // FormModal's "Add related" affordance so a worker editing a
-    // tree feature can drop an inspection under it in one tap.
-    const childLayers = (data.layers ?? [])
-      .filter(
-        (l) =>
-          typeof l.parentFkColumn === 'string' &&
-          l.parentFkColumn.length > 0 &&
-          // Convention: parentFkColumn is the FK back to THIS sublayer
-          // when the column name encodes the parent's id (e.g., the
-          // wizard's Add-event-tracking-related-layer flow names it
-          // <parentLayerName>_id). Filter to only those.
-          l.id !== sublayer.id,
-      )
-      .map((l) => ({
-        layerKey: l.id,
-        layerLabel: l.label ?? l.id,
-        geometryType: l.geometryType,
-        parentFkColumn: l.parentFkColumn as string,
-      }));
+    // Related tables (in-item children and relationships declared
+    // to other data layers) are resolved after this pass: the ones in
+    // other items may still need fetching.
+    pendingChildren.push({
+      index: editableLayers.length,
+      dataLayerId: dlItem.id,
+      refs: relatedTableRefs(dlItem.id, data.layers, sublayer.id),
+    });
     editableLayers.push({
       dataLayerId: dlItem.id,
       dataLayerTitle: dlItem.title,
@@ -330,10 +330,53 @@ export default async function FieldRuntimePage(props: Props) {
       editingPolicy: sublayer.editingPolicy ?? 'all-rows',
       addable,
       ...(binding ? { boundFormItemId: binding.formItemId } : {}),
-      ...(childLayers.length > 0 ? { childLayers } : {}),
     });
     seenLayerKey.add(`${dlItem.id}:${sublayer.id}`);
   }
+
+  // Related tables in data layers the map does not show still need
+  // their schema (label, fields, geometry) for the related lists and
+  // the Add related form. Fetch those items once each.
+  const missingChildItemIds = Array.from(
+    new Set(
+      pendingChildren.flatMap((p) => p.refs.map((r) => r.itemId)),
+    ),
+  ).filter((id) => !dataLayerById.has(id));
+  const missingChildItems = await Promise.all(
+    missingChildItemIds.map((id) =>
+      fetchItem<Item<DataLayerData>>(`/api/items/${id}`).catch(() => null),
+    ),
+  );
+  missingChildItemIds.forEach((id, i) => {
+    const item = missingChildItems[i];
+    if (item) dataLayerById.set(id, item);
+  });
+
+  // Attach each spatial layer's related tables. This used to list
+  // every table with a parentFkColumn under EVERY spatial layer of the
+  // item; relatedTableRefs keeps each under its own parent.
+  pendingChildren.forEach(({ index, dataLayerId, refs }) => {
+    const entry = editableLayers[index];
+    if (!entry || entry.dataLayerId !== dataLayerId) return;
+    const childLayers: RelatedChildLayer[] = [];
+    for (const r of refs) {
+      const d = dataLayerById.get(r.itemId)?.data as DataLayerData | undefined;
+      if (!d || d.version !== 3) continue;
+      const l = d.layers.find((x) => x.id === r.layerId);
+      if (!l) continue;
+      // In another item the link must be a declared field: the API
+      // ignores a parent filter on an undeclared column.
+      if (r.itemId !== dataLayerId && !l.fields.some((f) => f.name === r.fkColumn)) continue;
+      childLayers.push({
+        layerKey: l.id,
+        layerLabel: r.label,
+        geometryType: l.geometryType,
+        parentFkColumn: r.fkColumn,
+        ...(r.itemId !== dataLayerId ? { dataLayerId: r.itemId } : {}),
+      });
+    }
+    if (childLayers.length > 0) entry.childLayers = childLayers;
+  });
   // Second pass: pull in table-typed child sublayers referenced from
   // any spatial parent we just registered. These don't show on the
   // map (no geometry) but the parent-feature edit drawer's "Add
@@ -341,20 +384,20 @@ export default async function FieldRuntimePage(props: Props) {
   // Without this pass the button stays disabled even when the
   // schema declares a child relationship.
   for (const parent of [...editableLayers]) {
-    const dlItem = dataLayerById.get(parent.dataLayerId);
-    if (!dlItem) continue;
-    const data = dlItem.data as DataLayerData | undefined;
-    if (!data || data.version !== 3) continue;
     for (const child of parent.childLayers ?? []) {
       if (child.geometryType !== null) continue; // spatial children already covered by their own map ref
-      const key = `${parent.dataLayerId}:${child.layerKey}`;
+      const childDataLayerId = child.dataLayerId ?? parent.dataLayerId;
+      const key = `${childDataLayerId}:${child.layerKey}`;
       if (seenLayerKey.has(key)) continue;
+      const dlItem = dataLayerById.get(childDataLayerId);
+      const data = dlItem?.data as DataLayerData | undefined;
+      if (!dlItem || !data || data.version !== 3) continue;
       const sub = data.layers.find((l) => l.id === child.layerKey);
       if (!sub) continue;
       const binding = dc.formBindings?.[sub.id];
       editableLayers.push({
-        dataLayerId: parent.dataLayerId,
-        dataLayerTitle: parent.dataLayerTitle,
+        dataLayerId: childDataLayerId,
+        dataLayerTitle: dlItem.title,
         layerKey: sub.id,
         layerLabel: sub.label ?? sub.id,
         geometryType: sub.geometryType,

@@ -29,9 +29,10 @@ text.
  formatting (date format, number precision, percent).
 - **Attachments section.** Toggle on if the layer has attachments;
  thumbnails open in a lightbox.
-- **Related records.** For a data layer with related tables (other
- layers in the same data layer item that have this layer as their
- parent, such as inspections of an asset), tick each table to list
+- **Related records.** For a data layer with related tables (tables
+ in the same data layer item that have this layer as their parent,
+ such as inspections of an asset, and tables in other data layers
+ linked under **Structure** → **Relationships**), tick each table to list
  under the attributes. For each one, pick the fields shown per row
  (default: the first three) and how many rows to list (up to 20).
  The rows load when the popup opens; when there are more, the
