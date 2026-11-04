@@ -2,16 +2,25 @@
 'use client';
 
 import { useMemo } from 'react';
-import { ArrowDown, ArrowUp, Trash2 } from 'lucide-react';
-import type { MapLayerPopup } from '@gratis-gis/shared-types';
+import { ArrowDown, ArrowUp, Trash2, X } from 'lucide-react';
+import {
+  POPUP_RELATED_DEFAULT_ROWS,
+  POPUP_RELATED_MAX_ROWS,
+  type MapLayerPopup,
+  type MapLayerPopupRelated,
+  type MapLayerSource,
+} from '@gratis-gis/shared-types';
 import type { LayerMetadata } from './layer-metadata';
 import { TemplateInput } from './template-input';
+import { useChildTables } from './related-tables';
 import { useT } from '@/lib/i18n/locale-context';
 
 interface Props {
   value: MapLayerPopup;
   metadata: LayerMetadata;
   onChange: (next: MapLayerPopup) => void;
+  /** The layer's source; related records need a v3 data-layer sublayer. */
+  source?: MapLayerSource | undefined;
 }
 
 /**
@@ -26,7 +35,7 @@ interface Props {
  * Mixed-mode popups (custom title + picked body, etc.) fall out
  * naturally from the independent title template + body mode knobs.
  */
-export function PopupEditor({ value, metadata, onChange }: Props) {
+export function PopupEditor({ value, metadata, onChange, source }: Props) {
   const t = useT();
 
   function patch(p: Partial<MapLayerPopup>) {
@@ -84,8 +93,181 @@ export function PopupEditor({ value, metadata, onChange }: Props) {
           {value.mode === 'template' ? (
             <TemplateEditor value={value} metadata={metadata} onPatch={patch} />
           ) : null}
+
+          {source?.kind === 'data-layer' && source.layerKey ? (
+            <RelatedEditor
+              value={value}
+              itemId={source.itemId}
+              layerKey={source.layerKey}
+              onPatch={patch}
+            />
+          ) : null}
         </>
       )}
+    </div>
+  );
+}
+
+/**
+ * Related records: child tables of this sublayer (same data_layer
+ * item, `parentLayerId` pointing here) that the popup lists under the
+ * attributes. Children are discovered from the item, so a layer with
+ * none shows a one-line note instead of an empty picker.
+ */
+function RelatedEditor({
+  value,
+  itemId,
+  layerKey,
+  onPatch,
+}: {
+  value: MapLayerPopup;
+  itemId: string;
+  layerKey: string;
+  onPatch: (p: Partial<MapLayerPopup>) => void;
+}) {
+  const t = useT();
+  const { children, failed } = useChildTables(itemId, layerKey);
+
+  const related = value.related ?? [];
+  const setRelated = (next: MapLayerPopupRelated[]) => onPatch({ related: next });
+
+  return (
+    <div className="space-y-2 border-t border-border pt-3">
+      <label className="block text-2xs uppercase tracking-wide text-muted">
+        {t('mapPopupRelated.heading')}
+      </label>
+      {failed ? (
+        <p className="text-2xs text-danger">{t('mapPopupRelated.loadFailed')}</p>
+      ) : children === null ? (
+        <p className="text-2xs text-muted">{t('mapPopupEditor.loading')}</p>
+      ) : children.length === 0 ? (
+        <p className="text-2xs text-muted">{t('mapPopupRelated.noChildren')}</p>
+      ) : (
+        <ul className="space-y-2">
+          {children.map((child) => {
+            const cfg = related.find((r) => r.layerKey === child.id);
+            const childFields = child.fields
+              .map((f) => f.name)
+              .filter((n) => n !== child.parentFkColumn);
+            return (
+              <li key={child.id} className="rounded-md border border-border bg-surface-1 p-2">
+                <label className="flex items-center gap-2 text-xs text-ink-1">
+                  <input
+                    type="checkbox"
+                    checked={cfg !== undefined}
+                    onChange={(e) => {
+                      if (e.target.checked) {
+                        setRelated([
+                          ...related,
+                          {
+                            layerKey: child.id,
+                            label: child.label,
+                            fkColumn: child.parentFkColumn!,
+                            fields: [],
+                            limit: POPUP_RELATED_DEFAULT_ROWS,
+                          },
+                        ]);
+                      } else {
+                        setRelated(related.filter((r) => r.layerKey !== child.id));
+                      }
+                    }}
+                  />
+                  <span className="font-medium">{child.label}</span>
+                </label>
+                {cfg ? (
+                  <RelatedRowSettings
+                    cfg={cfg}
+                    fields={childFields}
+                    onChange={(next) =>
+                      setRelated(related.map((r) => (r.layerKey === child.id ? next : r)))
+                    }
+                  />
+                ) : null}
+              </li>
+            );
+          })}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+function RelatedRowSettings({
+  cfg,
+  fields,
+  onChange,
+}: {
+  cfg: MapLayerPopupRelated;
+  fields: string[];
+  onChange: (next: MapLayerPopupRelated) => void;
+}) {
+  const t = useT();
+  const unpicked = fields.filter((f) => !cfg.fields.includes(f));
+  return (
+    <div className="mt-2 space-y-2 pl-6">
+      <div>
+        <span className="mb-1 block text-2xs text-muted">{t('mapPopupRelated.fields')}</span>
+        <div className="flex flex-wrap gap-1">
+          {cfg.fields.length === 0 ? (
+            <span className="text-2xs italic text-muted">{t('mapPopupRelated.fieldsDefault')}</span>
+          ) : (
+            cfg.fields.map((f) => (
+              <span
+                key={f}
+                className="inline-flex items-center gap-1 rounded bg-surface-2 px-1.5 py-0.5 text-2xs text-ink-1"
+              >
+                {f}
+                <button
+                  type="button"
+                  aria-label={t('mapPopupEditor.removeFieldAria')}
+                  onClick={() => onChange({ ...cfg, fields: cfg.fields.filter((x) => x !== f) })}
+                  className="text-muted hover:text-danger"
+                >
+                  <X className="h-3 w-3" />
+                </button>
+              </span>
+            ))
+          )}
+        </div>
+        <select
+          value=""
+          onChange={(e) => {
+            const f = e.target.value;
+            if (f) onChange({ ...cfg, fields: [...cfg.fields, f] });
+          }}
+          disabled={unpicked.length === 0}
+          aria-label={t('mapLayerPanel.search.addField')}
+          className="mt-1 h-7 w-full rounded border border-border bg-surface-1 px-2 text-xs focus:border-accent focus:outline-hidden disabled:opacity-50"
+        >
+          <option value="">
+            {unpicked.length === 0
+              ? t('mapLayerPanel.search.allFieldsAdded')
+              : t('mapLayerPanel.search.addField')}
+          </option>
+          {unpicked.map((f) => (
+            <option key={f} value={f}>
+              {f}
+            </option>
+          ))}
+        </select>
+      </div>
+      <label className="flex items-center gap-2 text-2xs text-muted">
+        {t('mapPopupRelated.maxRows')}
+        <input
+          type="number"
+          min={1}
+          max={POPUP_RELATED_MAX_ROWS}
+          value={cfg.limit}
+          onChange={(e) => {
+            const n = Math.min(
+              Math.max(Math.floor(Number(e.target.value)) || 1, 1),
+              POPUP_RELATED_MAX_ROWS,
+            );
+            onChange({ ...cfg, limit: n });
+          }}
+          className="h-7 w-16 rounded border border-border bg-surface-1 px-2 text-xs text-ink-1 focus:border-accent focus:outline-hidden"
+        />
+      </label>
     </div>
   );
 }

@@ -59,6 +59,13 @@ interface Props {
    * edits without being mistakable for the primary submit.
    */
   extraFooter?: React.ReactNode;
+  /**
+   * Optional content under the fields, inside the same scrolling
+   * body: the map's feature edit panel puts the shape status and the
+   * related records here, so the submit button stays pinned below
+   * everything the person can change.
+   */
+  extraBody?: React.ReactNode;
 }
 
 /**
@@ -100,6 +107,7 @@ export function AttributeForm({
   submitLabel = 'Save',
   title = 'New feature attributes',
   extraFooter,
+  extraBody,
 }: Props) {
   const t = useT();
   const [values, setValues] = useState<Record<string, unknown>>(() => {
@@ -173,6 +181,7 @@ export function AttributeForm({
             onChange={(v) => set(f.name, v)}
           />
         ))}
+        {extraBody}
         {missing.length > 0 && !submitting ? (
           <p className="text-xs text-warn">
             Required: {missing.join(', ')}

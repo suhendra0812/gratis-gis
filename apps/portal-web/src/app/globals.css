@@ -281,6 +281,86 @@
   font-size: 11px;
   line-height: 1.35;
 }
+/* Related-record sections (popup.related), between the attributes
+   and the action row. Built as DOM by the canvas, values as text. */
+.gg-popup-related-section {
+  margin-top: 0.5rem;
+  padding-top: 0.5rem;
+  border-top: 1px solid hsl(var(--border));
+}
+.gg-popup-related-title {
+  font-weight: 600;
+  font-size: 12px;
+  margin-bottom: 4px;
+}
+.gg-popup-related-list {
+  max-height: 160px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.gg-popup-related-list li {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 10px;
+  padding: 4px 6px;
+  border-radius: 4px;
+  background: hsl(var(--surface-2));
+  font-size: 12px;
+}
+.gg-popup-related-pair {
+  display: inline-flex;
+  gap: 4px;
+  word-break: break-word;
+}
+.gg-popup-related-key {
+  color: hsl(var(--muted));
+}
+.gg-popup-related-note {
+  color: hsl(var(--muted));
+  font-size: 11px;
+  font-style: italic;
+  margin-top: 2px;
+}
+/* Action row under the attributes (Zoom to, Edit, ...), the same
+   place ArcGIS Online puts them. Buttons are DOM nodes the canvas
+   appends after the escaped HTML, never part of it. */
+.gg-popup-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 0.5rem;
+  padding-top: 0.5rem;
+  border-top: 1px solid hsl(var(--border));
+}
+.gg-popup-action {
+  display: inline-flex;
+  align-items: center;
+  height: 26px;
+  padding: 0 8px;
+  border: 1px solid hsl(var(--border));
+  border-radius: 6px;
+  background: hsl(var(--surface-1));
+  color: hsl(var(--surface-1-ink));
+  font: 500 12px/1 ui-sans-serif, system-ui, sans-serif;
+  cursor: pointer;
+}
+.gg-popup-action:hover {
+  background: hsl(var(--surface-2));
+}
+.gg-popup-action:focus-visible {
+  outline: 2px solid hsl(var(--accent));
+  outline-offset: 1px;
+}
+.gg-popup-action[data-variant='primary'] {
+  border-color: hsl(var(--accent));
+  background: hsl(var(--accent));
+  color: hsl(var(--accent-ink));
+}
+.gg-popup-action[data-variant='danger'] {
+  color: hsl(var(--danger));
+}
 
 /* MapLibre owns the popup's outer chrome and hardcodes it to a white
    card with a white tip. That white never followed the theme, so in

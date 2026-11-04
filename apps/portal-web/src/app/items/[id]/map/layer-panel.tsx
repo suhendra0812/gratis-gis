@@ -1551,6 +1551,7 @@ function LayerRow({
                   <div className="border-t border-border pt-3">
                     <PopupEditor
                       value={layer.popup}
+                      source={layer.source}
                       metadata={metadata}
                       onChange={(popup) => onPatch({ popup })}
                     />

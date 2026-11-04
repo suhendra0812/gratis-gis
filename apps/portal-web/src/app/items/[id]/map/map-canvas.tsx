@@ -20,6 +20,8 @@ import type {
   MapLayerFilterClause,
 } from '@gratis-gis/shared-types';
 import {
+  POPUP_RELATED_DEFAULT_ROWS,
+  POPUP_RELATED_MAX_ROWS,
   ZOOM_MAX,
   ZOOM_MIN,
   dashArrayFor,
@@ -277,6 +279,28 @@ interface Props {
     properties: Record<string, unknown>;
     lngLat: { lng: number; lat: number };
   }) => void;
+  /**
+   * Action buttons under the click popup, the way ArcGIS Online puts
+   * Zoom to / Edit under a feature's attributes. "Zoom to" is always
+   * offered; Edit and Delete appear only for layers `canEdit` accepts. Without this prop the popup is read-only, as before.
+   */
+  popupActions?: PopupActions | undefined;
+}
+
+/** The feature a popup action applies to. */
+export interface PopupFeatureRef {
+  layerId: string;
+  /** Stable row id (`_global_id`) of a data-layer feature. */
+  featureId: string;
+  properties: Record<string, unknown>;
+}
+
+export interface PopupActions {
+  /** May this layer's features be edited from the popup? */
+  canEdit: (layerId: string) => boolean;
+  /** Open the feature in the edit panel (attributes, shape, related). */
+  onEdit: (ref: PopupFeatureRef) => void;
+  onDelete: (ref: PopupFeatureRef) => void;
 }
 
 export interface MapCanvasHandle {
@@ -351,6 +375,7 @@ export const MapCanvas = forwardRef<MapCanvasHandle, Props>(function MapCanvas(
     asOfTime,
     editClaimedLayerIds,
     onEditClaimedClick,
+    popupActions,
     hideNavigationControl = false,
     drawings,
   }: Props,
@@ -418,6 +443,9 @@ export const MapCanvas = forwardRef<MapCanvasHandle, Props>(function MapCanvas(
     onEditClaimedClick,
   );
   onEditClaimedClickRef.current = onEditClaimedClick;
+  // Same reason: the click handler is mounted once per layer set.
+  const popupActionsRef = useRef<PopupActions | undefined>(popupActions);
+  popupActionsRef.current = popupActions;
   // Refs the selection handlers read so we don't have to re-wire
   // mouse listeners every time the selection or tool changes.
   const selectionRef = useRef(selection);
@@ -1670,12 +1698,48 @@ export const MapCanvas = forwardRef<MapCanvasHandle, Props>(function MapCanvas(
         layer.source.kind === 'data-layer' &&
         !layer.id.startsWith('editor-target:');
       const fallbackProps = hit.properties ?? {};
+      // Zoom to prefers the server's copy of the geometry once it is
+      // fetched: a tile clips a polygon at its edge, so the rendered
+      // hit can be a fragment of the feature.
+      let zoomGeometry: GeoJSON.Geometry | null =
+        (hit.geometry as GeoJSON.Geometry | undefined) ?? null;
+      const popupLayer = layer;
+      const showFeature = (props: Record<string, unknown>) =>
+        popupBody(
+          renderPopupHtml(popupLayer, props, localeRef.current),
+          popupRelatedSections(popupLayer, props, localeRef.current, () => {
+            // The rows arrive after MapLibre placed the popup for its
+            // shorter self; re-setting the position re-runs its anchor
+            // choice so the taller card flips to the side that fits
+            // instead of running off the top of the map.
+            const p = popupRef.current;
+            if (p) p.setLngLat(p.getLngLat());
+          }),
+          popupActionBar({
+            layer: popupLayer,
+            properties: props,
+            hitId: hit.id,
+            actions: popupActionsRef.current,
+            locale: localeRef.current,
+            zoom: () => {
+              if (zoomGeometry) zoomToGeometry(m!, zoomGeometry);
+            },
+            closePopup: () => {
+              popupRef.current?.remove();
+              popupRef.current = null;
+            },
+          }),
+        );
       popupRef.current = new maplibregl.Popup({ closeOnClick: true, maxWidth: '320px' })
         .setLngLat(e.lngLat)
-        .setHTML(
+        .setDOMContent(
           isMvtFeature
-            ? '<div class="gg-popup-loading" style="padding:8px;color:#666;font-size:12px;">Loading…</div>'
-            : renderPopupHtml(layer, fallbackProps, localeRef.current),
+            ? popupBody(
+                '<div class="gg-popup-loading" style="padding:8px;color:#666;font-size:12px;">Loading…</div>',
+                null,
+                null,
+              )
+            : showFeature(fallbackProps),
         )
         .addTo(m!);
 
@@ -1686,7 +1750,7 @@ export const MapCanvas = forwardRef<MapCanvasHandle, Props>(function MapCanvas(
           (fallbackProps as Record<string, unknown>)._global_id;
         if (typeof featureId !== 'string' && typeof featureId !== 'number') {
           // No id to look up; show the limited tile-side properties.
-          popup.setHTML(renderPopupHtml(layer, fallbackProps, localeRef.current));
+          popup.setDOMContent(showFeature(fallbackProps));
         } else {
           const dataSource = layer.source;
           const url = dataSource.layerKey
@@ -1694,14 +1758,24 @@ export const MapCanvas = forwardRef<MapCanvasHandle, Props>(function MapCanvas(
             : `/api/portal/items/${dataSource.itemId}/features?entity=${encodeURIComponent(String(featureId))}`;
           fetch(url, { cache: 'no-store' })
             .then((res) => (res.ok ? res.json() : null))
-            .then((fc: { features?: Array<{ properties?: Record<string, unknown> }> } | null) => {
-              if (popupRef.current !== popup) return; // user already closed / moved on
-              const props = fc?.features?.[0]?.properties ?? fallbackProps;
-              popup.setHTML(renderPopupHtml(layer, props, localeRef.current));
-            })
+            .then(
+              (
+                fc: {
+                  features?: Array<{
+                    properties?: Record<string, unknown>;
+                    geometry?: GeoJSON.Geometry | null;
+                  }>;
+                } | null,
+              ) => {
+                if (popupRef.current !== popup) return; // user already closed / moved on
+                const full = fc?.features?.[0];
+                if (full?.geometry) zoomGeometry = full.geometry;
+                popup.setDOMContent(showFeature(full?.properties ?? fallbackProps));
+              },
+            )
             .catch(() => {
               if (popupRef.current === popup) {
-                popup.setHTML(renderPopupHtml(layer, fallbackProps, localeRef.current));
+                popup.setDOMContent(showFeature(fallbackProps));
               }
             });
         }
@@ -4201,6 +4275,254 @@ function sourceData(
     return { type: 'FeatureCollection', features: [] };
   }
   return null;
+}
+
+/**
+ * Popup content as a DOM node: the escaped HTML from renderPopupHtml,
+ * then the action row (if any) as real elements with real listeners.
+ * Keeping the buttons out of the HTML string means no markup from a
+ * feature's attributes can ever reach a click handler.
+ */
+function popupBody(
+  html: string,
+  related: HTMLElement | null,
+  actionBar: HTMLElement | null,
+): HTMLElement {
+  const el = document.createElement('div');
+  el.innerHTML = html;
+  // Inside .gg-popup so they share the card's padding and type.
+  const card = el.querySelector('.gg-popup') ?? el;
+  if (related) card.appendChild(related);
+  if (actionBar) card.appendChild(actionBar);
+  return el;
+}
+
+/**
+ * Related-record sections (popup.related): one per configured child
+ * table, each filling itself in when its rows arrive. Rows are read
+ * through the child layer's `parentFk` / `parentId` filter, which the
+ * server validates against the layer schema and scopes to what the
+ * viewer may read. Every value is set as text, never as markup.
+ */
+function popupRelatedSections(
+  layer: MapLayer,
+  props: Record<string, unknown>,
+  locale: SupportedLocale,
+  onFilled: () => void,
+): HTMLElement | null {
+  const related = layer.popup.related ?? [];
+  if (related.length === 0 || layer.source.kind !== 'data-layer') return null;
+  const parentId = props._global_id;
+  if (typeof parentId !== 'string' || !parentId) return null;
+  const { itemId } = layer.source;
+
+  const wrap = document.createElement('div');
+  wrap.className = 'gg-popup-related';
+  for (const rel of related) {
+    const section = document.createElement('section');
+    section.className = 'gg-popup-related-section';
+    const heading = document.createElement('div');
+    heading.className = 'gg-popup-related-title';
+    heading.textContent = rel.label;
+    const body = document.createElement('div');
+    body.className = 'gg-popup-related-note';
+    body.textContent = t('mapPopupRelated.loading', undefined, locale);
+    section.append(heading, body);
+    wrap.appendChild(section);
+
+    const limit = Math.min(
+      Math.max(Math.floor(rel.limit) || POPUP_RELATED_DEFAULT_ROWS, 1),
+      POPUP_RELATED_MAX_ROWS,
+    );
+    const qs = new URLSearchParams({
+      parentFk: rel.fkColumn,
+      parentId,
+      limit: String(limit),
+    });
+    fetch(
+      `/api/portal/items/${itemId}/layers/${encodeURIComponent(rel.layerKey)}/features?${qs}`,
+      { cache: 'no-store' },
+    )
+      .then((res) => (res.ok ? res.json() : Promise.reject(new Error(String(res.status)))))
+      .then(
+        (fc: {
+          features?: Array<{ properties?: Record<string, unknown> }>;
+          nextCursor?: string | null;
+        }) => {
+          const rows = (fc.features ?? []).map((f) => f.properties ?? {});
+          const more = Boolean(fc.nextCursor);
+          heading.textContent = `${rel.label} (${rows.length}${more ? '+' : ''})`;
+          if (rows.length === 0) {
+            body.textContent = t('mapPopupRelated.none', undefined, locale);
+            onFilled();
+            return;
+          }
+          const list = document.createElement('ul');
+          list.className = 'gg-popup-related-list';
+          for (const row of rows) {
+            const li = document.createElement('li');
+            const keys =
+              rel.fields.length > 0
+                ? rel.fields
+                : Object.keys(row)
+                    .filter((k) => !k.startsWith('_') && k !== rel.fkColumn)
+                    .slice(0, 3);
+            for (const k of keys) {
+              const v = row[k];
+              if (v === null || v === undefined || v === '') continue;
+              const pair = document.createElement('span');
+              pair.className = 'gg-popup-related-pair';
+              const name = document.createElement('span');
+              name.className = 'gg-popup-related-key';
+              name.textContent = k;
+              const value = document.createElement('span');
+              value.textContent = String(v);
+              pair.append(name, value);
+              li.appendChild(pair);
+            }
+            if (li.childElementCount > 0) list.appendChild(li);
+          }
+          body.replaceWith(list);
+          if (more) {
+            const note = document.createElement('div');
+            note.className = 'gg-popup-related-note';
+            note.textContent = t(
+              'mapPopupRelated.showingFirst',
+              { count: rows.length },
+              locale,
+            );
+            section.appendChild(note);
+          }
+          onFilled();
+        },
+      )
+      .catch(() => {
+        body.textContent = t('mapPopupRelated.failed', undefined, locale);
+        onFilled();
+      });
+  }
+  return wrap;
+}
+
+/** The row's stable id: `_global_id` on data-layer features. */
+function popupFeatureId(
+  properties: Record<string, unknown>,
+  hitId: string | number | undefined,
+): string | null {
+  if (typeof properties._global_id === 'string' && properties._global_id) {
+    return properties._global_id;
+  }
+  // MapCanvas may rewrite tile ids to sequential numbers
+  // (generateId), so only a string hit id is trustworthy.
+  return typeof hitId === 'string' && hitId ? hitId : null;
+}
+
+function popupActionBar({
+  layer,
+  properties,
+  hitId,
+  actions,
+  locale,
+  zoom,
+  closePopup,
+}: {
+  layer: MapLayer;
+  properties: Record<string, unknown>;
+  hitId: string | number | undefined;
+  actions: PopupActions | undefined;
+  locale: SupportedLocale;
+  zoom: () => void;
+  closePopup: () => void;
+}): HTMLElement {
+  const bar = document.createElement('div');
+  bar.className = 'gg-popup-actions';
+  const add = (
+    label: string,
+    onClick: () => void,
+    variant?: 'primary' | 'danger',
+  ) => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'gg-popup-action';
+    if (variant) b.dataset.variant = variant;
+    b.textContent = label;
+    b.addEventListener('click', (ev) => {
+      // The map's own click handler must not read this as a click on
+      // whatever feature sits under the popup.
+      ev.stopPropagation();
+      onClick();
+    });
+    bar.appendChild(b);
+  };
+
+  add(t('featureEdit.popupZoomTo', undefined, locale), zoom);
+
+  const featureId = popupFeatureId(properties, hitId);
+  const editable =
+    actions !== undefined &&
+    featureId !== null &&
+    layer.source.kind === 'data-layer' &&
+    // Editor targets are the editor item's own GeoJSON copies; the
+    // editor runtime owns their writes.
+    !layer.id.startsWith('editor-target:') &&
+    actions.canEdit(layer.id);
+  if (editable && actions && featureId) {
+    const ref: PopupFeatureRef = { layerId: layer.id, featureId, properties };
+    add(
+      t('featureEdit.popupEdit', undefined, locale),
+      () => {
+        closePopup();
+        actions.onEdit(ref);
+      },
+      'primary',
+    );
+    add(
+      t('featureEdit.popupDelete', undefined, locale),
+      () => {
+        closePopup();
+        actions.onDelete(ref);
+      },
+      'danger',
+    );
+  }
+  return bar;
+}
+
+/** Fit the camera to a geometry; a point eases in to street level. */
+function zoomToGeometry(m: maplibregl.Map, g: GeoJSON.Geometry) {
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  const visit = (c: unknown): void => {
+    if (!Array.isArray(c)) return;
+    if (typeof c[0] === 'number' && typeof c[1] === 'number') {
+      const [x, y] = c as [number, number];
+      if (x < minX) minX = x;
+      if (y < minY) minY = y;
+      if (x > maxX) maxX = x;
+      if (y > maxY) maxY = y;
+      return;
+    }
+    for (const part of c) visit(part);
+  };
+  const walk = (geom: GeoJSON.Geometry): void => {
+    if (geom.type === 'GeometryCollection') geom.geometries.forEach(walk);
+    else visit(geom.coordinates);
+  };
+  walk(g);
+  if (!Number.isFinite(minX)) return;
+  if (minX === maxX && minY === maxY) {
+    m.easeTo({ center: [minX, minY], zoom: Math.max(m.getZoom(), 17) });
+    return;
+  }
+  m.fitBounds(
+    [
+      [minX, minY],
+      [maxX, maxY],
+    ],
+    { padding: 60, maxZoom: 18 },
+  );
 }
 
 /**

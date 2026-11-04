@@ -2193,6 +2193,7 @@ export function MapEditor({
             }
             editClaimedLayerIds={featureEditing.canvasProps.editClaimedLayerIds}
             onEditClaimedClick={featureEditing.canvasProps.onEditClaimedClick}
+            popupActions={featureEditing.popupActions}
           />
           <MeasureTool
             map={mapLibre}

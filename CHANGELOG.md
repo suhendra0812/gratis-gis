@@ -18,6 +18,21 @@ versioning policy is in [docs/VERSIONING.md](./docs/VERSIONING.md).
   as an attachment, uploaded with the rest of the submission's
   attachments. A required signature is now enforced (it was skipped
   as uncapturable).
+- Map builder: an **Edit feature** panel in the style of the ArcGIS
+  Online Editor widget. It holds the feature's attributes, its shape
+  (drag the vertices on the map as soon as it opens) and its related
+  records (open a row to edit or delete it, or add one), and
+  **Update** saves the changed fields and the shape together. Open it
+  with **Edit** in the feature popup, which also gains **Zoom to** and
+  **Delete**, or with the toolbar's Edit tool by clicking a feature.
+  Changing one value no longer means opening the attribute table
+  first.
+- Map popups can list related records. In the layer's Popup tab,
+  **Related records** offers each table of the same data layer that
+  has this layer as its parent (for example inspections of an
+  asset); pick the fields per row and how many rows to show. Rows
+  load when the popup opens, with "Showing first N" when there are
+  more.
 - Home NAS installs run the point-cloud worker when `GRATIS_ANALYSIS`
   is `on` (the default) and sleep it when set to `off`. Admin backups
   are stored on a volume that survives recreating the API container.
@@ -26,6 +41,13 @@ versioning policy is in [docs/VERSIONING.md](./docs/VERSIONING.md).
   3D, with fresh ids per install (`sample:showcase-*`). The
   Randolph County bridges dashboard is not included: that file is
   the WVDOT service, which publishes no redistribution license.
+
+### Changed
+
+- Map builder: the toolbar's **Edit shape** tool is now **Edit
+  feature**. Clicking a feature opens the Edit feature panel, where
+  the shape is edited alongside the attributes, instead of a
+  shape-only session with its own Save shape bar.
 
 ### Fixed
 

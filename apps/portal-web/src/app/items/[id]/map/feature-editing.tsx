@@ -2,9 +2,10 @@
 'use client';
 
 /**
- * Feature editing inside the map builder (geometry stage): move a feature's
- * vertices, add a feature, delete a feature, on any data layer the
- * viewer may write to. The steward's tools, not the editor item's:
+ * Feature editing inside the map builder: edit a feature (attributes,
+ * shape and related records in one panel, see feature-edit-panel.tsx),
+ * add a feature, delete a feature, on any data layer the viewer may
+ * write to. The steward's tools, not the editor item's:
  * no templates, no per-field allowlists, no snapping profiles, no
  * undo stack. Someone who needs those builds an editor item, which is
  * what it is for.
@@ -41,15 +42,14 @@
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
 import type * as maplibregl from 'maplibre-gl';
 import {
-  Check,
   Loader2,
   Magnet,
-  MousePointerSquareDashed,
   Plus,
+  SquarePen,
   Trash2,
-  X,
 } from 'lucide-react';
 import type { FeatureField, MapLayer, PickListData } from '@gratis-gis/shared-types';
+import { changedValues } from '@/lib/feature-attribute-diff';
 import { toast } from '@/lib/toast';
 import { parseApiError } from '@/lib/api-error';
 import { useT } from '@/lib/i18n/locale-context';
@@ -73,7 +73,8 @@ import {
   type GeometryEditRequest,
 } from './use-terra-draw';
 import { fetchFeatureFromServer } from './fetch-feature';
-import type { MapCanvasHandle } from './map-canvas';
+import { FeatureEditPanel } from './feature-edit-panel';
+import type { MapCanvasHandle, PopupActions } from './map-canvas';
 
 export type FeatureEditTool = 'off' | 'edit' | 'add' | 'delete';
 
@@ -111,6 +112,12 @@ export interface FeatureEditing {
   /** Leave whatever tool is active, discarding an unsaved sketch or edit. */
   deactivate: () => void;
   canvasProps: CanvasProps;
+  /**
+   * Edit / Edit shape / Delete for the click popup. Undefined when
+   * the viewer can edit no layer on this map, so the popup stays
+   * read-only (Zoom to only).
+   */
+  popupActions: PopupActions | undefined;
   overlay: ReactNode;
 }
 
@@ -154,6 +161,8 @@ export function useFeatureEditing({
   const [busy, setBusy] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [loadingFeature, setLoadingFeature] = useState(false);
+  // The feature open in the Edit feature panel, if any.
+  const [featureEdit, setFeatureEdit] = useState<ActiveFeatureEdit | null>(null);
 
   // terra-draw is only mounted once there is something to edit. The
   // hook's dynamic import is the whole reason the read-only path stays
@@ -244,6 +253,7 @@ export function useFeatureEditing({
     if (pendingCreate) clearSketch(pendingCreate.sketchId);
     setPendingCreate(null);
     setPendingEdit(null);
+    setFeatureEdit(null);
     setSaveError(null);
     setTool('off');
     if (draw) {
@@ -264,18 +274,191 @@ export function useFeatureEditing({
       if (pendingCreate) clearSketch(pendingCreate.sketchId);
       setPendingCreate(null);
       setPendingEdit(null);
+      setFeatureEdit(null);
       setSaveError(null);
       setTool(next);
     },
     [tool, leaveTool, pendingCreate, clearSketch],
   );
 
+  // Delete one feature after a confirm. Shared by the Delete tool, the
+  // popup's Delete button and the edit panel. Resolves true if deleted.
+  const deleteFeature = useCallback(
+    async (layer: MapLayer, featureId: string): Promise<boolean> => {
+      const src = dataLayerSource(layer);
+      if (!src) return false;
+      const ok = await confirm({
+        title: t('featureEdit.deleteConfirmTitle'),
+        message: t('featureEdit.deleteConfirmMessage', { layer: layer.title }),
+        confirmLabel: t('featureEdit.deleteAction'),
+        variant: 'danger',
+      });
+      if (!ok) return false;
+      setBusy(true);
+      try {
+        const res = await fetch(
+          `/api/portal/items/${src.itemId}/layers/${encodeURIComponent(src.layerKey)}/features/${encodeURIComponent(featureId)}`,
+          { method: 'DELETE' },
+        );
+        if (!res.ok && res.status !== 204) {
+          throw new Error(await parseApiError(res, t('featureEdit.deleteFailed')));
+        }
+        canvasRef.current?.refreshLayerSource(layer.id);
+        toast.success(t('featureEdit.featureDeleted'));
+        return true;
+      } catch (err) {
+        toast.error(err instanceof Error ? err.message : t('featureEdit.deleteFailed'));
+        return false;
+      } finally {
+        setBusy(false);
+      }
+    },
+    [confirm, canvasRef, t],
+  );
+
+  // ---- Edit feature panel ------------------------------------------
+  //
+  // One panel for a feature's attributes, shape and related records,
+  // like the ArcGIS Online Editor widget. It opens from the Edit tool
+  // (click a feature) or from a popup's Edit button. The shape is live
+  // on the map from the start (a geometry session on the same
+  // feature), and Update writes attributes and shape together.
+
+  const closeFeatureEdit = useCallback(() => {
+    const fromPopup = featureEdit?.fromPopup ?? false;
+    setFeatureEdit(null);
+    setPendingEdit(null);
+    setSaveError(null);
+    // Opened from a popup: the Edit tool was armed for this one
+    // feature, so hand the map back to plain browsing.
+    if (fromPopup) {
+      setTool('off');
+      if (draw) {
+        try {
+          draw.stop();
+        } catch {
+          /* never started */
+        }
+      }
+    }
+  }, [featureEdit, draw]);
+
+  const openFeatureEdit = useCallback(
+    async (layer: MapLayer, featureId: string, fromPopup: boolean) => {
+      const src = dataLayerSource(layer);
+      if (!src) return;
+      if (fromPopup) {
+        // The Edit tool is what suppresses popups and keeps clicks on
+        // the shape's handles while the panel is open.
+        if (pendingCreate) clearSketch(pendingCreate.sketchId);
+        setPendingCreate(null);
+        setTool('edit');
+      }
+      setLoadingFeature(true);
+      setSaveError(null);
+      try {
+        const full = await fetchFeatureFromServer(
+          src.itemId,
+          src.layerKey,
+          featureId,
+          t('featureEdit.loadFailed'),
+        );
+        if (!full) {
+          toast.error(t('featureEdit.notFound'));
+          if (fromPopup) setTool('off');
+          return;
+        }
+        const gt = layerInfo[layer.id]?.geometryType ?? null;
+        setFeatureEdit({
+          layerId: layer.id,
+          featureId,
+          layerTitle: layer.title,
+          itemId: src.itemId,
+          layerKey: src.layerKey,
+          initial: full.properties,
+          hasShape: gt !== null && Boolean(full.geometry),
+          fromPopup,
+        });
+        if (map && full.geometry) keepClearOfPanel(map, full.geometry);
+        setPendingEdit(
+          gt && full.geometry
+            ? {
+                key: layer.id,
+                featureId,
+                geometryType: gt,
+                geometry: roundCoordsToPrecision(full.geometry),
+                properties: full.properties,
+                layerTitle: layer.title,
+              }
+            : null,
+        );
+      } catch (err) {
+        toast.error(err instanceof Error ? err.message : t('featureEdit.loadFailed'));
+        if (fromPopup) setTool('off');
+      } finally {
+        setLoadingFeature(false);
+      }
+    },
+    [map, layerInfo, pendingCreate, clearSketch, t],
+  );
+
+  const saveFeature = useCallback(
+    async (values: Record<string, unknown>) => {
+      if (!featureEdit) return;
+      const layer = layers.find((l) => l.id === featureEdit.layerId);
+      const src = dataLayerSource(layer);
+      if (!layer || !src) return;
+      // Only what changed (see changedValues), plus the shape if it
+      // was dragged: one write, one undo step on the server side.
+      const changed = changedValues(featureEdit.initial, values);
+      const body: { properties?: Record<string, unknown>; geometry?: GeoJSON.Geometry } = {};
+      if (Object.keys(changed).length > 0) body.properties = changed;
+      if (geometryEdit.dirty && geometryEdit.currentGeometry) {
+        body.geometry = geometryEdit.currentGeometry;
+      }
+      if (!body.properties && !body.geometry) {
+        closeFeatureEdit();
+        return;
+      }
+      setBusy(true);
+      setSaveError(null);
+      try {
+        const res = await fetch(
+          `/api/portal/items/${src.itemId}/layers/${encodeURIComponent(src.layerKey)}/features/${encodeURIComponent(featureEdit.featureId)}`,
+          {
+            method: 'PATCH',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify(body),
+          },
+        );
+        if (!res.ok) {
+          setSaveError(await parseApiError(res, t('featureEdit.saveFailed')));
+          return;
+        }
+        canvasRef.current?.refreshLayerSource(layer.id);
+        toast.success(t('featureEdit.featureUpdated'));
+        closeFeatureEdit();
+      } catch (err) {
+        setSaveError(err instanceof Error ? err.message : t('featureEdit.saveFailed'));
+      } finally {
+        setBusy(false);
+      }
+    },
+    [featureEdit, layers, geometryEdit.dirty, geometryEdit.currentGeometry, canvasRef, closeFeatureEdit, t],
+  );
+
+  const deleteFromPanel = useCallback(async () => {
+    if (!featureEdit) return;
+    const layer = layers.find((l) => l.id === featureEdit.layerId);
+    if (!layer) return;
+    if (await deleteFeature(layer, featureEdit.featureId)) closeFeatureEdit();
+  }, [featureEdit, layers, deleteFeature, closeFeatureEdit]);
+
   const onEditClaimedClick = useCallback(
     (info: { layerId: string; featureId: string | number; properties: Record<string, unknown> }) => {
       if (tool !== 'edit' && tool !== 'delete') return;
       const layer = layers.find((l) => l.id === info.layerId);
-      const src = dataLayerSource(layer);
-      if (!layer || !src) return;
+      if (!layer || !dataLayerSource(layer)) return;
       // The tile carries _global_id; MapCanvas's generateId rewrite
       // means info.featureId may be a sequential number instead.
       const featureId =
@@ -290,104 +473,35 @@ export function useFeatureEditing({
       }
 
       if (tool === 'delete') {
-        void (async () => {
-          const ok = await confirm({
-            title: t('featureEdit.deleteConfirmTitle'),
-            message: t('featureEdit.deleteConfirmMessage', { layer: layer.title }),
-            confirmLabel: t('featureEdit.deleteAction'),
-            variant: 'danger',
-          });
-          if (!ok) return;
-          setBusy(true);
-          try {
-            const res = await fetch(
-              `/api/portal/items/${src.itemId}/layers/${encodeURIComponent(src.layerKey)}/features/${encodeURIComponent(featureId)}`,
-              { method: 'DELETE' },
-            );
-            if (!res.ok && res.status !== 204) {
-              throw new Error(await parseApiError(res, t('featureEdit.deleteFailed')));
-            }
-            canvasRef.current?.refreshLayerSource(layer.id);
-            toast.success(t('featureEdit.featureDeleted'));
-          } catch (err) {
-            toast.error(err instanceof Error ? err.message : t('featureEdit.deleteFailed'));
-          } finally {
-            setBusy(false);
-          }
-        })();
+        void deleteFeature(layer, featureId);
         return;
       }
 
-      // A click while a session is open is a handle drag or a
+      // A click while the panel is open is a handle drag or a
       // mis-click, not a request to switch features. Switching would
       // discard the unsaved edit without a word; Cancel is explicit.
-      if (pendingEdit || loadingFeature) return;
-      const gt = layerInfo[layer.id]?.geometryType;
-      if (!gt) {
-        toast.error(t('featureEdit.noGeometry'));
-        return;
-      }
-      setLoadingFeature(true);
-      setSaveError(null);
-      void (async () => {
-        try {
-          const full = await fetchFeatureFromServer(
-            src.itemId,
-            src.layerKey,
-            featureId,
-            t('featureEdit.loadFailed'),
-          );
-          if (!full) {
-            toast.error(t('featureEdit.notFound'));
-            return;
-          }
-          setPendingEdit({
-            key: layer.id,
-            featureId,
-            geometryType: gt,
-            geometry: roundCoordsToPrecision(full.geometry),
-            properties: full.properties,
-            layerTitle: layer.title,
-          });
-        } catch (err) {
-          toast.error(err instanceof Error ? err.message : t('featureEdit.loadFailed'));
-        } finally {
-          setLoadingFeature(false);
-        }
-      })();
+      if (featureEdit || loadingFeature) return;
+      void openFeatureEdit(layer, featureId, false);
     },
-    [tool, layers, layerInfo, confirm, canvasRef, pendingEdit, loadingFeature, t],
+    [tool, layers, featureEdit, loadingFeature, deleteFeature, openFeatureEdit, t],
   );
 
-  const saveGeometry = useCallback(async () => {
-    if (!pendingEdit || !geometryEdit.currentGeometry) return;
-    const layer = layers.find((l) => l.id === pendingEdit.key);
-    const src = dataLayerSource(layer);
-    if (!layer || !src) return;
-    setBusy(true);
-    setSaveError(null);
-    try {
-      const res = await fetch(
-        `/api/portal/items/${src.itemId}/layers/${encodeURIComponent(src.layerKey)}/features/${encodeURIComponent(pendingEdit.featureId)}`,
-        {
-          method: 'PATCH',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ geometry: geometryEdit.currentGeometry }),
-        },
-      );
-      if (!res.ok) {
-        setSaveError(await parseApiError(res, t('featureEdit.saveFailed')));
-        return;
-      }
-      setPendingEdit(null);
-      canvasRef.current?.refreshLayerSource(layer.id);
-      toast.success(t('featureEdit.shapeSaved'));
-    } catch (err) {
-      setSaveError(err instanceof Error ? err.message : t('featureEdit.saveFailed'));
-    } finally {
-      setBusy(false);
-    }
-  }, [pendingEdit, geometryEdit.currentGeometry, layers, canvasRef, t]);
+  const popupActions: PopupActions | undefined = useMemo(() => {
+    if (editableLayerIds.size === 0) return undefined;
+    const layerOf = (id: string) => layers.find((l) => l.id === id);
+    return {
+      canEdit: (layerId) =>
+        editableLayerIds.has(layerId) && dataLayerSource(layerOf(layerId)) !== null,
+      onEdit: (ref) => {
+        const layer = layerOf(ref.layerId);
+        if (layer) void openFeatureEdit(layer, ref.featureId, true);
+      },
+      onDelete: (ref) => {
+        const layer = layerOf(ref.layerId);
+        if (layer) void deleteFeature(layer, ref.featureId);
+      },
+    };
+  }, [editableLayerIds, layers, openFeatureEdit, deleteFeature]);
 
   const submitCreate = useCallback(
     async (values: Record<string, unknown>) => {
@@ -465,7 +579,7 @@ export function useFeatureEditing({
           canAdd={drawableLayers.length > 0}
           busy={busy || loadingFeature}
         />
-        {tool === 'edit' && !pendingEdit ? (
+        {tool === 'edit' && !featureEdit ? (
           <Hint>
             {loadingFeature
               ? t('featureEdit.hintLoading')
@@ -480,38 +594,26 @@ export function useFeatureEditing({
               : t('featureEdit.hintAddPath')}
           </Hint>
         ) : null}
-        {pendingEdit ? (
-          <div className="absolute bottom-4 left-1/2 z-20 flex -translate-x-1/2 items-center gap-2 rounded-lg border border-border bg-surface-1/95 px-3 py-2 shadow-raised backdrop-blur-xs">
-            <span className="text-xs text-ink-1">
-              {t('featureEdit.editingIn', { layer: pendingEdit.layerTitle })}
-            </span>
-            {geometryEdit.loadError || saveError ? (
-              <span className="text-xs text-danger" role="alert">
-                {geometryEdit.loadError ?? saveError}
-              </span>
-            ) : null}
-            <button
-              type="button"
-              onClick={() => {
-                setPendingEdit(null);
-                setSaveError(null);
-              }}
-              disabled={busy}
-              className="inline-flex h-7 items-center gap-1 rounded border border-border bg-surface-1 px-2 text-xs text-ink-1 hover:bg-surface-2 disabled:opacity-50"
-            >
-              <X className="h-3.5 w-3.5" />
-              {t('featureEdit.cancel')}
-            </button>
-            <button
-              type="button"
-              onClick={() => void saveGeometry()}
-              disabled={busy || !geometryEdit.dirty || !!geometryEdit.loadError}
-              className="inline-flex h-7 items-center gap-1 rounded bg-accent px-3 text-xs font-medium text-accent-foreground hover:bg-accent/90 disabled:cursor-not-allowed disabled:opacity-50"
-            >
-              {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Check className="h-3.5 w-3.5" />}
-              {t('featureEdit.saveShape')}
-            </button>
-          </div>
+        {featureEdit ? (
+          <FeatureEditPanel
+            // A different feature is a fresh panel, not a re-seed.
+            key={`${featureEdit.layerId}:${featureEdit.featureId}`}
+            layerTitle={featureEdit.layerTitle}
+            itemId={featureEdit.itemId}
+            layerKey={featureEdit.layerKey}
+            featureId={featureEdit.featureId}
+            fields={layerInfo[featureEdit.layerId]?.fields ?? []}
+            pickLists={pickLists}
+            initial={featureEdit.initial}
+            hasShape={featureEdit.hasShape}
+            shapeDirty={geometryEdit.dirty}
+            shapeError={geometryEdit.loadError}
+            busy={busy}
+            error={saveError}
+            onSave={(values) => void saveFeature(values)}
+            onDelete={() => void deleteFromPanel()}
+            onClose={closeFeatureEdit}
+          />
         ) : null}
         <Dialog
           open={pendingCreate !== null}
@@ -544,10 +646,69 @@ export function useFeatureEditing({
       </>
     );
 
-  return { tool, active, deactivate: leaveTool, canvasProps, overlay };
+  return { tool, active, deactivate: leaveTool, canvasProps, popupActions, overlay };
 }
 
 const EMPTY_SET: ReadonlySet<string> = new Set();
+
+/** Width the edit panel takes from the right of the map, plus its gap. */
+const PANEL_CLEARANCE_PX = 356;
+
+/**
+ * Pan the map just enough that a feature hidden under the edit panel
+ * comes out from behind it, centred in the part of the map still
+ * visible. A feature already clear of the panel leaves the camera
+ * alone. Only the horizontal pan matters: the panel is full height.
+ */
+function keepClearOfPanel(map: maplibregl.Map, geometry: GeoJSON.Geometry) {
+  const c = geometryCenter(geometry);
+  if (!c) return;
+  const { width } = map.getContainer().getBoundingClientRect();
+  const visible = width - PANEL_CLEARANCE_PX;
+  if (visible < 120) return; // too narrow to help; the panel covers the map
+  const { x } = map.project(c);
+  if (x < visible - 24) return;
+  map.panBy([x - visible / 2, 0]);
+}
+
+/** Centre of a geometry's bounding box. */
+function geometryCenter(g: GeoJSON.Geometry): [number, number] | null {
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  const visit = (c: unknown): void => {
+    if (!Array.isArray(c)) return;
+    if (typeof c[0] === 'number' && typeof c[1] === 'number') {
+      minX = Math.min(minX, c[0]);
+      maxX = Math.max(maxX, c[0]);
+      minY = Math.min(minY, c[1] as number);
+      maxY = Math.max(maxY, c[1] as number);
+      return;
+    }
+    for (const part of c) visit(part);
+  };
+  const walk = (geom: GeoJSON.Geometry): void => {
+    if (geom.type === 'GeometryCollection') geom.geometries.forEach(walk);
+    else visit(geom.coordinates);
+  };
+  walk(g);
+  return Number.isFinite(minX) ? [(minX + maxX) / 2, (minY + maxY) / 2] : null;
+}
+
+interface ActiveFeatureEdit {
+  layerId: string;
+  featureId: string;
+  layerTitle: string;
+  itemId: string;
+  layerKey: string;
+  /** The row as the server returned it when the panel opened. */
+  initial: Record<string, unknown>;
+  /** A geometry session is running on the map for this feature. */
+  hasShape: boolean;
+  /** Opened from a popup: closing turns the Edit tool back off. */
+  fromPopup: boolean;
+}
 
 function Hint({ children }: { children: ReactNode }) {
   return (
@@ -583,8 +744,8 @@ function EditToolbar({
     <div className="absolute left-4 top-25 z-10 flex items-center gap-1 rounded-lg border border-border bg-surface-1/95 p-1 shadow-raised backdrop-blur-xs">
       <span className="px-1 text-2xs uppercase tracking-wide text-muted">{t('featureEdit.groupLabel')}</span>
       <ToolButton
-        icon={MousePointerSquareDashed}
-        label={t('featureEdit.editShape')}
+        icon={SquarePen}
+        label={t('featureEdit.editFeatureTool')}
         active={tool === 'edit'}
         onClick={() => onSelect('edit')}
       />
