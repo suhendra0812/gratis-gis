@@ -1,18 +1,18 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useMemo } from 'react';
 import { ArrowDown, ArrowUp, Trash2, X } from 'lucide-react';
 import {
   POPUP_RELATED_DEFAULT_ROWS,
   POPUP_RELATED_MAX_ROWS,
-  type DataLayerSublayer,
   type MapLayerPopup,
   type MapLayerPopupRelated,
   type MapLayerSource,
 } from '@gratis-gis/shared-types';
 import type { LayerMetadata } from './layer-metadata';
 import { TemplateInput } from './template-input';
+import { useChildTables } from './related-tables';
 import { useT } from '@/lib/i18n/locale-context';
 
 interface Props {
@@ -126,26 +126,7 @@ function RelatedEditor({
   onPatch: (p: Partial<MapLayerPopup>) => void;
 }) {
   const t = useT();
-  const [children, setChildren] = useState<DataLayerSublayer[] | null>(null);
-  const [failed, setFailed] = useState(false);
-
-  useEffect(() => {
-    const ctrl = new AbortController();
-    setChildren(null);
-    setFailed(false);
-    fetch(`/api/portal/items/${itemId}`, { signal: ctrl.signal })
-      .then((res) => (res.ok ? res.json() : Promise.reject(new Error(String(res.status)))))
-      .then((item: { data?: { layers?: DataLayerSublayer[] } }) => {
-        const layers = item.data?.layers ?? [];
-        setChildren(
-          layers.filter((l) => l.parentLayerId === layerKey && Boolean(l.parentFkColumn)),
-        );
-      })
-      .catch((err: unknown) => {
-        if ((err as { name?: string }).name !== 'AbortError') setFailed(true);
-      });
-    return () => ctrl.abort();
-  }, [itemId, layerKey]);
+  const { children, failed } = useChildTables(itemId, layerKey);
 
   const related = value.related ?? [];
   const setRelated = (next: MapLayerPopupRelated[]) => onPatch({ related: next });

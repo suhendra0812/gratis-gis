@@ -8,12 +8,15 @@ versioning policy is in [docs/VERSIONING.md](./docs/VERSIONING.md).
 
 ### Added
 
-- Map builder: the feature popup has action buttons, as in ArcGIS
-  Online. **Zoom to** is always there; on a data layer you may edit,
-  **Edit** opens the feature's attributes in a form (saving only the
-  fields you changed), **Edit shape** starts a geometry edit on that
-  feature, and **Delete** removes it after a confirm. Changing one
-  value no longer means opening the attribute table first.
+- Map builder: an **Edit feature** panel in the style of the ArcGIS
+  Online Editor widget. It holds the feature's attributes, its shape
+  (drag the vertices on the map as soon as it opens) and its related
+  records (open a row to edit or delete it, or add one), and
+  **Update** saves the changed fields and the shape together. Open it
+  with **Edit** in the feature popup, which also gains **Zoom to** and
+  **Delete**, or with the toolbar's Edit tool by clicking a feature.
+  Changing one value no longer means opening the attribute table
+  first.
 - Map popups can list related records. In the layer's Popup tab,
   **Related records** offers each table of the same data layer that
   has this layer as its parent (for example inspections of an
@@ -28,6 +31,13 @@ versioning policy is in [docs/VERSIONING.md](./docs/VERSIONING.md).
   3D, with fresh ids per install (`sample:showcase-*`). The
   Randolph County bridges dashboard is not included: that file is
   the WVDOT service, which publishes no redistribution license.
+
+### Changed
+
+- Map builder: the toolbar's **Edit shape** tool is now **Edit
+  feature**. Clicking a feature opens the Edit feature panel, where
+  the shape is edited alongside the attributes, instead of a
+  shape-only session with its own Save shape bar.
 
 ### Fixed
 

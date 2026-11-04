@@ -39,10 +39,13 @@ text.
 - **Actions.** Buttons at the bottom of the popup, under the
  attributes. **Zoom to** is always there. In the map builder, on a
  data layer you may edit, the popup also offers:
- - **Edit**: opens the feature's attributes in a form; Save writes
-   only the fields you changed.
- - **Edit shape**: switches on the Edit tool for that feature so
-   you can drag its vertices, then **Save shape**.
+ - **Edit**: opens the **Edit feature** panel beside the map, the
+   same one the toolbar's Edit tool opens. It has the feature's
+   attributes; its shape, which you change by dragging the vertices
+   on the map; and its related records, where you open a row to
+   edit or delete it, or **Add** a new one. **Update** saves the
+   changed attributes and the shape together; related rows save on
+   their own.
  - **Delete**: removes the feature after a confirmation.
  These are not configurable per layer yet.
 

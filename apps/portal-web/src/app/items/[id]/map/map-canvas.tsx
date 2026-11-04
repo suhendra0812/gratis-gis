@@ -282,8 +282,7 @@ interface Props {
   /**
    * Action buttons under the click popup, the way ArcGIS Online puts
    * Zoom to / Edit under a feature's attributes. "Zoom to" is always
-   * offered; the edit actions appear only for layers `canEdit`
-   * accepts. Without this prop the popup is read-only, as before.
+   * offered; Edit and Delete appear only for layers `canEdit` accepts. Without this prop the popup is read-only, as before.
    */
   popupActions?: PopupActions | undefined;
 }
@@ -299,10 +298,8 @@ export interface PopupFeatureRef {
 export interface PopupActions {
   /** May this layer's features be edited from the popup? */
   canEdit: (layerId: string) => boolean;
-  /** Does this layer have a geometry to reshape (false for tables)? */
-  canEditShape: (layerId: string) => boolean;
-  onEditAttributes: (ref: PopupFeatureRef) => void;
-  onEditShape: (ref: PopupFeatureRef) => void;
+  /** Open the feature in the edit panel (attributes, shape, related). */
+  onEdit: (ref: PopupFeatureRef) => void;
   onDelete: (ref: PopupFeatureRef) => void;
 }
 
@@ -4475,16 +4472,10 @@ function popupActionBar({
       t('featureEdit.popupEdit', undefined, locale),
       () => {
         closePopup();
-        actions.onEditAttributes(ref);
+        actions.onEdit(ref);
       },
       'primary',
     );
-    if (actions.canEditShape(layer.id)) {
-      add(t('featureEdit.popupEditShape', undefined, locale), () => {
-        closePopup();
-        actions.onEditShape(ref);
-      });
-    }
     add(
       t('featureEdit.popupDelete', undefined, locale),
       () => {
