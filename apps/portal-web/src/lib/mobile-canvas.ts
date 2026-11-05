@@ -70,6 +70,29 @@ export function mobilePlacements(widgets: MobileWidgetBox[]): MobilePlacement[] 
   return out;
 }
 
+/**
+ * The kind the phone stack sizes a widget by. A row / column / grid
+ * container is 'arranged': its height comes from its children, which
+ * stack inside it with their own heights (see .gg-arrange in
+ * globals.css), so it must not be clamped to a container's default.
+ */
+export function mobileKind(widget: {
+  kind: string;
+  config?: { kind?: string; position?: string; arrange?: string } | unknown;
+}): string {
+  const cfg = widget.config as { kind?: string; position?: string; arrange?: string } | undefined;
+  if (
+    widget.kind === 'container' &&
+    cfg?.kind === 'container' &&
+    (cfg.position ?? 'inline') === 'inline' &&
+    cfg.arrange !== undefined &&
+    cfg.arrange !== 'free'
+  ) {
+    return 'arranged';
+  }
+  return widget.kind;
+}
+
 /** Explicit height for widgets that measure a canvas. Content widgets
  *  stay `null` so the card grows with its label. */
 export function mobileStackHeight(kind: string): string | null {
@@ -87,6 +110,7 @@ export function mobileStackHeight(kind: string): string | null {
     case 'text':
     case 'button':
     case 'divider':
+    case 'arranged':
       return null;
     default:
       return '220px';

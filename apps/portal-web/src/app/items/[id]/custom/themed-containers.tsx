@@ -21,6 +21,7 @@
  * so the same container looks coherent across the theme presets.
  */
 import {
+  Fragment,
   createContext,
   useCallback,
   useContext,
@@ -40,9 +41,12 @@ import {
   X as XIcon,
   Wrench as WrenchIcon,
 } from 'lucide-react';
-import type {
-  ContainerWidgetConfig,
-  CustomWidget,
+import {
+  CONTAINER_DEFAULT_GAP_PX,
+  CONTAINER_GRID_MAX_COLUMNS,
+  containerArrange,
+  type ContainerWidgetConfig,
+  type CustomWidget,
 } from '@gratis-gis/shared-types';
 
 /**
@@ -81,6 +85,14 @@ export const RuntimeInfoContext = createContext<RuntimeInfoCtx | null>(null);
 interface ContainerRenderProps {
   config: ContainerWidgetConfig;
   renderChild: RenderChild;
+  /**
+   * Designer only: lets the author drag the divider between two
+   * children of a row / column container to resize them. Absent at
+   * runtime, where the dividers are not drawn.
+   */
+  onSizesChange?: ((sizes: Record<string, number>) => void) | undefined;
+  /** Designer only: drawn when an arranged container has no children. */
+  emptyHint?: React.ReactNode;
 }
 
 /**
@@ -134,8 +146,25 @@ function variantClasses(variant: ContainerWidgetConfig['variant']): string {
  * dock-right render as a side panel with collapse-to-rail;
  * overlay-trigger renders a hidden drawer with a trigger button.
  */
-export function Container({ config, renderChild }: ContainerRenderProps) {
+export function Container({
+  config,
+  renderChild,
+  onSizesChange,
+  emptyHint,
+}: ContainerRenderProps) {
   const { position, variant, layout } = resolveChrome(config);
+
+  if (containerArrange(config) !== 'free') {
+    return (
+      <ArrangedContainer
+        config={config}
+        renderChild={renderChild}
+        variant={variant}
+        onSizesChange={onSizesChange}
+        emptyHint={emptyHint}
+      />
+    );
+  }
 
   if (position === 'dock-left' || position === 'dock-right') {
     return (
@@ -171,6 +200,170 @@ export function Container({ config, renderChild }: ContainerRenderProps) {
       layout={layout}
       position={position}
     />
+  );
+}
+
+// ---- Arranged container (row / column / grid) --------------------
+
+/** Smallest share a child can be dragged down to, so it never vanishes. */
+const MIN_SHARE = 0.15;
+
+/**
+ * Children laid out edge to edge instead of free-positioned: a row or
+ * column where each child takes its `sizes` share of the main axis,
+ * or a grid of `gridColumns` equal columns. The cells always fill the
+ * container, so resizing the container or one child reflows the rest
+ * rather than leaving gaps or overlaps.
+ *
+ * Phone layout (globals.css, .gg-arrange): rows stack, grids drop to
+ * two columns, and cells take a readable minimum height.
+ */
+function ArrangedContainer({
+  config,
+  renderChild,
+  variant,
+  onSizesChange,
+  emptyHint,
+}: {
+  config: ContainerWidgetConfig;
+  renderChild: RenderChild;
+  variant: NonNullable<ContainerWidgetConfig['variant']>;
+  onSizesChange?: ((sizes: Record<string, number>) => void) | undefined;
+  emptyHint?: React.ReactNode;
+}) {
+  const arrange = containerArrange(config);
+  const gap = Math.max(0, config.gapPx ?? CONTAINER_DEFAULT_GAP_PX);
+  const children = config.widgets;
+  const ref = useRef<HTMLDivElement | null>(null);
+  const share = (id: string) => {
+    const v = config.sizes?.[id];
+    return typeof v === 'number' && v > 0 ? v : 1;
+  };
+  const chrome = variant === 'flat' || variant === 'none' ? '' : variantClasses(variant);
+
+  if (children.length === 0) {
+    return (
+      <div className={`gg-arrange h-full w-full ${chrome}`}>
+        {emptyHint ?? null}
+      </div>
+    );
+  }
+
+  if (arrange === 'grid') {
+    const cols = Math.min(
+      CONTAINER_GRID_MAX_COLUMNS,
+      Math.max(1, Math.floor(config.gridColumns ?? 2)),
+    );
+    return (
+      <div
+        ref={ref}
+        className={`gg-arrange gg-arrange-grid ${cols === 1 ? 'gg-arrange-grid-1' : ''} h-full w-full ${chrome}`}
+        style={{
+          display: 'grid',
+          gridTemplateColumns: `repeat(${cols}, minmax(0, 1fr))`,
+          gridAutoRows: 'minmax(0, 1fr)',
+          gap: `${gap}px`,
+        }}
+      >
+        {children.map((c) => (
+          <div key={c.id} className="gg-arrange-cell min-h-0 min-w-0" data-arrange-kind={c.kind}>
+            {renderChild(c)}
+          </div>
+        ))}
+      </div>
+    );
+  }
+
+  const isRow = arrange === 'row';
+  // With dividers (designer) every divider is a zero-size flex item,
+  // so half the gap on each side of it adds up to the full gap.
+  const flexGap = onSizesChange ? gap / 2 : gap;
+
+  const startResize = (index: number, e: React.PointerEvent<HTMLDivElement>) => {
+    if (!onSizesChange) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const el = ref.current;
+    const a = children[index];
+    const b = children[index + 1];
+    if (!el || !a || !b) return;
+    const rect = el.getBoundingClientRect();
+    const main = (isRow ? rect.width : rect.height) - gap * (children.length - 1);
+    const total = children.reduce((n, c) => n + share(c.id), 0);
+    const pxPerShare = main / total;
+    const start = isRow ? e.clientX : e.clientY;
+    const shareA = share(a.id);
+    const shareB = share(b.id);
+    const target = e.currentTarget;
+    target.setPointerCapture(e.pointerId);
+    const move = (ev: PointerEvent) => {
+      const delta = ((isRow ? ev.clientX : ev.clientY) - start) / pxPerShare;
+      const d = Math.max(MIN_SHARE - shareA, Math.min(shareB - MIN_SHARE, delta));
+      const round = (n: number) => Math.round(n * 100) / 100;
+      onSizesChange({
+        ...(config.sizes ?? {}),
+        [a.id]: round(shareA + d),
+        [b.id]: round(shareB - d),
+      });
+    };
+    const up = () => {
+      target.removeEventListener('pointermove', move);
+      target.removeEventListener('pointerup', up);
+      target.removeEventListener('pointercancel', up);
+    };
+    target.addEventListener('pointermove', move);
+    target.addEventListener('pointerup', up);
+    target.addEventListener('pointercancel', up);
+  };
+
+  return (
+    <div
+      ref={ref}
+      className={`gg-arrange ${isRow ? 'gg-arrange-row' : 'gg-arrange-column'} h-full w-full ${chrome}`}
+      style={{
+        display: 'flex',
+        flexDirection: isRow ? 'row' : 'column',
+        gap: `${flexGap}px`,
+      }}
+    >
+      {children.map((c, i) => (
+        <Fragment key={c.id}>
+          <div
+            className="gg-arrange-cell min-h-0 min-w-0"
+            data-arrange-kind={c.kind}
+            style={{ flex: `${share(c.id)} 1 0%` }}
+          >
+            {renderChild(c)}
+          </div>
+          {onSizesChange && i < children.length - 1 ? (
+            <div className="gg-arrange-divider relative" style={{ flex: '0 0 0px' }}>
+              <div
+                role="separator"
+                aria-orientation={isRow ? 'vertical' : 'horizontal'}
+                title="Drag to resize"
+                onPointerDown={(e) => startResize(i, e)}
+                onMouseDown={(e) => e.stopPropagation()}
+                onClick={(e) => e.stopPropagation()}
+                className={`group/divider absolute z-20 flex items-center justify-center ${
+                  isRow ? 'inset-y-0 cursor-col-resize' : 'inset-x-0 cursor-row-resize'
+                }`}
+                style={
+                  isRow
+                    ? { left: -(gap / 2 + 4), width: gap + 8 }
+                    : { top: -(gap / 2 + 4), height: gap + 8 }
+                }
+              >
+                <span
+                  className={`rounded-full bg-[hsl(var(--app-accent))] opacity-0 transition-opacity group-hover/divider:opacity-70 ${
+                    isRow ? 'h-8 w-1' : 'h-1 w-8'
+                  }`}
+                />
+              </div>
+            </div>
+          ) : null}
+        </Fragment>
+      ))}
+    </div>
   );
 }
 
