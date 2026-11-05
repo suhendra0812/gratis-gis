@@ -672,7 +672,7 @@ function keepClearOfPanel(map: maplibregl.Map, geometry: GeoJSON.Geometry) {
 }
 
 /** Centre of a geometry's bounding box. */
-function geometryCenter(g: GeoJSON.Geometry): [number, number] | null {
+export function geometryCenter(g: GeoJSON.Geometry): [number, number] | null {
   let minX = Infinity;
   let minY = Infinity;
   let maxX = -Infinity;

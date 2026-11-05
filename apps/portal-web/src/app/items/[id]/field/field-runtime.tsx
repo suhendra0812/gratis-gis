@@ -1,13 +1,21 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 'use client';
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from 'react';
 import Link from 'next/link';
 import { useSearchParams } from 'next/navigation';
 import {
   AlertTriangle,
   ArrowLeft,
   Check,
+  ChevronRight,
   ChevronUp,
   CircleSlash,
   CloudDownload,
@@ -16,18 +24,21 @@ import {
   Crosshair,
   Eye,
   EyeOff,
+  Hand,
   Layers,
   Loader2,
   LocateFixed,
   MapPin,
   Minus,
   MoreVertical,
+  Pencil,
   Plus,
   RefreshCw,
   Search,
   Tag,
   Trash2,
   X,
+  ZoomIn,
 } from 'lucide-react';
 import * as maplibregl from 'maplibre-gl';
 import type {
@@ -50,7 +61,22 @@ import {
   type Response as FormResponse,
 } from '@gratis-gis/form-schema';
 import type { CustomBasemap } from '@/lib/custom-basemap';
-import { MapCanvas, type MapCanvasHandle } from '../map/map-canvas';
+import {
+  MapCanvas,
+  zoomToGeometry,
+  type MapCanvasHandle,
+} from '../map/map-canvas';
+import { ShapeStatus } from '../map/feature-edit-panel';
+import { geometryCenter } from '../map/feature-editing';
+import { fetchFeatureFromServer } from '../map/fetch-feature';
+import {
+  roundCoordsToPrecision,
+  useGeometryEdit,
+  useTerraDraw,
+  type GeometryEditRequest,
+} from '../map/use-terra-draw';
+import { changedValues } from '@/lib/feature-attribute-diff';
+import { toast } from '@/lib/toast';
 import {
   searchLayers,
   type SearchResult as MapSearchResult,
@@ -59,6 +85,7 @@ import { FormRuntime } from '@/components/form-runtime';
 import { PwaInstallButton } from '@/components/pwa-install-button';
 import { removeDeploymentFromDevice } from '@/lib/offline-remove';
 import {
+  deleteFeatures,
   enqueueEdit,
   getDeployment,
   hashLayerSchema,
@@ -92,6 +119,7 @@ import type {
   FeatureSheetState,
   FormModalState,
   MapInteractionMode,
+  RelatedRecordRef,
 } from './field-surfaces';
 import {
   listRejected,
@@ -134,6 +162,8 @@ import {
 } from './use-offline-basemap';
 import { OfflineBasemapRow } from './offline-basemap-row';
 import { createGpsMarker, type GpsMarkerHandle } from './gps-map-marker';
+import { useDeviceHeading } from './use-device-heading';
+import { angleBetween } from '@/lib/device-heading';
 import { stampGpsMetadata } from './gps-metadata-stamp';
 import { FieldAttachments } from './field-attachments';
 import { describeZoom } from '@/lib/map-scale';
@@ -252,6 +282,8 @@ function useRelatedRowsByChild(args: {
   /** Pending child rows are read from the offline queue, which is
    *  scoped to the account that captured them. */
   currentUserId: string;
+  /** Bump to re-read after a related record was written. */
+  version?: number;
 }): Record<string, RelatedRowsState> {
   const {
     parentDataLayerId,
@@ -260,6 +292,7 @@ function useRelatedRowsByChild(args: {
     dataCollectionId,
     isOnline,
     currentUserId,
+    version = 0,
   } = args;
   const [state, setState] = useState<Record<string, RelatedRowsState>>({});
 
@@ -380,9 +413,110 @@ function useRelatedRowsByChild(args: {
       ctrl.abort();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [parentId, parentDataLayerId, dataCollectionId, isOnline, currentUserId]);
+  }, [parentId, parentDataLayerId, dataCollectionId, isOnline, currentUserId, version]);
 
   return state;
+}
+
+/**
+ * Whether this device still holds unsynced edits for a record. Those
+ * edits must be folded into, never raced: writing the record straight
+ * to the API while its queued insert is still waiting would PATCH or
+ * DELETE a row the server has never seen, and the drain would then
+ * send the stale capture on top.
+ */
+async function hasQueuedEdits(
+  dataCollectionId: string,
+  currentUserId: string,
+  layer: Pick<EditableLayer, 'dataLayerId' | 'layerKey'>,
+  featureId: string,
+): Promise<boolean> {
+  try {
+    const queued = await listQueue(dataCollectionId, currentUserId);
+    return queued.some(
+      (q) =>
+        q.globalId === featureId &&
+        q.dataLayerId === layer.dataLayerId &&
+        q.layerKey === layer.layerKey,
+    );
+  } catch {
+    // An unreadable queue cannot hold edits for us to fold into.
+    return false;
+  }
+}
+
+/**
+ * Delete one feature from the field app. Returns where the delete
+ * landed: 'server' when the API removed it, 'local' when it was queued
+ * for the next sync (offline, a network failure, or a feature that
+ * still has unsynced edits on this device).
+ *
+ * A feature with queued edits always goes through the queue, online or
+ * not: deleting it on the server would leave the queued insert to
+ * recreate it on the next drain. enqueueEdit folds the delete into
+ * that chain instead, and an insert followed by a delete annihilates,
+ * so a record captured offline and deleted before it synced never
+ * reaches the server at all.
+ *
+ * Either way the cached copy is dropped so an offline map stops
+ * drawing it straight away.
+ */
+async function deleteFieldFeature(args: {
+  dataCollectionId: string;
+  layer: EditableLayer;
+  featureId: string;
+  isOnline: boolean;
+  currentUserId: string;
+  failedLabel: string;
+}): Promise<'server' | 'local'> {
+  const { dataCollectionId, layer, featureId, isOnline, currentUserId } = args;
+  const dropCached = () =>
+    deleteFeatures(dataCollectionId, layer.dataLayerId, layer.layerKey, [
+      featureId,
+    ]);
+  const applyLocally = async (): Promise<'local'> => {
+    await enqueueEdit({
+      dataCollectionId,
+      op: 'delete',
+      dataLayerId: layer.dataLayerId,
+      layerKey: layer.layerKey,
+      globalId: featureId,
+      geometry: null,
+      properties: null,
+      schemaHash: await hashLayerSchema(layer.fields),
+      ownerUserId: currentUserId,
+    });
+    await dropCached();
+    return 'local';
+  };
+
+  if (
+    !isOnline ||
+    (await hasQueuedEdits(dataCollectionId, currentUserId, layer, featureId))
+  ) {
+    return applyLocally();
+  }
+
+  let res: Response;
+  try {
+    res = await fetch(
+      `/api/portal/items/${layer.dataLayerId}/layers/${encodeURIComponent(
+        layer.layerKey,
+      )}/features/${encodeURIComponent(featureId)}`,
+      { method: 'DELETE' },
+    );
+  } catch {
+    // Network failure mid-request: keep the intent in the queue so the
+    // drain sends it when the radio comes back.
+    return applyLocally();
+  }
+  // 404: already gone (another collector, or a lost response to an
+  // earlier attempt). The outcome the user asked for either way.
+  if (!res.ok && res.status !== 404) {
+    throw new Error(await parseApiError(res, args.failedLabel));
+  }
+  await dropCached();
+  return 'server';
 }
 
 interface Props {
@@ -586,12 +720,27 @@ export function FieldRuntime({
   // decoupled: the hook updates the marker only when the map has
   // mounted (the GPS dot doesn't need to render before the map does).
   const gps = useGeolocation();
+  // The device compass, for the cone on the GPS dot and the compass
+  // button's heading-up mode. GPS's own heading (only while moving) is
+  // the fallback for the cone.
+  const deviceHeading = useDeviceHeading();
   const gpsMarkerRef = useRef<GpsMarkerHandle | null>(null);
   // Temporary preview marker shown while the add-form is open. Held
   // by ref (not state) so we don't re-render the whole canvas when
   // the marker comes and goes; maplibre's Marker primitive plants
   // an HTML node directly. Cleared on form close (cancel OR save).
   const pendingMarkerRef = useRef<maplibregl.Marker | null>(null);
+  // The live map as state, for hooks that must re-run when it appears
+  // or is replaced (terra-draw binds to one map instance). mapRef stays
+  // for the imperative paths that only need the current map.
+  const [liveMap, setLiveMap] = useState<maplibregl.Map | null>(null);
+  // How the open form's point is placed: by hand (tap the map, drag
+  // the point) or following the GPS fix. Reset to manual per form.
+  const [pointMode, setPointMode] = useState<PointMode>('manual');
+  // Moves the open form's point; assigned once the terra-draw session
+  // exists (see placePoint). A ref so the map listeners registered
+  // earlier always reach the current one.
+  const placePointRef = useRef<(lng: number, lat: number) => void>(() => {});
 
   const clearPendingMarker = useCallback(() => {
     if (pendingMarkerRef.current) {
@@ -599,6 +748,26 @@ export function FieldRuntime({
       pendingMarkerRef.current = null;
     }
   }, []);
+
+  /** The point being added, draggable: dragging it is the manual way
+   *  to place it, like tapping the map. */
+  const attachPendingMarker = useCallback(
+    (map: maplibregl.Map, lng: number, lat: number, color?: string) => {
+      const marker = new maplibregl.Marker({
+        ...(color ? { color } : {}),
+        draggable: true,
+      })
+        .setLngLat([lng, lat])
+        .addTo(map);
+      marker.on('dragstart', () => setPointMode('manual'));
+      marker.on('dragend', () => {
+        const ll = marker.getLngLat();
+        placePointRef.current(ll.lng, ll.lat);
+      });
+      return marker;
+    },
+    [],
+  );
 
   // #273: line/polygon vertex collection state. While the user is
   // drawing a multi-vertex feature, vertices accumulate here and a
@@ -1464,6 +1633,7 @@ export function FieldRuntime({
 
   const handleMapReady = useCallback((map: maplibregl.Map | null) => {
     mapRef.current = map;
+    setLiveMap(map);
     // Tear down any prior marker before re-attaching: handleMapReady can
     // fire again on a basemap swap that recreates the underlying map.
     if (gpsMarkerRef.current) {
@@ -1486,6 +1656,75 @@ export function FieldRuntime({
     if (!gpsMarkerRef.current) return;
     gpsMarkerRef.current.update(gps.position);
   }, [gps.position]);
+
+  // Which way the collector faces, drawn as a cone under the dot: the
+  // device compass when it reports one, else the direction of travel
+  // GPS gives while moving. Re-applied when the map (and so the
+  // marker) is replaced.
+  const facing = deviceHeading.heading ?? gps.position?.headingDeg ?? null;
+  useEffect(() => {
+    gpsMarkerRef.current?.setHeading(facing);
+  }, [facing, liveMap]);
+
+  // ---- Compass button --------------------------------------------
+  //
+  // Like Google Maps: when the map is turned off north, a tap puts
+  // north back up. When it is already north-up, a tap switches to
+  // heading-up: the map turns with the device so "ahead" is up the
+  // screen. Another tap, or turning the map by hand, goes back to
+  // north-up.
+  const [compassMode, setCompassMode] = useState(false);
+  useEffect(() => {
+    if (!compassMode || !liveMap || deviceHeading.heading === null) return;
+    // Skip while the camera is moving (GPS follow, a zoom, the last
+    // turn): jumping the bearing would cut it short. The next reading
+    // catches up.
+    if (liveMap.isMoving()) return;
+    if (angleBetween(liveMap.getBearing(), deviceHeading.heading) < 1) return;
+    liveMap.rotateTo(deviceHeading.heading, { duration: 150 });
+  }, [compassMode, liveMap, deviceHeading.heading]);
+  // Turning the map by hand hands it back to the collector.
+  useEffect(() => {
+    if (!compassMode || !liveMap) return undefined;
+    const onRotateStart = (e: { originalEvent?: Event | undefined }) => {
+      if (e.originalEvent) setCompassMode(false);
+    };
+    liveMap.on('rotatestart', onRotateStart);
+    return () => {
+      liveMap.off('rotatestart', onRotateStart);
+    };
+  }, [compassMode, liveMap]);
+  // A device without a compass (most desktops) never sends a reading:
+  // say so instead of leaving a lit button that does nothing.
+  useEffect(() => {
+    if (!compassMode || deviceHeading.heading !== null) return undefined;
+    const timer = window.setTimeout(() => {
+      setCompassMode(false);
+      toast.error(t('fieldRuntime.compassUnavailable'));
+    }, 2500);
+    return () => window.clearTimeout(timer);
+  }, [compassMode, deviceHeading.heading, t]);
+  const onCompassTap = useCallback(() => {
+    const map = liveMap;
+    if (!map) return;
+    if (compassMode) {
+      setCompassMode(false);
+      map.easeTo({ bearing: 0, pitch: 0, duration: 300 });
+      return;
+    }
+    if (Math.abs(map.getBearing()) > 0.5 || Math.abs(map.getPitch()) > 0.5) {
+      // #249.15: reset bearing AND pitch; a two-finger drag on a
+      // phone routinely catches a pitch too.
+      map.easeTo({ bearing: 0, pitch: 0, duration: 300 });
+      return;
+    }
+    // Synchronously inside the tap: iOS only shows its motion prompt
+    // from a user gesture.
+    void deviceHeading.request().then((ok) => {
+      if (ok) setCompassMode(true);
+      else toast.error(t('fieldRuntime.compassUnavailable'));
+    });
+  }, [liveMap, compassMode, deviceHeading, t]);
 
   // Follow-me mode: recenter the map on each new fix, keeping the
   // current zoom. easeTo is animated but short so a brisk walk
@@ -1528,12 +1767,11 @@ export function FieldRuntime({
   // dead combinations as 'inert' on purpose.
   const interactionMode: MapInteractionMode = useMemo(() => {
     if (formModal !== null) {
-      // A collect form is open. The only tap that still means
-      // something is moving the point being collected; a line or
-      // polygon is already committed by the time its form opens, and
-      // an edit form does not reposition.
-      return formModal.mode === 'add' &&
-        formModal.layer.geometryType === 'point'
+      // A form is open. The only tap that still means something is
+      // moving its point (add or edit, see placePoint); a line or
+      // polygon is committed by the time an add form opens, and is
+      // reshaped by its vertices in an edit form.
+      return formModal.layer.geometryType === 'point'
         ? 'collect-point'
         : 'inert';
     }
@@ -1566,6 +1804,11 @@ export function FieldRuntime({
   // as a bare `formModal === null ?` at each of the six sites, which
   // is six chances to forget one and no name for what the condition
   // means.
+  //
+  // Since the field edit work, only the Add FAB (and its empty-state
+  // note) gives way to an open form: the header, GPS strip, layers and
+  // basemap, search, zoom and locate stay up, because moving a point
+  // means panning, zooming and finding where you are.
   const showRuntimeChrome = formModal === null;
 
   // How much of the map an open sheet is covering. Fed to MapLibre as
@@ -1573,6 +1816,9 @@ export function FieldRuntime({
   // centred: tapping a feature in the lower half used to open a sheet
   // directly over the feature you had just tapped.
   const [sheetCoveredPx, setSheetCoveredPx] = useState(0);
+  // Where the camera should stay centred while a sheet covers part of
+  // the map: the feature being edited. Read by the padding effect below.
+  const focusOnRef = useRef<[number, number] | null>(null);
   useEffect(() => {
     const map = mapRef.current;
     if (!map) return;
@@ -1581,8 +1827,15 @@ export function FieldRuntime({
     // do.
     const container = map.getContainer().clientHeight;
     const bottom = Math.max(0, Math.min(sheetCoveredPx, container * 0.6));
+    // A feature the edit form asked to keep in view rides along: a
+    // second easeTo would cancel this one, or this one the other.
+    const focus = focusOnRef.current;
     try {
-      map.easeTo({ padding: { top: 0, right: 0, bottom, left: 0 }, duration: 220 });
+      map.easeTo({
+        padding: { top: 0, right: 0, bottom, left: 0 },
+        ...(focus ? { center: focus } : {}),
+        duration: 220,
+      });
     } catch {
       /* A style still loading refuses easeTo; the next one lands. */
     }
@@ -1595,26 +1848,9 @@ export function FieldRuntime({
     if (!map) return;
     function onMapClick(e: maplibregl.MapMouseEvent) {
       const { lng, lat } = e.lngLat;
-      // Move the preview marker to the tap; the FormModal's coord
-      // readout reads from activeGeometry which we update via a
-      // dedicated bridge below. We also update the modal's geometry
-      // by mutating formModal in place via setFormModal so the next
-      // render of FormModal re-initializes activeGeometry from the
-      // new geometry (init effect fires on modal-object change).
-      if (pendingMarkerRef.current) {
-        pendingMarkerRef.current.setLngLat([lng, lat]);
-      }
-      // Update the formModal's geometry so the FormModal re-derives
-      // its activeGeometry on next render. setFormModal with a new
-      // object reference is the trigger.
-      setFormModal((prev) =>
-        prev && prev.mode === 'add'
-          ? {
-              ...prev,
-              geometry: { type: 'Point', coordinates: [lng, lat] },
-            }
-          : prev,
-      );
+      // A tap places the point by hand, so GPS stops steering it.
+      setPointMode('manual');
+      placePointRef.current(lng, lat);
     }
     map.on('click', onMapClick);
     return () => {
@@ -1854,9 +2090,7 @@ export function FieldRuntime({
         });
         setActiveTemplate(null);
         clearPendingMarker();
-        pendingMarkerRef.current = new maplibregl.Marker({ color: tpl.color })
-          .setLngLat([lon, lat])
-          .addTo(map);
+        pendingMarkerRef.current = attachPendingMarker(map, lon, lat, tpl.color);
         // Form takes the bottom ~60%; offset the camera so the
         // dropped marker stays visible above the sheet. Negative y
         // shifts the geographic center upward on screen.
@@ -1888,7 +2122,7 @@ export function FieldRuntime({
         .addTo(map);
       vertexMarkersRef.current.push(marker);
     },
-    [clearPendingMarker, refreshPreviewGeom],
+    [clearPendingMarker, attachPendingMarker, refreshPreviewGeom],
   );
 
   /**
@@ -1984,6 +2218,35 @@ export function FieldRuntime({
     commitTemplateAt(tpl, pos.lon, pos.lat);
   }, [activeTemplate, gps.position, commitTemplateAt]);
 
+  /**
+   * Start collecting with a template. A point opens its form straight
+   * away, at the GPS fix when there is one and at the map centre when
+   * not; the form's Manual / GPS option moves it from there. (It used
+   * to arm the template first and wait for "Add at center" when GPS
+   * had no fix yet, and skip that step once it had one, so the same
+   * button did two different things.) A line or polygon arms vertex
+   * collection: it needs its vertices before there is a form.
+   */
+  const startCollect = useCallback(
+    (tpl: Parameters<typeof commitTemplateAt>[0]) => {
+      if (tpl.layer.geometryType === 'point') {
+        const pos = gps.position;
+        if (pos) {
+          commitTemplateAt(tpl, pos.lon, pos.lat);
+          return;
+        }
+        const map = mapRef.current;
+        if (map) {
+          const c = map.getCenter();
+          commitTemplateAt(tpl, c.lng, c.lat);
+          return;
+        }
+      }
+      setActiveTemplate(tpl);
+    },
+    [gps.position, commitTemplateAt],
+  );
+
   // #273: map-click handler that pushes a vertex while a line/
   // polygon template is armed. Mirrors the isPointAddCollect
   // handler structure (gated useEffect that attaches/detaches the
@@ -2007,6 +2270,287 @@ export function FieldRuntime({
     };
   }, [isLineOrPolyArming, activeTemplate, commitTemplateAt]);
 
+  // ---- Feature editing ---------------------------------------------
+  //
+  // Built like the map builder's (map/feature-editing.tsx): Edit loads
+  // the feature from the server, its shape goes live on the map in a
+  // terra-draw session (the same useTerraDraw / useGeometryEdit hooks
+  // the builder and the editor runtime use) and is dragged there, and
+  // Update writes the changed fields and the moved shape together.
+  const { draw } = useTerraDraw(liveMap, { snapping: false });
+  const shapeRequest = useMemo<GeometryEditRequest | null>(() => {
+    if (!formModal || formModal.mode !== 'edit') return null;
+    const gt = formModal.layer.geometryType;
+    if (!gt || !formModal.geometry) return null;
+    return {
+      key: `field:${formModal.layer.dataLayerId}:${formModal.layer.layerKey}`,
+      featureId: formModal.featureId,
+      geometryType: gt,
+      geometry: formModal.geometry,
+    };
+  }, [formModal]);
+  const geometryEdit = useGeometryEdit(draw, shapeRequest);
+  // Hand the map back once no shape is being edited: a started
+  // terra-draw keeps listening to the pointer.
+  const shapeActive = shapeRequest !== null;
+  useEffect(() => {
+    if (!formModal) focusOnRef.current = null;
+  }, [formModal]);
+  useEffect(() => {
+    if (!draw || shapeActive) return;
+    try {
+      draw.stop();
+    } catch {
+      /* never started */
+    }
+  }, [draw, shapeActive]);
+
+  // ---- Placing the open form's point ---------------------------------
+  //
+  // Manual: tap the map, or drag the point (the marker of an add, the
+  // terra-draw handle of an edit). GPS: the point follows the live fix
+  // until the collector moves it by hand.
+  const formModalRef = useRef(formModal);
+  formModalRef.current = formModal;
+  const placePoint = useCallback(
+    (lng: number, lat: number) => {
+      const fm = formModalRef.current;
+      if (!fm || fm.layer.geometryType !== 'point') return;
+      const point: GeoJSON.Point = { type: 'Point', coordinates: [lng, lat] };
+      if (fm.mode === 'edit') {
+        // Through the shape session, so the move is the same edit a
+        // drag would be: the Shape section reports it and Update
+        // sends it.
+        if (!draw) return;
+        try {
+          // terra-draw refuses coordinates finer than the precision it
+          // was built with, and a tap's lng/lat carries ~15 decimals.
+          draw.updateFeatureGeometry(
+            fm.featureId,
+            roundCoordsToPrecision(point) as GeoJSON.Point,
+          );
+          // A tap on the map deselects in terra-draw; keep the handle.
+          draw.selectFeature(fm.featureId);
+        } catch {
+          /* session not loaded yet */
+        }
+        return;
+      }
+      const map = mapRef.current;
+      if (pendingMarkerRef.current) pendingMarkerRef.current.setLngLat([lng, lat]);
+      else if (map) pendingMarkerRef.current = attachPendingMarker(map, lng, lat);
+      setFormModal((prev) => {
+        if (!prev || prev.mode !== 'add') return prev;
+        const c = prev.geometry?.type === 'Point' ? prev.geometry.coordinates : null;
+        if (c && c[0] === lng && c[1] === lat) return prev;
+        return { ...prev, geometry: point };
+      });
+    },
+    [draw, attachPendingMarker],
+  );
+  placePointRef.current = placePoint;
+
+  // Each form starts in manual: the point is where the collector put
+  // it (the tap, Add at center, the feature's own position) until they
+  // ask for GPS. An add whose point has no marker yet (Copy) gets one,
+  // so it can be seen and dragged.
+  const formKey = formModal ? `${formModal.mode}:${formModal.featureId}` : null;
+  const lastGpsPointRef = useRef<[number, number] | null>(null);
+  useEffect(() => {
+    setPointMode('manual');
+    lastGpsPointRef.current = null;
+    const fm = formModalRef.current;
+    const map = mapRef.current;
+    if (
+      fm &&
+      fm.mode === 'add' &&
+      fm.layer.geometryType === 'point' &&
+      fm.geometry?.type === 'Point' &&
+      !pendingMarkerRef.current &&
+      map
+    ) {
+      const [lng, lat] = fm.geometry.coordinates as [number, number];
+      pendingMarkerRef.current = attachPendingMarker(map, lng, lat);
+    }
+  }, [formKey, attachPendingMarker]);
+
+  // GPS mode: follow each fix, with the map. Choosing GPS takes the
+  // camera to the fix (zoomed in at least as far as the locate button
+  // does), and later fixes keep it there, so the point being placed is
+  // always in the part of the map the sheet leaves showing. focusOnRef
+  // carries it through the sheet's own padding animation.
+  const gpsLon = gps.position?.lon ?? null;
+  const gpsLat = gps.position?.lat ?? null;
+  useEffect(() => {
+    if (pointMode !== 'gps' || gpsLon === null || gpsLat === null) return;
+    lastGpsPointRef.current = [gpsLon, gpsLat];
+    placePointRef.current(gpsLon, gpsLat);
+    const map = mapRef.current;
+    if (!map || !formModalRef.current) return;
+    focusOnRef.current = [gpsLon, gpsLat];
+    map.easeTo({
+      center: [gpsLon, gpsLat],
+      zoom: Math.max(map.getZoom(), 16),
+      duration: 400,
+    });
+  }, [pointMode, gpsLon, gpsLat, formKey]);
+
+  // A drag of the edit handle while following GPS hands the point
+  // back to the collector; otherwise the next fix would undo it.
+  useEffect(() => {
+    const last = lastGpsPointRef.current;
+    const g = geometryEdit.currentGeometry;
+    if (pointMode !== 'gps' || !last || !g || g.type !== 'Point') return;
+    const [x, y] = g.coordinates as [number, number];
+    if (Math.abs(x - last[0]) > 1e-6 || Math.abs(y - last[1]) > 1e-6) {
+      setPointMode('manual');
+    }
+  }, [geometryEdit.currentGeometry, pointMode]);
+
+  const choosePointMode = useCallback(
+    (mode: PointMode) => {
+      if (mode === 'gps' && gps.status === 'idle') gps.start();
+      setPointMode(mode);
+    },
+    [gps],
+  );
+
+  /** Redraw what a write changed: the queued copy offline, the layer's
+   *  source online. */
+  const refreshAfterWrite = useCallback(
+    (
+      layer: Pick<EditableLayer, 'dataLayerId' | 'layerKey'>,
+      where: 'server' | 'local',
+    ) => {
+      if (where === 'local') setOfflineWriteCounter((n) => n + 1);
+      if (!isOnline) return;
+      // setData(url) on the existing source forces a refetch (#194).
+      for (const ml of mapData.layers ?? []) {
+        const source = ml.source;
+        if (source?.kind !== 'data-layer') continue;
+        if (source.itemId !== layer.dataLayerId) continue;
+        if (source.layerKey && source.layerKey !== layer.layerKey) continue;
+        canvasRef.current?.refreshLayerSource(ml.id);
+      }
+    },
+    [isOnline, mapData.layers],
+  );
+
+  /**
+   * Open a feature's edit form. The row comes from the server when
+   * there is signal, like the builder's panel: a tile clips a polygon
+   * at its edge and carries only some attributes, so the tapped copy
+   * is not safe to edit. Offline, or for a record that only exists in
+   * this device's queue, it comes from the cache, and failing that
+   * from what the map drew.
+   */
+  const openFeatureEdit = useCallback(
+    async (
+      layer: EditableLayer,
+      featureId: string,
+      fallback: {
+        properties: Record<string, unknown>;
+        geometry: GeoJSON.Geometry | null;
+      },
+      openRelated?: RelatedRecordRef,
+    ) => {
+      let properties = fallback.properties;
+      let geometry = fallback.geometry;
+      let found = false;
+      if (isOnline) {
+        try {
+          const full = await fetchFeatureFromServer(
+            layer.dataLayerId,
+            layer.layerKey,
+            featureId,
+            t('featureEdit.loadFailed'),
+          );
+          if (full) {
+            properties = full.properties;
+            geometry = full.geometry;
+            found = true;
+          }
+        } catch {
+          // Fall through to the cached copy.
+        }
+      }
+      if (!found) {
+        try {
+          const cached = await listFeaturesForLayer(
+            dataCollectionId,
+            layer.dataLayerId,
+            layer.layerKey,
+          );
+          const hit = cached.find(
+            (f) =>
+              String(f.id) === featureId ||
+              (f.properties as Record<string, unknown> | null)?._global_id ===
+                featureId,
+          );
+          if (hit) {
+            properties = (hit.properties ?? {}) as Record<string, unknown>;
+            geometry = hit.geometry ?? geometry;
+          }
+        } catch {
+          /* no cache on this device: keep what the map drew */
+        }
+      }
+      setFeatureSheet(null);
+      clearPendingMarker();
+      setFormModal({
+        layer,
+        mode: 'edit',
+        featureId,
+        properties,
+        geometry,
+        ...(openRelated ? { openRelated } : {}),
+      });
+      // The sheet pads the camera out from under itself; centring on
+      // the feature puts it in the part of the map still showing, the
+      // way the builder pans a feature clear of its panel.
+      const map = mapRef.current;
+      const center = geometry ? geometryCenter(geometry) : null;
+      focusOnRef.current = center;
+      if (map && center) map.easeTo({ center, duration: 300 });
+    },
+    [isOnline, dataCollectionId, t, clearPendingMarker],
+  );
+
+  /** Delete from the feature sheet, after a confirm. */
+  const confirm = useConfirm();
+  const deleteFromSheet = useCallback(
+    async (hit: FeatureSheetHit) => {
+      const layer = hit.editable;
+      if (!layer || !hit.globalId) return;
+      const ok = await confirm({
+        title: t('featureEdit.deleteConfirmTitle'),
+        message: t('featureEdit.deleteConfirmMessage', { layer: hit.layerLabel }),
+        confirmLabel: t('featureEdit.deleteAction'),
+        variant: 'danger',
+      });
+      if (!ok) return;
+      try {
+        const where = await deleteFieldFeature({
+          dataCollectionId,
+          layer,
+          featureId: hit.globalId,
+          isOnline,
+          currentUserId,
+          failedLabel: t('featureEdit.deleteFailed'),
+        });
+        setFeatureSheet(null);
+        refreshAfterWrite(layer, where);
+        toast.success(t('featureEdit.featureDeleted'));
+      } catch (err) {
+        toast.error(
+          err instanceof Error ? err.message : t('featureEdit.deleteFailed'),
+        );
+      }
+    },
+    [confirm, t, dataCollectionId, isOnline, currentUserId, refreshAfterWrite],
+  );
+
+
   return (
     // Field mode owns the entire viewport: AppShell suppresses its
     // chrome on this route (see app-shell.tsx) so we render edge-to-
@@ -2023,15 +2567,10 @@ export function FieldRuntime({
           / dynamic island doesn't sit on top of the back arrow when
           the runtime is launched from a home-screen PWA install
           (viewport-fit=cover puts the page under the status bar). */}
-      {/* #249: Hide the runtime's top chrome while a collect is in
-          progress. The FormModal sheet has its own Cancel / Collect
-          / Submit header (Slice 3). Showing back/title/kebab on top
-          of an active collect lets the worker accidentally tap into
-          the More menu, navigate away, or trigger search -- all
-          interruptions to the focused capture flow. Field Maps does
-          the same: the runtime chrome melts away once you're
-          collecting. */}
-      {showRuntimeChrome ? (
+      {/* The runtime's header. Shown while a form is open too (it was
+          hidden in #249): placing or moving a point needs the map's
+          own tools, and the form sheet keeps its Cancel / Submit
+          header below it. */}
       <header className="flex shrink-0 items-center gap-2 border-b border-border bg-surface-1 px-2 py-2 pt-[max(0.5rem,env(safe-area-inset-top))]">
         <Link
           href={backHref}
@@ -2101,7 +2640,6 @@ export function FieldRuntime({
           onRemoveCache={() => void removeCache()}
         />
       </header>
-      ) : null}
 
       <RejectedEditsDialog
         open={rejectedOpen}
@@ -2131,12 +2669,10 @@ export function FieldRuntime({
           strip is hidden entirely when GPS hasn't been requested
           yet (idle) so unauthorized users don't see a stale "no
           fix" message; once they enable location it surfaces. */}
-      {showRuntimeChrome ? (
-        <FieldGpsStrip
+      <FieldGpsStrip
           gpsStatus={gps.status}
           accuracyM={gps.position?.accuracyM ?? null}
         />
-      ) : null}
 
       <div className="relative min-h-0 flex-1">
         <MapCanvas
@@ -2211,9 +2747,8 @@ export function FieldRuntime({
             (zoom +/- + compass) plants itself at top-right via
             map-canvas.tsx, so we keep this button on the opposite
             side to avoid overlap. Compact icon-only and the panel
-            drops below when tapped. Hidden during active collect
-            (#249) so it doesn't compete with the form sheet. */}
-        {showRuntimeChrome ? (
+            drops below when tapped. Stays up while a form is open, so
+            the basemap can be switched to place a point. */}
         <button
           type="button"
           onClick={() => setLayerPanelOpen((v) => !v)}
@@ -2223,7 +2758,6 @@ export function FieldRuntime({
         >
           <Layers className="h-5 w-5 text-ink-1" />
         </button>
-        ) : null}
 
         {/* #249.15: zoom + compass cluster at top-right. Replaces
             MapLibre's default NavigationControl (29px buttons) with
@@ -2232,12 +2766,13 @@ export function FieldRuntime({
             match Layers / Search / Locate / FAB so the right rail
             reads as one consistent set of map tools. Compass is
             de-emphasized (text-muted) in north-up state and brightens
-            when the bearing/pitch is non-default. Hidden during
-            active collect (#249) so it doesn't compete with the
-            Cancel/Submit header. */}
-        {showRuntimeChrome ? (
-          <FieldNavCluster mapRef={mapRef} />
-        ) : null}
+            when the bearing/pitch is non-default. Stays up while a
+            form is open: zooming in is how a point is placed precisely. */}
+        <FieldNavCluster
+          map={liveMap}
+          compassMode={compassMode}
+          onCompassTap={onCompassTap}
+        />
 
         {/* Locate-me FAB. Sits top-right under MapLibre's zoom +
             compass cluster (#249.13: moved from bottom-left so the
@@ -2248,11 +2783,8 @@ export function FieldRuntime({
               - watching, no follow -> tap centers on current fix
               - follow            -> button shows filled + tap toggles off
             The hook handles the OS subscription lifecycle; this
-            button is purely a UI affordance. Hidden during active
-            collect (#249) -- the FormModal sheet covers most of the
-            canvas, AND the form's own "Update Point" button serves
-            the same re-snap-to-GPS purpose. */}
-        {showRuntimeChrome ? (
+            button is purely a UI affordance. Stays up while a form is
+            open; the form's GPS option is what moves the point. */}
         <FieldLocateButton
           gpsStatus={gps.status}
           hasPosition={gps.position !== null}
@@ -2260,6 +2792,10 @@ export function FieldRuntime({
           accuracyM={gps.position?.accuracyM ?? null}
           onTap={() => {
             const map = mapRef.current;
+            // Every tap, not just the first: iOS and current Chromium
+            // let the compass be asked for only from a gesture, and the
+            // dot's cone needs it even if GPS was started some other way.
+            void deviceHeading.request();
             if (gps.status === 'idle') {
               gps.start();
               return;
@@ -2277,18 +2813,15 @@ export function FieldRuntime({
             gps.toggleFollow();
           }}
         />
-        ) : null}
 
         {/* Address search overlay (#223.3, collapsed by default in #249.11).
             Sits to the right of the Layers FAB at top-left. Default state
             is a magnifier icon; tapping expands an input. Right edge is
             held at right-14 when expanded so the input never extends
             under MapLibre's NavigationControl (zoom +/- + compass) at
-            top-right. Hidden during active collect (#249) -- the worker
-            is committing a feature, not navigating, and the form sheet
-            sits where the search bar would otherwise extend. */}
-        {showRuntimeChrome ? (
-          searchExpanded ? (
+            top-right. Stays up while a form is open, to find the spot a
+            point belongs. */}
+        {searchExpanded ? (
             <div className="absolute left-15 right-14 top-3 z-10">
               <div className="w-full max-w-xs">
                 <FieldAddressSearch
@@ -2309,45 +2842,8 @@ export function FieldRuntime({
             >
               <Search className="h-5 w-5 text-ink-1" />
             </button>
-          )
-        ) : null}
+          )}
 
-        {/* #249: Field Maps-style GPS accuracy banner during active
-            collect. Sits at the top of the canvas (where the
-            runtime's header would be, but that's hidden during
-            collect via Slice 5). One-line, semi-transparent, just a
-            number + units. The collector glances up to see "is my
-            fix good enough to commit this point?" without taking
-            a hand off the form. Hidden when there's no fix or the
-            user hasn't enabled location yet. */}
-        {formModal !== null && gps.position ? (
-          <div
-            aria-live="polite"
-            className="pointer-events-none absolute inset-x-0 top-0 z-10 flex justify-center pt-[max(0.5rem,env(safe-area-inset-top))]"
-          >
-            <span
-              className={`pointer-events-auto inline-flex items-center gap-1.5 rounded-full border px-3 py-1 text-xs font-medium shadow-card backdrop-blur-xs ${
-                (() => {
-                  const band = gpsAccuracyBand(gps.position.accuracyM);
-                  if (band === 'excellent' || band === 'good') {
-                    return 'border-success/40 bg-surface-1/95 text-success';
-                  }
-                  if (band === 'fair') {
-                    return 'border-warn/40 bg-surface-1/95 text-warn';
-                  }
-                  return 'border-danger/40 bg-surface-1/95 text-danger';
-                })()
-              }`}
-            >
-              <LocateFixed className="h-3.5 w-3.5" aria-hidden="true" />
-              GPS accuracy{' '}
-              {gps.position.accuracyM < 1
-                ? '<1'
-                : Math.round(gps.position.accuracyM)}
-              {' m'}
-            </span>
-          </div>
-        ) : null}
 
         {/* #249: Field Maps-style circular FAB at bottom-right.
             Replaces the previous full-width footer button. Only
@@ -2378,16 +2874,7 @@ export function FieldRuntime({
               // (single template + GPS watching) collapses to one
               // tap from FAB to FormModal.
               if (templates.length === 1) {
-                const only = templates[0]!;
-                // #273: same gating as the picker -- only the
-                // point geometry uses the GPS one-tap commit;
-                // line/polygon templates always enter vertex
-                // collection.
-                if (gps.position && only.layer.geometryType === 'point') {
-                  commitTemplateAt(only, gps.position.lon, gps.position.lat);
-                } else {
-                  setActiveTemplate(only);
-                }
+                startCollect(templates[0]!);
                 return;
               }
               setPickerOpen(true);
@@ -2616,14 +3103,11 @@ export function FieldRuntime({
                     </button>
                   </>
                 ) : null}
-                {/* When GPS is watching, "Add at my location" is the
-                    primary action because it's what the field worker
-                    wants 90% of the time. "Add at center" stays as
-                    the fallback when the user wants to record a
-                    feature somewhere they're not standing (e.g., the
-                    parcel's centroid, a feature visible from a
-                    vantage point). When GPS is idle/denied/unavailable
-                    the only button shown is "Add at center". */}
+                {/* Vertex at GPS / Vertex at center for a line or
+                    polygon being drawn. A point template no longer
+                    arms this footer: it opens its form straight away
+                    (see startCollect), so the "Add at" labels below
+                    only show for a template armed some other way. */}
                 {gps.status === 'watching' && gps.position ? (
                   <button
                     type="button"
@@ -2671,26 +3155,9 @@ export function FieldRuntime({
           templates={templates}
           onPick={(tpl) => {
             setPickerOpen(false);
-            // #249: Field Maps-style one-tap capture. When the GPS
-            // hook is producing a fix AND this is a point template,
-            // picking a template commits immediately at the worker's
-            // current position -- no detour through the footer's
-            // "Add at GPS / Add at center" choice. The user can
-            // still revise the location via "Update Point" inside
-            // the form sheet, or by canceling and retrying with GPS
-            // off. When GPS isn't watching, we keep the footer-
-            // button flow so the user can drop the feature at the
-            // map center.
-            //
-            // #273: line/polygon templates always go through
-            // setActiveTemplate first so the user enters vertex-
-            // collection mode (single-tap commit doesn't apply --
-            // they need 2+ vertices for line, 3+ for polygon).
-            if (gps.position && tpl.layer.geometryType === 'point') {
-              commitTemplateAt(tpl, gps.position.lon, gps.position.lat);
-            } else {
-              setActiveTemplate(tpl);
-            }
+            // A point opens its form straight away; a line or polygon
+            // enters vertex collection (#273). See startCollect.
+            startCollect(tpl);
           }}
           onClose={() => setPickerOpen(false)}
         />
@@ -2712,34 +3179,30 @@ export function FieldRuntime({
           onChangeState={setFeatureSheet}
           onCoveredHeightChange={setSheetCoveredPx}
           onClose={() => setFeatureSheet(null)}
-          onOpenRelated={(childLayer, feature) => {
-            // #265: tap a related row in the popup -> jump straight
-            // into editing it. Mirrors the FormModal's onOpenRelated
-            // path; clearing the popup first so the FormModal owns
-            // the bottom of the viewport.
-            setFeatureSheet(null);
-            setFormModal({
-              layer: childLayer,
-              mode: 'edit',
-              featureId: feature.id,
-              properties: feature.properties,
-              geometry: feature.geometry,
-            });
+          onOpenRelated={(parent, child, childLayer, row) => {
+            // #265: a related row tapped in the sheet opens its parent's
+            // edit form drilled into that record, as the builder's panel
+            // does; Back then lands on the parent.
+            if (!parent.editable || !parent.globalId) return;
+            void openFeatureEdit(
+              parent.editable,
+              parent.globalId,
+              { properties: parent.properties, geometry: parent.geometry },
+              { child, layer: childLayer, row },
+            );
           }}
           onEdit={(hit) => {
-            // Switch the FormModal to edit mode for the hit's
-            // editable layer. The same shape the legacy tap-to-edit
-            // flow used; the sheet just makes the path explicit.
             if (!hit.editable || !hit.globalId) return;
-            setFeatureSheet(null);
-            setFormModal({
-              layer: hit.editable,
-              mode: 'edit',
-              featureId: hit.globalId,
+            void openFeatureEdit(hit.editable, hit.globalId, {
               properties: hit.properties,
               geometry: hit.geometry,
             });
           }}
+          onZoomTo={(hit) => {
+            const map = mapRef.current;
+            if (map && hit.geometry) zoomToGeometry(map, hit.geometry);
+          }}
+          onDelete={(hit) => void deleteFromSheet(hit)}
           onCopy={(hit) => {
             // #253: Field Maps' Copy = make a new feature with the
             // tapped feature's attributes, leaving the user to
@@ -2787,6 +3250,9 @@ export function FieldRuntime({
 
       {bottomSheet === 'form' && formModal ? (
         <FormModal
+          // A different record is a fresh form: its view, dirty flags
+          // and errors must not carry over from the last one.
+          key={`${formModal.mode}:${formModal.featureId}`}
           dataCollectionId={dataCollectionId}
           modal={formModal}
           pickLists={effectivePickLists}
@@ -2795,110 +3261,39 @@ export function FieldRuntime({
           isOnline={isOnline}
           gpsPosition={gps.position}
           editableLayers={editableLayers}
-          onAddRelated={(childLayer, parentFkColumn, parentFeatureId) => {
-            // Switch the modal to add-mode for the child layer with
-            // the FK pre-filled. Geometry: prefer the GPS fix when
-            // available, fall back to the parent's geometry, fall back
-            // to map center as a last resort. Most surveys want the
-            // child captured at the worker's actual position; the
-            // parent's geometry is a sane fallback when GPS is off.
-            const map = mapRef.current;
-            const fallbackCenter = map ? map.getCenter() : null;
-            const initialGeometry: GeoJSON.Geometry | null =
-              gps.position
-                ? {
-                    type: 'Point',
-                    coordinates: [gps.position.lon, gps.position.lat],
-                  }
-                : formModal.geometry ??
-                  (fallbackCenter
-                    ? {
-                        type: 'Point',
-                        coordinates: [fallbackCenter.lng, fallbackCenter.lat],
-                      }
-                    : null);
-            clearPendingMarker();
-            setFormModal({
-              layer: childLayer,
-              mode: 'add',
-              featureId: newGlobalId(),
-              geometry: initialGeometry,
-              presetAttributes: { [parentFkColumn]: parentFeatureId },
-            });
-          }}
-          onOpenRelated={(childLayer, feature) => {
-            // #247: open the FormModal in edit mode for an existing
-            // related row. The runtime owns the camera + pendingMarker
-            // bookkeeping (mirrors onAddRelated above) so the child
-            // form gets a clean slate. Geometry comes straight from
-            // the feature -- if the child is a table sublayer (no
-            // geom) it'll be null and FormModal already handles that
-            // shape.
-            clearPendingMarker();
-            setFormModal({
-              layer: childLayer,
-              mode: 'edit',
-              featureId: feature.id,
-              properties: feature.properties,
-              geometry: feature.geometry,
-            });
-          }}
+          shape={
+            shapeRequest
+              ? {
+                  dirty: geometryEdit.dirty,
+                  currentGeometry: geometryEdit.currentGeometry,
+                  error: geometryEdit.loadError,
+                }
+              : null
+          }
           onClose={() => {
             clearPendingMarker();
             setFormModal(null);
           }}
-          onSubmitted={() => {
-            const submittedLayer = formModal.layer;
+          onSaved={(where) => {
+            const layer = formModal.layer;
             clearPendingMarker();
             setFormModal(null);
-            // Refresh the MapLayer(s) backed by the data_layer that
-            // just received a write so the new / updated feature
-            // appears immediately. setData(url) on the existing
-            // GeoJSONSource forces a refetch (#194). Online-only;
-            // offline writes are surfaced through the
-            // offlineFeatures effect via offlineWriteCounter.
-            if (isOnline) {
-              for (const ml of mapData.layers ?? []) {
-                const source = ml.source;
-                if (source?.kind !== 'data-layer') continue;
-                if (source.itemId !== submittedLayer.dataLayerId) continue;
-                if (source.layerKey && source.layerKey !== submittedLayer.layerKey) {
-                  continue;
-                }
-                canvasRef.current?.refreshLayerSource(ml.id);
-              }
+            refreshAfterWrite(layer, where);
+            if (formModal.mode === 'edit') {
+              toast.success(t('featureEdit.featureUpdated'));
             }
           }}
+          onDeleted={(where) => {
+            const layer = formModal.layer;
+            clearPendingMarker();
+            setFormModal(null);
+            refreshAfterWrite(layer, where);
+          }}
+          onLayerWritten={refreshAfterWrite}
+          onCoveredHeightChange={setSheetCoveredPx}
           onLocalWriteApplied={() => setOfflineWriteCounter((n) => n + 1)}
-          onUpdateGeometry={(geom) => {
-            // #249: keep the pendingMarker in sync when the user taps
-            // "Update Point" inside the form. We only get called for
-            // Point geometries (the modal gates the button), so a
-            // direct setLngLat is safe.
-            if (
-              pendingMarkerRef.current &&
-              geom.type === 'Point' &&
-              Array.isArray(geom.coordinates)
-            ) {
-              const [lon, lat] = geom.coordinates as [number, number];
-              pendingMarkerRef.current.setLngLat([lon, lat]);
-              // Pan the camera to the new spot so the user can see
-              // where the feature is going to land. easeTo is a quick
-              // animation; not a full flyTo because the move is small.
-              const map = mapRef.current;
-              if (map) {
-                map.easeTo({ center: [lon, lat], duration: 200 });
-              }
-            }
-            // Echo the change back into the modal-state geometry so
-            // the FormModal's sync effect re-derives activeGeometry.
-            // Map-tap-to-override (the click handler we register on
-            // the map) takes the same path: setFormModal(... new
-            // geom ...), so the form's coord readout converges.
-            setFormModal((prev) =>
-              prev && prev.mode === 'add' ? { ...prev, geometry: geom } : prev,
-            );
-          }}
+          pointMode={pointMode}
+          onPointModeChange={choosePointMode}
         />
       ) : null}
 
@@ -4006,14 +4401,41 @@ function LayerSwatch({
   );
 }
 
+/** How a form's point is placed: by hand, or following the GPS fix. */
+type PointMode = 'manual' | 'gps';
+
+/** "lat, lon" in signed decimal degrees, or null for no point. */
+function formatPoint(g: GeoJSON.Geometry | null): string | null {
+  if (!g || g.type !== 'Point') return null;
+  const [lon, lat] = g.coordinates as [number, number];
+  if (typeof lon !== 'number' || typeof lat !== 'number') return null;
+  return `${lat.toFixed(6)}, ${lon.toFixed(6)}`;
+}
+
+/** The shape session the runtime runs on the map while an edit form is open. */
+interface EditShape {
+  dirty: boolean;
+  currentGeometry: GeoJSON.Geometry | null;
+  error: string | null;
+}
+
+type FieldFormTarget = NonNullable<FormModalState>;
+
 /**
- * Form modal: full-screen on mobile, right-side panel on desktop. Uses
- * FormRuntime under the hood with whichever schema applies (bound or
- * auto-derived). For add-mode, the active template's presetAttributes
- * are merged into the initial response so the categorical field
- * driving the renderer comes pre-filled. Submission posts (add) or
- * patches (edit) against the v3 features endpoint, then notifies the
- * parent so it can refresh the map.
+ * The form sheet for one feature, built like the map builder's Edit
+ * feature panel (see map/feature-edit-panel.tsx): the feature's
+ * attributes; in edit mode its shape, live on the map and dragged
+ * there, and its related records; Update writes the changed fields and
+ * the moved shape in one PATCH; Delete sits at the foot.
+ *
+ * A related record opens its own form in place of the feature's. The
+ * feature's form stays mounted (hidden) meanwhile, so its unsaved
+ * edits survive the round trip, and Back returns to it. Related records
+ * save on their own, immediately, like the panel's.
+ *
+ * Every write works offline: it goes to the queue when there is no
+ * signal, when the request fails on the network, or when the record
+ * still has unsynced edits on this device (see deleteFieldFeature).
  */
 function FormModal({
   dataCollectionId,
@@ -4024,29 +4446,18 @@ function FormModal({
   isOnline,
   gpsPosition,
   editableLayers,
-  onAddRelated,
-  onOpenRelated,
+  shape,
   onClose,
-  onSubmitted,
+  onSaved,
+  onDeleted,
+  onLayerWritten,
   onLocalWriteApplied,
-  onUpdateGeometry,
+  pointMode,
+  onPointModeChange,
+  onCoveredHeightChange,
 }: {
   dataCollectionId: string;
-  modal:
-    | {
-        layer: EditableLayer;
-        mode: 'add';
-        featureId: string;
-        geometry: GeoJSON.Geometry | null;
-        presetAttributes: Record<string, string>;
-      }
-    | {
-        layer: EditableLayer;
-        mode: 'edit';
-        featureId: string;
-        properties: Record<string, unknown>;
-        geometry: GeoJSON.Geometry | null;
-      };
+  modal: FieldFormTarget;
   pickLists: Record<string, PickListData>;
   boundForms: Record<string, FormSchema>;
   currentUserId: string;
@@ -4058,112 +4469,438 @@ function FormModal({
    *  fix accuracy + altitude + heading + timestamp alongside the
    *  geometry. Null when the user hasn't enabled location. */
   gpsPosition: GpsPosition | null;
-  /** Phase C: full editable-layer list so the modal can resolve a
-   *  child layer key to its full EditableLayer (with fields, form
-   *  binding, etc.) when the user taps "Add related." */
+  /** Full editable-layer list, to resolve a related table to the
+   *  EditableLayer (fields, form binding) its records are edited with. */
   editableLayers: EditableLayer[];
-  /** Phase C: open a fresh add-mode modal for a child layer with the
-   *  parent FK pre-filled. Runtime owns the actual setFormModal call
-   *  because it also has to clear pendingMarker, ease the camera,
-   *  etc. */
-  onAddRelated: (
-    childLayer: EditableLayer,
-    parentFkColumn: string,
-    parentFeatureId: string,
-  ) => void;
-  /** #247: open the FormModal in edit mode for an existing related
-   *  row. The runtime owns the camera + pendingMarker housekeeping
-   *  (same reasoning as onAddRelated) so the modal hands off the
-   *  full feature shape and the runtime decides what to do with it. */
-  onOpenRelated: (
-    childLayer: EditableLayer,
-    feature: {
-      id: string;
-      properties: Record<string, unknown>;
-      geometry: GeoJSON.Geometry | null;
-    },
-  ) => void;
+  /** Edit mode on a layer with a geometry: the shape being dragged on
+   *  the map. Null when there is nothing to drag. */
+  shape: EditShape | null;
   onClose: () => void;
-  onSubmitted: () => void;
+  /** The feature itself was written. */
+  onSaved: (where: 'server' | 'local') => void;
+  /** Edit mode: the feature was deleted. */
+  onDeleted: (where: 'server' | 'local') => void;
+  /** A related record was written; the form stays open. */
+  onLayerWritten: (layer: EditableLayer, where: 'server' | 'local') => void;
   /** Fires after an offline write (or an online write that fell
    *  back to the queue) has been applied locally. The runtime uses
    *  this to bump its offline-feature refresh counter so the new /
    *  edited feature appears on the map without a manual reload. */
   onLocalWriteApplied: () => void;
-  /** #249: invoked when the user taps "Update Point" inside the
-   *  form sheet. Lets the runtime move the pendingMarker so the map
-   *  stays in sync with whatever the form thinks the position is.
-   *  Only fires for Point-geometry add flows. */
-  onUpdateGeometry: (geom: GeoJSON.Geometry) => void;
+  /** How the feature's point is placed (Point layers): by hand or
+   *  following GPS. The runtime does the placing on the map. */
+  pointMode: PointMode;
+  onPointModeChange: (mode: PointMode) => void;
+  /** Reports how much of the map this sheet covers, so the runtime
+   *  pads the camera out from under it: the feature being edited, and
+   *  the point being placed, stay in the part of the map still showing. */
+  onCoveredHeightChange: (px: number) => void;
 }) {
-  const [error, setError] = useState<string | null>(null);
-  const confirm = useConfirm();
   const t = useT();
-  // True once the collector has typed, picked or drawn anything.
-  //
-  // Cancel used to discard the form with no guard at all, so a
+  const confirm = useConfirm();
+
+  type View =
+    | { kind: 'feature' }
+    | {
+        kind: 'related';
+        child: RelatedChildLayer;
+        target: FieldFormTarget;
+        existsOnServer: boolean;
+      };
+  const relatedView = (ref: RelatedRecordRef): View => ({
+    kind: 'related',
+    child: ref.child,
+    target: {
+      layer: ref.layer,
+      mode: 'edit',
+      featureId: ref.row.id,
+      properties: ref.row.properties,
+      geometry: ref.row.geometry,
+    },
+    existsOnServer: ref.row._pending !== true,
+  });
+  const [view, setView] = useState<View>(() =>
+    modal.mode === 'edit' && modal.openRelated
+      ? relatedView(modal.openRelated)
+      : { kind: 'feature' },
+  );
+  // Bumped after a related write so the lists re-read.
+  const [relatedVersion, setRelatedVersion] = useState(0);
+  const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+
+  // True once the collector has typed, picked or drawn anything, per
+  // form. Cancel used to discard the form with no guard at all, so a
   // mis-tap next to Submit threw away everything gathered at that
-  // stop. Tracked by listening for input/change events as they bubble
-  // out of the form rather than by asking FormRuntime, because
-  // "has the user touched this" is exactly what those events mean and
-  // it needs no new prop threaded through the runtime. A ref, not
-  // state: nothing renders differently for it, and re-rendering the
-  // whole form on the first keystroke would be a real cost on a
-  // low-end handset.
-  const dirtyRef = useRef(false);
-  const markDirty = useCallback(() => {
-    dirtyRef.current = true;
+  // stop. Refs, not state: nothing renders differently for them.
+  const featureDirtyRef = useRef(false);
+  const relatedDirtyRef = useRef(false);
+
+  const guardDiscard = useCallback(
+    (dirty: boolean, then: () => void) => {
+      if (!dirty) {
+        then();
+        return;
+      }
+      void confirm({
+        title: t('fieldCollect.discardTitle'),
+        message: t('fieldCollect.discardMessage'),
+        confirmLabel: t('fieldCollect.discardAction'),
+        cancelLabel: t('fieldCollect.discardCancel'),
+        variant: 'danger',
+      }).then((ok) => {
+        if (ok) then();
+      });
+    },
+    [confirm, t],
+  );
+
+  const backToFeature = useCallback(() => {
+    relatedDirtyRef.current = false;
+    setDeleteError(null);
+    setView({ kind: 'feature' });
   }, []);
 
   const requestCancel = useCallback(() => {
-    if (!dirtyRef.current) {
-      onClose();
+    if (view.kind === 'related') {
+      guardDiscard(relatedDirtyRef.current, backToFeature);
       return;
     }
-    void confirm({
-      title: t('fieldCollect.discardTitle'),
-      message: t('fieldCollect.discardMessage'),
-      confirmLabel: t('fieldCollect.discardAction'),
-      cancelLabel: t('fieldCollect.discardCancel'),
-      variant: 'danger',
-    }).then((ok) => {
-      if (ok) onClose();
-    });
-  }, [confirm, onClose]);
+    guardDiscard(featureDirtyRef.current || (shape?.dirty ?? false), onClose);
+  }, [view.kind, guardDiscard, backToFeature, onClose, shape?.dirty]);
 
-  // #249: working copy of the feature's geometry. The Field Maps
-  // pattern lets the user re-snap the position to the current GPS
-  // fix from inside the form (the "Update Point" button) instead of
-  // committing the location up front. We start from whatever the
-  // runtime handed us (GPS-at-open or map-center fallback) and let
-  // the user revise without canceling out of the form.
+  const openRelated = (
+    child: RelatedChildLayer,
+    layer: EditableLayer,
+    row: RelatedRecordRef['row'],
+  ) => {
+    relatedDirtyRef.current = false;
+    setDeleteError(null);
+    setView(relatedView({ child, layer, row }));
+  };
+
+  const addRelated = (child: RelatedChildLayer, layer: EditableLayer) => {
+    // A table needs no geometry. A point record goes where the
+    // collector is standing, or on the parent when it is a point, or
+    // nowhere the form can offer (the Add button is disabled then).
+    let geometry: GeoJSON.Geometry | null = null;
+    if (layer.geometryType === 'point') {
+      geometry = gpsPosition
+        ? { type: 'Point', coordinates: [gpsPosition.lon, gpsPosition.lat] }
+        : modal.geometry?.type === 'Point'
+          ? modal.geometry
+          : null;
+    }
+    relatedDirtyRef.current = false;
+    setDeleteError(null);
+    setView({
+      kind: 'related',
+      child,
+      target: {
+        layer,
+        mode: 'add',
+        featureId: newGlobalId(),
+        geometry,
+        // The link to this feature is set here, not typed.
+        presetAttributes: { [child.parentFkColumn]: modal.featureId },
+      },
+      existsOnServer: false,
+    });
+  };
+
+  const active = view.kind === 'feature' ? modal : view.target;
+  const activeFormId = `field-form-${active.featureId}`;
+
+  const deleteActive = async () => {
+    if (active.mode !== 'edit') return;
+    const related = view.kind === 'related' ? view : null;
+    const ok = await confirm(
+      related
+        ? {
+            title: t('featureEdit.relatedDeleteTitle'),
+            message: t('featureEdit.relatedDeleteMessage', {
+              table: related.child.layerLabel,
+            }),
+            confirmLabel: t('featureEdit.deleteAction'),
+            variant: 'danger',
+          }
+        : {
+            title: t('featureEdit.deleteConfirmTitle'),
+            message: t('featureEdit.deleteConfirmMessage', {
+              layer: modal.layer.layerLabel,
+            }),
+            confirmLabel: t('featureEdit.deleteAction'),
+            variant: 'danger',
+          },
+    );
+    if (!ok) return;
+    setDeleting(true);
+    setDeleteError(null);
+    try {
+      const where = await deleteFieldFeature({
+        dataCollectionId,
+        layer: active.layer,
+        featureId: active.featureId,
+        isOnline,
+        currentUserId,
+        failedLabel: t('featureEdit.deleteFailed'),
+      });
+      if (where === 'local') onLocalWriteApplied();
+      if (related) {
+        toast.success(t('featureEdit.relatedDeleted'));
+        onLayerWritten(active.layer, where);
+        setRelatedVersion((v) => v + 1);
+        backToFeature();
+      } else {
+        toast.success(t('featureEdit.featureDeleted'));
+        onDeleted(where);
+      }
+    } catch (err) {
+      setDeleteError(
+        err instanceof Error ? err.message : t('featureEdit.deleteFailed'),
+      );
+    } finally {
+      setDeleting(false);
+    }
+  };
+
+  const title =
+    view.kind === 'related'
+      ? view.target.mode === 'add'
+        ? t('featureEdit.relatedAddTitle', { table: view.child.layerLabel })
+        : t('featureEdit.relatedEditTitle', { table: view.child.layerLabel })
+      : modal.mode === 'add'
+        ? t('fieldCollect.addTitle', { layer: modal.layer.layerLabel })
+        : t('fieldCollect.editTitle', { layer: modal.layer.layerLabel });
+  const subtitle =
+    view.kind === 'related'
+      ? t('featureEdit.relatedOf', {
+          table: view.child.layerLabel,
+          layer: modal.layer.layerLabel,
+        })
+      : modal.layer.dataLayerTitle;
+  const submitLabel =
+    active.mode === 'add'
+      ? view.kind === 'related'
+        ? t('featureEdit.relatedAdd')
+        : t('fieldCollect.submit')
+      : t('featureEdit.updateAction');
+
+  const formProps = {
+    dataCollectionId,
+    pickLists,
+    boundForms,
+    currentUserId,
+    isOnline,
+    gpsPosition,
+    onLocalWriteApplied,
+  };
+
+  return (
+    <FieldSheet
+      open
+      onClose={requestCancel}
+      ariaLabel={
+        modal.mode === 'add'
+          ? t('fieldCollect.addAria', { layer: modal.layer.layerLabel })
+          : t('fieldCollect.editAria', { layer: modal.layer.layerLabel })
+      }
+      // Taller than the old 60vh because the sheet now measures the
+      // VISIBLE viewport, so this is 62% of what the collector can
+      // actually see rather than 60% of a viewport that pretends the
+      // iOS URL bar is hidden. Expanding to 92% is for long forms.
+      snapPoints={[0.62, 0.92]}
+      // A downward flick must not be able to throw away a filled-in
+      // form. Dragging still moves between the two snap points.
+      dismissOnDrag={false}
+      onCoveredHeightChange={onCoveredHeightChange}
+    >
+      <div className="flex min-h-0 flex-1 flex-col">
+        {/* #249: Field Maps-style three-section header. Cancel (or
+            Back, inside a related record) | title | Submit / Update.
+            The submit button associates with the active form through
+            the HTML form attribute, so the click runs that form's own
+            onSubmit and validation. */}
+        <header className="flex shrink-0 items-center justify-between gap-2 border-b border-border bg-surface-1 px-2 py-2.5">
+          <button
+            type="button"
+            onClick={requestCancel}
+            className="inline-flex h-11 shrink-0 items-center justify-center gap-1 rounded-md px-3 text-base font-medium text-accent hover:bg-surface-2 active:bg-surface-3"
+          >
+            {view.kind === 'related' ? (
+              <>
+                <ArrowLeft className="h-4 w-4" />
+                {t('fieldRuntime.backAria')}
+              </>
+            ) : (
+              t('fieldCollect.cancel')
+            )}
+          </button>
+          <div className="min-w-0 flex-1 text-center">
+            <h2 className="truncate text-base font-semibold text-ink-0">{title}</h2>
+            <p className="truncate text-2xs text-muted">{subtitle}</p>
+          </div>
+          <button
+            type="submit"
+            form={activeFormId}
+            disabled={deleting}
+            className="inline-flex h-11 shrink-0 items-center justify-center rounded-md px-3 text-base font-semibold text-accent hover:bg-surface-2 active:bg-surface-3 disabled:opacity-50"
+          >
+            {submitLabel}
+          </button>
+        </header>
+
+        {/* The feature's form stays mounted under a related record so
+            its unsaved edits survive the round trip. */}
+        <div
+          className={
+            view.kind === 'feature' ? 'flex min-h-0 flex-1 flex-col' : 'hidden'
+          }
+        >
+          <FeatureForm
+            {...formProps}
+            modal={modal}
+            formId={`field-form-${modal.featureId}`}
+            existsOnServer={modal.mode === 'edit'}
+            shape={modal.mode === 'edit' ? shape : null}
+            onDirty={() => {
+              featureDirtyRef.current = true;
+            }}
+            onSaved={onSaved}
+            onNoChanges={onClose}
+            position={{ mode: pointMode, onModeChange: onPointModeChange }}
+          >
+            {modal.mode === 'edit' && (modal.layer.childLayers ?? []).length > 0 ? (
+              <RelatedRecordsSection
+                dataCollectionId={dataCollectionId}
+                parent={modal}
+                editableLayers={editableLayers}
+                isOnline={isOnline}
+                currentUserId={currentUserId}
+                version={relatedVersion}
+                parentHasPoint={
+                  gpsPosition !== null || modal.geometry?.type === 'Point'
+                }
+                onOpen={openRelated}
+                onAdd={addRelated}
+              />
+            ) : null}
+          </FeatureForm>
+        </div>
+
+        {view.kind === 'related' ? (
+          <FeatureForm
+            key={`related:${view.target.featureId}`}
+            {...formProps}
+            modal={view.target}
+            formId={activeFormId}
+            existsOnServer={view.existsOnServer}
+            shape={null}
+            onDirty={() => {
+              relatedDirtyRef.current = true;
+            }}
+            onSaved={(where) => {
+              toast.success(
+                view.target.mode === 'add'
+                  ? t('featureEdit.relatedAdded')
+                  : t('featureEdit.relatedSaved'),
+              );
+              onLayerWritten(view.target.layer, where);
+              setRelatedVersion((v) => v + 1);
+              backToFeature();
+            }}
+            onNoChanges={backToFeature}
+          />
+        ) : null}
+
+        {active.mode === 'edit' ? (
+          <footer className="flex shrink-0 items-center justify-between gap-2 border-t border-border bg-surface-1 px-3 py-2">
+            <button
+              type="button"
+              onClick={() => void deleteActive()}
+              disabled={deleting}
+              className="inline-flex h-10 items-center gap-1.5 rounded-md px-3 text-sm font-medium text-danger hover:bg-danger/10 disabled:opacity-50"
+            >
+              {deleting ? (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              ) : (
+                <Trash2 className="h-4 w-4" />
+              )}
+              {t('featureEdit.popupDelete')}
+            </button>
+            {deleteError ? (
+              <p role="alert" className="min-w-0 flex-1 truncate text-right text-xs text-danger">
+                {deleteError}
+              </p>
+            ) : null}
+          </footer>
+        ) : null}
+      </div>
+    </FieldSheet>
+  );
+}
+
+/**
+ * One feature's form: the attributes (bound form or generated from the
+ * layer), its photos, in add mode its position and in edit mode its
+ * shape status, and whatever the caller adds below (the related
+ * records). Owns the write, online or queued.
+ */
+function FeatureForm({
+  dataCollectionId,
+  modal,
+  formId,
+  existsOnServer,
+  pickLists,
+  boundForms,
+  currentUserId,
+  isOnline,
+  gpsPosition,
+  shape,
+  onDirty,
+  onSaved,
+  onNoChanges,
+  onLocalWriteApplied,
+  position,
+  children,
+}: {
+  dataCollectionId: string;
+  modal: FieldFormTarget;
+  formId: string;
+  /** The record is on the server (false for one still in the queue). */
+  existsOnServer: boolean;
+  pickLists: Record<string, PickListData>;
+  boundForms: Record<string, FormSchema>;
+  currentUserId: string;
+  isOnline: boolean;
+  gpsPosition: GpsPosition | null;
+  shape: EditShape | null;
+  onDirty: () => void;
+  onSaved: (where: 'server' | 'local') => void;
+  /** Edit mode, nothing changed: nothing to send. */
+  onNoChanges: () => void;
+  onLocalWriteApplied: () => void;
+  /** Point layers, the feature's own form: the Manual / GPS choice.
+   *  Absent on a related record's form. */
+  position?: { mode: PointMode; onModeChange: (mode: PointMode) => void };
+  children?: ReactNode;
+}) {
+  const [error, setError] = useState<string | null>(null);
+  const t = useT();
+
+  // #249: working copy of an add's geometry. The Field Maps pattern
+  // lets the user re-snap the position to the current GPS fix from
+  // inside the form (the "Update Point" button) instead of committing
+  // the location up front.
   const [activeGeometry, setActiveGeometry] = useState<
     GeoJSON.Geometry | null
   >(modal.geometry);
   // #249: keep activeGeometry in sync with modal.geometry so a parent
   // update (e.g. tap-on-map-to-override) flows into the coord readout
-  // without remounting the modal. The "Update Point" button still
-  // calls setActiveGeometry directly for snappy in-form feedback;
-  // the parent's onUpdateGeometry callback echoes the same value
-  // back through modal.geometry, so this effect ends up as a no-op
-  // for the GPS-resnap path.
+  // without remounting the form.
   useEffect(() => {
     setActiveGeometry(modal.geometry);
   }, [modal.geometry]);
-
-  // #247 / #265 / #266: in edit mode, build the related-records list
-  // per child layer. Logic extracted to useRelatedRowsByChild so the
-  // popup bottom sheet (#265) can render the same list on a tap-on-
-  // feature gesture without going through the form modal first.
-  const relatedRowsByChild = useRelatedRowsByChild({
-    parentDataLayerId:
-      modal.mode === 'edit' ? modal.layer.dataLayerId : null,
-    parentId: modal.mode === 'edit' ? modal.featureId : null,
-    childLayers: modal.layer.childLayers,
-    dataCollectionId,
-    isOnline,
-    currentUserId,
-  });
 
   const form = useMemo<FormSchema>(() => {
     let base: FormSchema;
@@ -4294,43 +5031,56 @@ function FormModal({
     // upgraded portal can reconcile without a queue migration).
     const schemaHash = await hashLayerSchema(modal.layer.fields);
 
-    // Local apply path (used by both offline mode and online mode's
-    // network-failure fallback). Enqueues the operation, writes the
-    // feature into IndexedDB so it's visible on the map immediately,
-    // and bumps the runtime's refresh counter via the callback.
+    // What to write. An add sends the whole record. An edit sends
+    // only what changed (see changedValues), plus the shape if it was
+    // dragged, the way the map builder's panel does: a field someone
+    // else edited since this form opened is not overwritten with the
+    // stale copy it was seeded from.
+    let writeProps: Record<string, unknown>;
+    let writeGeometry: GeoJSON.Geometry | null;
+    if (modal.mode === 'add') {
+      writeProps = properties;
+      writeGeometry = activeGeometry;
+    } else {
+      writeProps = changedValues(modal.properties, properties);
+      writeGeometry =
+        shape?.dirty && shape.currentGeometry ? shape.currentGeometry : null;
+      if (Object.keys(writeProps).length === 0 && !writeGeometry) {
+        onNoChanges();
+        return;
+      }
+    }
+
+    // Local apply path (offline, a network failure, or a record with
+    // unsynced edits). Enqueues the operation, writes the feature into
+    // IndexedDB so the map shows it immediately, and bumps the
+    // runtime's refresh counter via the callback.
     const applyLocally = async (): Promise<void> => {
       // enqueueEdit, not a raw put. The queue can hold an earlier
       // unsynced edit for this same feature, and folding the two
       // inside one transaction is what keeps an offline capture that
       // the user then corrects from being replaced by an update
-      // against a globalId the server has never seen. A raw put here
-      // is the original data-loss bug.
+      // against a globalId the server has never seen.
       const enqueued = await enqueueEdit({
         dataCollectionId,
         op: modal.mode === 'add' ? 'insert' : 'update',
         dataLayerId: modal.layer.dataLayerId,
         layerKey: modal.layer.layerKey,
         globalId: featureId,
-        geometry: activeGeometry,
-        properties,
+        geometry: writeGeometry,
+        properties: writeProps,
         schemaHash,
         // Who captured it, so only this account's session ever sends
         // it. The server stamps submitted_by from the caller.
         ownerUserId: currentUserId,
       });
       // The fold keeps the original capture time, so the cached
-      // feature's timestamps must come from the surviving row rather
-      // than from now, or the map and the queue disagree about when
-      // the observation was made.
+      // feature's timestamps come from the surviving row.
       const queuedAt =
         enqueued.kind === 'annihilated'
           ? new Date().toISOString()
           : enqueued.record.queuedAt;
-      // Mirror into the cached features store so the map shows the
-      // feature on next render. For inserts this is a fresh row; for
-      // updates it overwrites the prior cached copy under the same
-      // composite key. The properties carry _global_id so the popup
-      // and the existing feature-id resolution paths keep working.
+      const before = modal.mode === 'edit' ? modal.properties : {};
       const cachedFeature: CachedFeature = {
         dataCollectionId,
         dataLayerId: modal.layer.dataLayerId,
@@ -4339,13 +5089,14 @@ function FormModal({
         feature: {
           type: 'Feature',
           id: featureId,
-          geometry: activeGeometry as GeoJSON.Geometry,
+          geometry: (writeGeometry ?? modal.geometry) as GeoJSON.Geometry,
           properties: {
-            ...properties,
+            ...before,
+            ...writeProps,
             _global_id: featureId,
-            _created_by: currentUserId,
+            _created_by: before._created_by ?? currentUserId,
             _edited_by: currentUserId,
-            _created_at: queuedAt,
+            _created_at: before._created_at ?? queuedAt,
             _edited_at: new Date().toISOString(),
           },
         },
@@ -4356,431 +5107,371 @@ function FormModal({
     };
 
     try {
-      if (isOnline) {
-        // Online path. Try the live API first. On non-2xx (validation
-        // error, schema mismatch, anything 4xx) we propagate to the
-        // user so they can fix and retry; this is NOT a queue case.
-        // On a network-level failure (TypeError from fetch) we DO
-        // fall back to the queue so the edit is preserved.
-        if (modal.mode === 'add') {
-          let res: Response;
-          try {
-            res = await fetch(
-              `/api/portal/items/${modal.layer.dataLayerId}/layers/${encodeURIComponent(
-                modal.layer.layerKey,
-              )}/features`,
-              {
+      const queued =
+        isOnline && modal.mode === 'edit'
+          ? await hasQueuedEdits(
+              dataCollectionId,
+              currentUserId,
+              modal.layer,
+              featureId,
+            )
+          : false;
+      if (!isOnline || queued) {
+        // No signal, or edits of this record still waiting to sync:
+        // the queue folds this one into them and the drain sends it.
+        await applyLocally();
+        onSaved('local');
+        return;
+      }
+      const featuresPath = `/api/portal/items/${modal.layer.dataLayerId}/layers/${encodeURIComponent(
+        modal.layer.layerKey,
+      )}/features`;
+      let res: Response;
+      try {
+        res =
+          modal.mode === 'add'
+            ? await fetch(featuresPath, {
                 method: 'POST',
                 headers: {
                   'content-type': 'application/json',
                   // x-data-collection-id triggers the
                   // data_collection_feature_created notification (#229)
-                  // server-side. Carries the deployment id so the
-                  // BFF passthrough can forward it to portal-api.
+                  // server-side.
                   'x-data-collection-id': dataCollectionId,
                 },
                 body: JSON.stringify({
                   features: [
                     {
                       globalId: featureId,
-                      geometry: activeGeometry,
-                      properties,
+                      geometry: writeGeometry,
+                      properties: writeProps,
                     },
                   ],
                 }),
-              },
-            );
-          } catch {
-            // Likely network failure during a transient blip. Stash
-            // it in the queue so it doesn't get lost; auto-sync will
-            // retry as soon as the radio comes back.
-            await applyLocally();
-            onSubmitted();
-            return;
-          }
-          if (!res.ok) {
-            throw new Error(await parseApiError(res, 'Could not save'));
-          }
-        } else {
-          let res: Response;
-          try {
-            res = await fetch(
-              `/api/portal/items/${modal.layer.dataLayerId}/layers/${encodeURIComponent(
-                modal.layer.layerKey,
-              )}/features/${modal.featureId}`,
-              {
+              })
+            : await fetch(`${featuresPath}/${encodeURIComponent(featureId)}`, {
                 method: 'PATCH',
                 headers: { 'content-type': 'application/json' },
-                body: JSON.stringify({ properties }),
-              },
-            );
-          } catch {
-            await applyLocally();
-            onSubmitted();
-            return;
-          }
-          if (!res.ok) {
-            throw new Error(await parseApiError(res, 'Could not save'));
-          }
-        }
-        // The feature is on the server, so any photo captured while
-        // this form was open can go now. The online path never touches
-        // the queue, so without this the file would have had nothing
-        // to ride along with and would have sat on the device
-        // indefinitely. A failure here is deliberately not fatal: the
-        // record saved, and the file stays queued for the sweep at the
-        // end of the next drain rather than failing a submit that
-        // actually succeeded.
-        try {
-          await uploadPendingBlobsForFeature(
-            {
-              dataCollectionId,
-              dataLayerId: modal.layer.dataLayerId,
-              layerKey: modal.layer.layerKey,
-              globalId: featureId,
-            },
-            currentUserId,
-          );
-        } catch {
-          onLocalWriteApplied();
-        }
-      } else {
-        // Offline path. The browser reports !navigator.onLine so we
-        // know the network is down; skip the doomed fetch and go
-        // straight to the queue. The user sees the same "submitted"
-        // success state as online; the difference is the edit lives
-        // in IndexedDB until sync runs.
+                body: JSON.stringify({
+                  ...(Object.keys(writeProps).length > 0
+                    ? { properties: writeProps }
+                    : {}),
+                  ...(writeGeometry ? { geometry: writeGeometry } : {}),
+                }),
+              });
+      } catch {
+        // Network failure during a transient blip. Stash it in the
+        // queue so it is not lost; auto-sync retries when the radio
+        // comes back.
         await applyLocally();
+        onSaved('local');
+        return;
       }
-      onSubmitted();
+      if (!res.ok) {
+        // Validation, permissions, schema: the user fixes and retries.
+        // NOT a queue case.
+        throw new Error(await parseApiError(res, t('featureEdit.saveFailed')));
+      }
+      // The record is on the server, so any photo captured while this
+      // form was open can go now. Not fatal: the record saved, and the
+      // file stays queued for the sweep at the end of the next drain.
+      try {
+        await uploadPendingBlobsForFeature(
+          {
+            dataCollectionId,
+            dataLayerId: modal.layer.dataLayerId,
+            layerKey: modal.layer.layerKey,
+            globalId: featureId,
+          },
+          currentUserId,
+        );
+      } catch {
+        onLocalWriteApplied();
+      }
+      onSaved('server');
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Submit failed.');
+      setError(err instanceof Error ? err.message : t('featureEdit.saveFailed'));
       throw err; // FormRuntime needs to know the submit failed so it doesn't render the success state
     }
   }
 
   return (
-    <FieldSheet
-      open
-      onClose={requestCancel}
-      ariaLabel={
-        modal.mode === 'add'
-          ? t('fieldCollect.addAria', { layer: modal.layer.layerLabel })
-          : t('fieldCollect.editAria', { layer: modal.layer.layerLabel })
-      }
-      // Taller than the old 60vh because the sheet now measures the
-      // VISIBLE viewport, so this is 62% of what the collector can
-      // actually see rather than 60% of a viewport that pretends the
-      // iOS URL bar is hidden. Expanding to 92% is for long forms.
-      snapPoints={[0.62, 0.92]}
-      // A downward flick must not be able to throw away a filled-in
-      // form. Dragging still moves between the two snap points.
-      dismissOnDrag={false}
-    >
-      {/* #249: Field Maps-style three-section header for the active
-          collect. Cancel (left, text button) | layer-name title
-          (center) | Submit (right, text button). The Submit button
-          doesn't sit inside the FormRuntime tree -- it associates
-          via the formId prop / HTML form attribute, so the click
-          triggers the form's existing onSubmit + validation. The
-          FormRuntime's own submit button stays at the bottom of
-          the scroll for users who reach the end of a long form. */}
-      {/* input and change both bubble, so one listener here sees any
-          interaction anywhere in the form without FormRuntime having
-          to report dirtiness. */}
-      <div
-        className="flex min-h-0 flex-1 flex-col"
-        onInput={markDirty}
-        onChange={markDirty}
-      >
-        <header className="flex shrink-0 items-center justify-between gap-2 border-b border-border bg-surface-1 px-2 py-2.5">
-          <button
-            type="button"
-            onClick={requestCancel}
-            className="inline-flex h-11 shrink-0 items-center justify-center rounded-md px-3 text-base font-medium text-accent hover:bg-surface-2 active:bg-surface-3"
-          >
-            {t('fieldCollect.cancel')}
-          </button>
-          <div className="min-w-0 flex-1 text-center">
-            <h2 className="truncate text-base font-semibold text-ink-0">
-              {modal.mode === 'add'
-                ? t('fieldCollect.addTitle', { layer: modal.layer.layerLabel })
-                : t('fieldCollect.editTitle', {
-                    layer: modal.layer.layerLabel,
-                  })}
-            </h2>
-            <p className="truncate text-2xs text-muted">
-              {modal.layer.dataLayerTitle}
-            </p>
-          </div>
-          <button
-            type="submit"
-            form={`field-form-${modal.layer.layerKey}`}
-            className="inline-flex h-11 shrink-0 items-center justify-center rounded-md px-3 text-base font-semibold text-accent hover:bg-surface-2 active:bg-surface-3"
-          >
-            {t('fieldCollect.submit')}
-          </button>
-        </header>
-        {/* #249: Field Maps-style location bar. Shows the current
-            position of the feature (lat/lon) and lets the worker
-            re-snap to the live GPS fix without canceling out of the
-            form. Only meaningful for Point geometries; for polygons /
-            lines the geometry is multi-vertex and "Update Point" has
-            no clear semantics. Add-mode only -- on edit, the geometry
-            of an existing row isn't changed from inside the attribute
-            form (geometry editing has its own tool). */}
-        {modal.mode === 'add' && modal.layer.geometryType === 'point' ? (
-          <div className="flex shrink-0 items-center gap-3 border-b border-border bg-surface-0 px-3 py-2">
+    // input and change both bubble, so one listener here sees any
+    // interaction anywhere in the form without FormRuntime having to
+    // report dirtiness.
+    <div className="flex min-h-0 flex-1 flex-col" onInput={onDirty} onChange={onDirty}>
+      {/* #249: where the point goes. Manual: tap the map or drag the
+          point (the runtime handles both on the map). GPS: the point
+          follows the live fix. Point layers only (a line or polygon is
+          reshaped by its vertices), and the feature's own form only. */}
+      {position && modal.layer.geometryType === 'point' ? (
+        <div className="shrink-0 space-y-1.5 border-b border-border bg-surface-0 px-3 py-2">
+          <div className="flex items-center gap-3">
             <div className="min-w-0 flex-1">
               <p className="text-2xs font-medium uppercase tracking-wide text-muted">
                 {t('fieldRuntime.location')}
               </p>
               <p className="truncate font-mono text-sm tabular-nums text-ink-0">
-                {(() => {
-                  const coords =
-                    activeGeometry &&
-                    'coordinates' in activeGeometry &&
-                    Array.isArray(activeGeometry.coordinates) &&
-                    typeof activeGeometry.coordinates[0] === 'number' &&
-                    typeof activeGeometry.coordinates[1] === 'number'
-                      ? (activeGeometry.coordinates as [number, number])
-                      : null;
-                  if (!coords) return t('fieldRuntime.notSet');
-                  const [lon, lat] = coords;
-                  return `${lat.toFixed(6)}°N  ${lon.toFixed(6)}°W`;
-                })()}
+                {formatPoint(
+                  modal.mode === 'edit'
+                    ? (shape?.currentGeometry ?? modal.geometry)
+                    : activeGeometry,
+                ) ?? t('fieldRuntime.notSet')}
               </p>
             </div>
-            <button
-              type="button"
-              disabled={!gpsPosition}
-              onClick={() => {
-                if (!gpsPosition) return;
-                const next: GeoJSON.Geometry = {
-                  type: 'Point',
-                  coordinates: [gpsPosition.lon, gpsPosition.lat],
-                };
-                setActiveGeometry(next);
-                onUpdateGeometry(next);
-              }}
-              title={
-                gpsPosition
-                  ? t('fieldGps.resnapTitle', {
-                      accuracy:
-                        gpsPosition.accuracyM < 1
-                          ? '<1'
-                          : Math.round(gpsPosition.accuracyM),
-                    })
-                  : t('fieldGps.enableLocation')
-              }
-              className="inline-flex h-10 shrink-0 items-center gap-1.5 rounded-md bg-accent px-3 text-sm font-semibold text-accent-foreground shadow-card hover:opacity-90 disabled:opacity-50"
+            <div
+              role="radiogroup"
+              aria-label={t('fieldRuntime.pointModeAria')}
+              className="inline-flex shrink-0 rounded-md border border-border bg-surface-1 p-0.5"
             >
-              <LocateFixed className="h-4 w-4" />
-              {t('fieldRuntime.updatePoint')}
-            </button>
+              {(['manual', 'gps'] as const).map((m) => (
+                <button
+                  key={m}
+                  type="button"
+                  role="radio"
+                  aria-checked={position.mode === m}
+                  onClick={() => position.onModeChange(m)}
+                  className={
+                    'inline-flex h-9 items-center gap-1.5 rounded px-3 text-sm font-medium ' +
+                    (position.mode === m
+                      ? 'bg-accent text-accent-foreground shadow-card'
+                      : 'text-ink-1 hover:bg-surface-2')
+                  }
+                >
+                  {m === 'manual' ? (
+                    <Hand className="h-4 w-4" />
+                  ) : (
+                    <LocateFixed className="h-4 w-4" />
+                  )}
+                  {m === 'manual'
+                    ? t('fieldRuntime.pointModeManual')
+                    : t('fieldRuntime.pointModeGps')}
+                </button>
+              ))}
+            </div>
+          </div>
+          <p className="text-xs text-muted">
+            {position.mode === 'manual'
+              ? t('fieldRuntime.pointManualHint')
+              : gpsPosition
+                ? t('fieldRuntime.pointGpsHint', {
+                    accuracy:
+                      gpsPosition.accuracyM < 1
+                        ? '<1'
+                        : Math.round(gpsPosition.accuracyM),
+                  })
+                : t('fieldRuntime.pointGpsWaiting')}
+          </p>
+        </div>
+      ) : null}
+      <div className="min-h-0 flex-1 overflow-y-auto p-3">
+        {shape ? (
+          <div className="mb-3">
+            <ShapeStatus dirty={shape.dirty} error={shape.error} />
           </div>
         ) : null}
-        <div className="min-h-0 flex-1 overflow-y-auto p-3">
-          <FormRuntime
-            form={form}
-            initial={initial}
-            onSubmit={handleSubmit}
-            submitLabel={
-              modal.mode === 'add'
-                ? t('fieldRuntime.saveFeature')
-                : t('fieldRuntime.saveChanges')
-            }
-            formId={`field-form-${modal.layer.layerKey}`}
-            // #249.14: header already has a Submit button. The
-            // FormRuntime's bottom Submit was reading as a duplicate
-            // ("what's the difference between Save Feature and
-            // Submit?" - Matt). Suppress the bottom button; the
-            // small "Submitting..." indicator the runtime renders
-            // in its place keeps in-flight feedback visible.
-            hideSubmitButton
+        <FormRuntime
+          form={form}
+          initial={initial}
+          onSubmit={handleSubmit}
+          submitLabel={
+            modal.mode === 'add'
+              ? t('fieldRuntime.saveFeature')
+              : t('fieldRuntime.saveChanges')
+          }
+          formId={formId}
+          // #249.14: the header carries the submit button.
+          hideSubmitButton
+        />
+        {error ? (
+          <p
+            role="alert"
+            className="mt-2 rounded-md border border-danger/30 bg-danger/10 px-3 py-2 text-xs text-danger"
+          >
+            {error}
+          </p>
+        ) : null}
+        {/* Attachments, in both modes and with or without signal. A
+            captured file is queued against the client-generated
+            globalId, which exists as soon as the form opens, and
+            uploaded by the drain once the feature lands. See
+            field-attachments. */}
+        <div className="mt-5 border-t border-border pt-4">
+          <FieldAttachments
+            dataCollectionId={dataCollectionId}
+            dataLayerId={modal.layer.dataLayerId}
+            layerKey={modal.layer.layerKey}
+            globalId={modal.featureId}
+            currentUserId={currentUserId}
+            featureExistsOnServer={existsOnServer}
+            isOnline={isOnline}
           />
-          {error ? (
-            <p
-              role="alert"
-              className="mt-2 rounded-md border border-danger/30 bg-danger/10 px-3 py-2 text-xs text-danger"
-            >
-              {error}
-            </p>
-          ) : null}
-          {/* Attachments, in BOTH modes and with or without signal.
-              This used to be edit-mode and online-only: the endpoint
-              is keyed by feature id, so a feature being created had
-              nothing to attach to, and the upload needed a network.
-              That put the camera one save-and-reopen away from the
-              moment the collector is standing in front of the subject,
-              and out of reach entirely with no bars. A captured file
-              is queued against the client-generated globalId, which
-              exists as soon as the form opens, and uploaded by the
-              drain once the feature lands. See field-attachments. */}
-          <div className="mt-5 border-t border-border pt-4">
-            <FieldAttachments
-              dataCollectionId={dataCollectionId}
-              dataLayerId={modal.layer.dataLayerId}
-              layerKey={modal.layer.layerKey}
-              globalId={modal.featureId}
-              currentUserId={currentUserId}
-              featureExistsOnServer={modal.mode === 'edit'}
-              isOnline={isOnline}
-            />
-          </div>
-          {/* Phase C: child layers in the same data_layer that
-              reference this layer via parentFkColumn. Each row is
-              a quick-add affordance: tap to drop a fresh child
-              record under this feature, with the FK column already
-              filled in. Children that aren't editable in this
-              deployment (table-only sublayer or restricted
-              editingPolicy) are still listed but with the Add
-              button disabled so the user knows they exist. */}
-          {modal.mode === 'edit' &&
-          (modal.layer.childLayers ?? []).length > 0 ? (
-            <div className="mt-5 border-t border-border pt-4">
-              <p className="mb-2 text-sm font-semibold uppercase tracking-wide text-ink-1">
-                {t('fieldRuntime.relatedRecordsHeading')}
-              </p>
-              <div className="space-y-4">
-                {(modal.layer.childLayers ?? []).map((c) => {
-                  const childEditable = editableLayers.find(
-                    (e) =>
-                      e.dataLayerId === (c.dataLayerId ?? modal.layer.dataLayerId) &&
-                      e.layerKey === c.layerKey,
-                  );
-                  const state = relatedRowsByChild[childKey(c)];
-                  const count = state?.rows.length ?? 0;
-                  return (
-                    <div key={childKey(c)} className="space-y-2">
-                      {/* #247 / #249.21: per-child header row. Bumped
-                          to text-base for the layer name + thumb-
-                          friendly Add button, since this is a primary
-                          field-collection action read at arm's length
-                          outdoors. */}
-                      <div className="flex items-center justify-between gap-2">
-                        <div className="min-w-0 flex-1">
-                          <p className="flex items-center gap-2 truncate text-base font-semibold text-ink-0">
-                            {c.layerLabel}
-                            {state && !state.loading && !state.error ? (
-                              <span className="inline-flex h-5 min-w-5 items-center justify-center rounded-full bg-surface-2 px-1.5 text-xs font-semibold text-ink-1">
-                                {count}
-                              </span>
-                            ) : null}
-                            {state?.loading ? (
-                              <Loader2 className="h-4 w-4 animate-spin text-muted" />
-                            ) : null}
-                          </p>
-                        </div>
-                        <button
-                          type="button"
-                          disabled={!childEditable}
-                          onClick={() => {
-                            if (!childEditable) return;
-                            onAddRelated(
-                              childEditable,
-                              c.parentFkColumn,
-                              modal.featureId,
-                            );
-                          }}
-                          title={
-                            childEditable
-                              ? t('fieldRuntime.relatedAddTitle', {
-                                  layer: c.layerLabel,
-                                })
-                              : t('fieldRuntime.relatedNotEditable')
-                          }
-                          className="inline-flex h-10 shrink-0 items-center gap-1.5 rounded-md border border-border bg-surface-1 px-3 text-sm font-medium text-ink-1 hover:bg-surface-2 disabled:opacity-50"
-                        >
-                          <Plus className="h-4 w-4" />
-                          {t('fieldRuntime.relatedAdd')}
-                        </button>
-                      </div>
-                      {/* #247 / #249.21: existing-row list. Bumped to
-                          text-base for outdoor visibility; row min-h
-                          enforces a 44 px thumb target. */}
-                      {state && !state.loading ? (
-                        state.error ? (
-                          <p className="text-sm text-danger">
-                            {t('fieldRuntime.relatedLoadError', {
-                              layer: c.layerLabel,
-                              error: state.error,
-                            })}
-                          </p>
-                        ) : state.rows.length === 0 ? (
-                          <p className="text-sm text-muted">
-                            {t('fieldRuntime.relatedEmpty', {
-                              layer: c.layerLabel.toLowerCase(),
-                            })}
-                          </p>
-                        ) : (
-                          <ul className="space-y-1.5">
-                            {state.rows.map((row) => {
-                              // #266: rows sourced from the offline queue
-                              // are tagged with _pending. Show an
-                              // "(unsynced)" badge so the worker can tell
-                              // their just-captured row apart from the
-                              // synced ones, and disable Open since the
-                              // server-side feature does not exist yet
-                              // (the form runtime hydrates from the API,
-                              // not from the IDB queue).
-                              const pending = row._pending === true;
-                              return (
-                                <li
-                                  key={row.id}
-                                  className={
-                                    'flex min-h-[44px] items-center justify-between gap-2 rounded-md border px-3 py-2 ' +
-                                    (pending
-                                      ? 'border-warn/40 bg-warn/10'
-                                      : 'border-border bg-surface-0')
-                                  }
-                                >
-                                  <div className="min-w-0 flex-1">
-                                    <p className="truncate text-base text-ink-0">
-                                      {pickRelatedRowTitle(row.properties) ??
-                                        row.id.slice(0, 8)}
-                                      {pending ? (
-                                        <span className="ml-2 inline-flex items-center rounded bg-warn/25 px-1.5 py-0.5 text-xs font-medium text-warn">
-                                          {t('fieldRuntime.relatedUnsynced')}
-                                        </span>
-                                      ) : null}
-                                    </p>
-                                  </div>
-                                  <button
-                                    type="button"
-                                    disabled={!childEditable || pending}
-                                    onClick={() => {
-                                      if (!childEditable || pending) return;
-                                      onOpenRelated(childEditable, row);
-                                    }}
-                                    title={
-                                      pending
-                                        ? t('fieldRuntime.relatedWaitingSync')
-                                        : childEditable
-                                          ? t('fieldRuntime.relatedOpenTitle', {
-                                              layer: c.layerLabel,
-                                            })
-                                          : t('fieldRuntime.relatedNotEditable')
-                                    }
-                                    className="inline-flex h-9 shrink-0 items-center gap-1 rounded-md border border-border bg-surface-1 px-3 text-sm text-ink-1 hover:bg-surface-2 disabled:opacity-50"
-                                  >
-                                    {t('fieldRuntime.relatedOpen')}
-                                  </button>
-                                </li>
-                              );
-                            })}
-                          </ul>
-                        )
-                      ) : null}
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
-          ) : null}
         </div>
+        {children}
       </div>
-    </FieldSheet>
+    </div>
+  );
+}
+
+/**
+ * Related records of a feature being edited: per related table, its
+ * rows for this feature (synced ones and ones still in this device's
+ * queue) and an Add. A row opens its own form in the sheet. Add is
+ * offered where the record needs no drawing: a table, or a point that
+ * can go on the collector's position or the parent point.
+ */
+function RelatedRecordsSection({
+  dataCollectionId,
+  parent,
+  editableLayers,
+  isOnline,
+  currentUserId,
+  version,
+  parentHasPoint,
+  onOpen,
+  onAdd,
+}: {
+  dataCollectionId: string;
+  parent: Extract<FieldFormTarget, { mode: 'edit' }>;
+  editableLayers: EditableLayer[];
+  isOnline: boolean;
+  currentUserId: string;
+  version: number;
+  parentHasPoint: boolean;
+  onOpen: (
+    child: RelatedChildLayer,
+    layer: EditableLayer,
+    row: RelatedRecordRef['row'],
+  ) => void;
+  onAdd: (child: RelatedChildLayer, layer: EditableLayer) => void;
+}) {
+  const t = useT();
+  const relatedRowsByChild = useRelatedRowsByChild({
+    parentDataLayerId: parent.layer.dataLayerId,
+    parentId: parent.featureId,
+    childLayers: parent.layer.childLayers,
+    dataCollectionId,
+    isOnline,
+    currentUserId,
+    version,
+  });
+  return (
+    <div className="mt-5 border-t border-border pt-4">
+      <p className="mb-2 text-sm font-semibold uppercase tracking-wide text-ink-1">
+        {t('fieldRuntime.relatedRecordsHeading')}
+      </p>
+      <div className="space-y-4">
+        {(parent.layer.childLayers ?? []).map((c) => {
+          const childEditable = editableLayers.find(
+            (e) =>
+              e.dataLayerId === (c.dataLayerId ?? parent.layer.dataLayerId) &&
+              e.layerKey === c.layerKey,
+          );
+          const canAdd =
+            !!childEditable &&
+            childEditable.addable !== false &&
+            (childEditable.geometryType === null ||
+              (childEditable.geometryType === 'point' && parentHasPoint));
+          const state = relatedRowsByChild[childKey(c)];
+          const count = state?.rows.length ?? 0;
+          return (
+            <div key={childKey(c)} className="space-y-2">
+              {/* #247 / #249.21: per-child header row, sized for a
+                  thumb read at arm's length outdoors. */}
+              <div className="flex items-center justify-between gap-2">
+                <div className="min-w-0 flex-1">
+                  <p className="flex items-center gap-2 truncate text-base font-semibold text-ink-0">
+                    {c.layerLabel}
+                    {state && !state.loading && !state.error ? (
+                      <span className="inline-flex h-5 min-w-5 items-center justify-center rounded-full bg-surface-2 px-1.5 text-xs font-semibold text-ink-1">
+                        {count}
+                      </span>
+                    ) : null}
+                    {state?.loading ? (
+                      <Loader2 className="h-4 w-4 animate-spin text-muted" />
+                    ) : null}
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  disabled={!canAdd}
+                  onClick={() => {
+                    if (canAdd && childEditable) onAdd(c, childEditable);
+                  }}
+                  title={
+                    childEditable
+                      ? t('fieldRuntime.relatedAddTitle', { layer: c.layerLabel })
+                      : t('fieldRuntime.relatedNotEditable')
+                  }
+                  className="inline-flex h-10 shrink-0 items-center gap-1.5 rounded-md border border-border bg-surface-1 px-3 text-sm font-medium text-ink-1 hover:bg-surface-2 disabled:opacity-50"
+                >
+                  <Plus className="h-4 w-4" />
+                  {t('featureEdit.relatedAdd')}
+                </button>
+              </div>
+              {state && !state.loading ? (
+                state.error ? (
+                  <p className="text-sm text-danger">
+                    {t('fieldRuntime.relatedLoadError', {
+                      layer: c.layerLabel,
+                      error: state.error,
+                    })}
+                  </p>
+                ) : state.rows.length === 0 ? (
+                  <p className="text-sm text-muted">
+                    {t('fieldRuntime.relatedEmpty', {
+                      layer: c.layerLabel.toLowerCase(),
+                    })}
+                  </p>
+                ) : (
+                  <ul className="space-y-1.5">
+                    {state.rows.map((row) => {
+                      // #266: rows still in the offline queue carry
+                      // _pending and an "(unsynced)" badge. They open
+                      // like any other: an edit or delete folds into
+                      // the queued capture.
+                      const pending = row._pending === true;
+                      return (
+                        <li key={row.id}>
+                          <button
+                            type="button"
+                            disabled={!childEditable}
+                            onClick={() => {
+                              if (childEditable) onOpen(c, childEditable, row);
+                            }}
+                            title={
+                              childEditable
+                                ? t('fieldRuntime.relatedOpenTitle', { layer: c.layerLabel })
+                                : t('fieldRuntime.relatedNotEditable')
+                            }
+                            className={
+                              'flex min-h-[44px] w-full items-center justify-between gap-2 rounded-md border px-3 py-2 text-left hover:bg-surface-2 disabled:opacity-60 ' +
+                              (pending
+                                ? 'border-warn/40 bg-warn/10'
+                                : 'border-border bg-surface-0')
+                            }
+                          >
+                            <span className="min-w-0 flex-1 truncate text-base text-ink-0">
+                              {pickRelatedRowTitle(row.properties) ?? row.id.slice(0, 8)}
+                              {pending ? (
+                                <span className="ml-2 inline-flex items-center rounded bg-warn/25 px-1.5 py-0.5 text-xs font-medium text-warn">
+                                  {t('fieldRuntime.relatedUnsynced')}
+                                </span>
+                              ) : null}
+                            </span>
+                            <ChevronRight className="h-4 w-4 shrink-0 text-muted" />
+                          </button>
+                        </li>
+                      );
+                    })}
+                  </ul>
+                )
+              ) : null}
+            </div>
+          );
+        })}
+      </div>
+    </div>
   );
 }
 
@@ -4907,6 +5598,8 @@ function FieldFeaturePopupSheet({
   onClose,
   onEdit,
   onCopy,
+  onZoomTo,
+  onDelete,
   onOpenRelated,
   onCoveredHeightChange,
 }: {
@@ -4930,6 +5623,10 @@ function FieldFeaturePopupSheet({
   onClose: () => void;
   onEdit: (hit: FeatureSheetHit) => void;
   onCopy: (hit: FeatureSheetHit) => void;
+  /** Fit the map to the feature, like the builder popup's Zoom to. */
+  onZoomTo: (hit: FeatureSheetHit) => void;
+  /** Delete the feature, after a confirm the runtime owns. */
+  onDelete: (hit: FeatureSheetHit) => void;
   /** Reports how much of the map this sheet covers, so the runtime can
    *  pad the camera out from under it. */
   onCoveredHeightChange: (px: number) => void;
@@ -4937,12 +5634,10 @@ function FieldFeaturePopupSheet({
    *  runtime owns the FormModal so the popup just hands off the
    *  resolved (childLayer, feature) pair. */
   onOpenRelated: (
+    parent: FeatureSheetHit,
+    child: RelatedChildLayer,
     childLayer: EditableLayer,
-    feature: {
-      id: string;
-      properties: Record<string, unknown>;
-      geometry: GeoJSON.Geometry | null;
-    },
+    row: RelatedRecordRef['row'],
   ) => void;
 }) {
   const t = useT();
@@ -5065,39 +5760,59 @@ function FieldFeaturePopupSheet({
           </button>
         </header>
 
-        {/* Action bar (detail mode only). Edit / Copy as primary;
-            the More menu can land in a follow-up. */}
+        {/* Action bar (detail mode only): Zoom to, Edit and Delete, the
+            map builder popup's actions, plus the field app's Copy. */}
         {concrete.mode === 'detail' ? (
-          <div className="flex shrink-0 items-center gap-2 border-b border-border bg-surface-0 px-3 py-2">
+          <div className="flex shrink-0 items-center gap-1.5 border-b border-border bg-surface-0 px-2 py-2">
+            <button
+              type="button"
+              disabled={!concrete.hit.geometry}
+              onClick={() => onZoomTo(concrete.hit)}
+              className="inline-flex h-10 min-w-0 flex-1 items-center justify-center gap-1 rounded-md border border-border bg-surface-1 px-2 text-sm font-medium text-ink-1 hover:bg-surface-2 disabled:opacity-50"
+            >
+              <ZoomIn className="h-4 w-4 shrink-0" />
+              <span className="truncate">{t('featureEdit.popupZoomTo')}</span>
+            </button>
             <button
               type="button"
               disabled={
                 !concrete.hit.editable || !concrete.hit.globalId
               }
               onClick={() => onEdit(concrete.hit)}
-              className="inline-flex h-10 flex-1 items-center justify-center gap-1.5 rounded-md border border-border bg-surface-1 px-3 text-sm font-medium text-ink-1 hover:bg-surface-2 disabled:opacity-50"
+              className="inline-flex h-10 min-w-0 flex-1 items-center justify-center gap-1 rounded-md border border-border bg-surface-1 px-2 text-sm font-medium text-ink-1 hover:bg-surface-2 disabled:opacity-50"
               title={
                 concrete.hit.editable
                   ? t('fieldRuntime.sheetEditTitle')
                   : t('fieldRuntime.relatedNoEditAccess')
               }
             >
-              <Crosshair className="h-4 w-4" />
-              {t('fieldRuntime.sheetEdit')}
+              <Pencil className="h-4 w-4 shrink-0" />
+              <span className="truncate">{t('fieldRuntime.sheetEdit')}</span>
             </button>
             <button
               type="button"
               disabled={!concrete.hit.editable}
               onClick={() => onCopy(concrete.hit)}
-              className="inline-flex h-10 flex-1 items-center justify-center gap-1.5 rounded-md border border-border bg-surface-1 px-3 text-sm font-medium text-ink-1 hover:bg-surface-2 disabled:opacity-50"
+              className="inline-flex h-10 min-w-0 flex-1 items-center justify-center gap-1 rounded-md border border-border bg-surface-1 px-2 text-sm font-medium text-ink-1 hover:bg-surface-2 disabled:opacity-50"
               title={
                 concrete.hit.editable
                   ? t('fieldRuntime.sheetCopyTitle')
                   : t('fieldRuntime.relatedNoEditAccess')
               }
             >
-              <Plus className="h-4 w-4" />
-              {t('fieldRuntime.sheetCopy')}
+              <Plus className="h-4 w-4 shrink-0" />
+              <span className="truncate">{t('fieldRuntime.sheetCopy')}</span>
+            </button>
+            <button
+              type="button"
+              disabled={
+                !concrete.hit.editable || !concrete.hit.globalId
+              }
+              onClick={() => onDelete(concrete.hit)}
+              className="inline-flex h-10 min-w-0 flex-1 items-center justify-center gap-1 rounded-md border border-border bg-surface-1 px-2 text-sm font-medium text-danger hover:bg-danger/10 disabled:opacity-50"
+            >
+              <Trash2 className="h-4 w-4 shrink-0" />
+              <span className="truncate">{t('featureEdit.popupDelete')}</span>
             </button>
           </div>
         ) : null}
@@ -5247,7 +5962,9 @@ function FieldFeaturePopupSheet({
                           <ul className="space-y-1.5">
                             {rowsState.rows.map((row) => {
                               const pending = row._pending === true;
-                              const canOpen = !!child && !pending;
+                              // A queued row opens too: its edit or delete
+                              // folds into the capture waiting to sync.
+                              const canOpen = !!child;
                               return (
                                 <li
                                   key={row.id}
@@ -5273,17 +5990,15 @@ function FieldFeaturePopupSheet({
                                     type="button"
                                     disabled={!canOpen}
                                     onClick={() => {
-                                      if (!canOpen || !child) return;
-                                      onOpenRelated(child, row);
+                                      if (!canOpen || !child || !detailHit) return;
+                                      onOpenRelated(detailHit, c, child, row);
                                     }}
                                     title={
-                                      pending
-                                        ? t('fieldRuntime.relatedWaitingSync')
-                                        : !child
-                                          ? t('fieldRuntime.relatedNoEditAccess')
-                                          : t('fieldRuntime.relatedOpenTitle', {
-                                              layer: c.layerLabel,
-                                            })
+                                      !child
+                                        ? t('fieldRuntime.relatedNoEditAccess')
+                                        : t('fieldRuntime.relatedOpenTitle', {
+                                            layer: c.layerLabel,
+                                          })
                                     }
                                     className="inline-flex h-9 shrink-0 items-center gap-1 rounded-md border border-border bg-surface-1 px-3 text-sm text-ink-1 hover:bg-surface-2 disabled:opacity-50"
                                   >
@@ -5392,16 +6107,25 @@ function FieldGpsStrip({
  * non-zero, matching the convention from Apple/Google maps.
  */
 function FieldNavCluster({
-  mapRef,
+  map,
+  compassMode,
+  onCompassTap,
 }: {
-  mapRef: React.MutableRefObject<maplibregl.Map | null>;
+  /** The live map, as state: the cluster mounts before the map exists
+   *  (and outlives a basemap swap that replaces it), so subscribing
+   *  through a ref read once at mount never subscribed at all and the
+   *  compass never followed the bearing. */
+  map: maplibregl.Map | null;
+  /** The map turns with the device (heading-up). */
+  compassMode: boolean;
+  /** North-up reset, or heading-up on and off; the runtime decides. */
+  onCompassTap: () => void;
 }) {
   const t = useT();
   const [bearing, setBearing] = useState(0);
   const [pitch, setPitch] = useState(0);
 
   useEffect(() => {
-    const map = mapRef.current;
     if (!map) return undefined;
     const update = () => {
       setBearing(map.getBearing());
@@ -5414,7 +6138,7 @@ function FieldNavCluster({
       map.off('rotate', update);
       map.off('pitch', update);
     };
-  }, [mapRef]);
+  }, [map]);
 
   const offNorth = Math.abs(bearing) > 0.5 || Math.abs(pitch) > 0.5;
 
@@ -5422,7 +6146,7 @@ function FieldNavCluster({
     <div className="absolute right-3 top-3 z-10 flex flex-col overflow-hidden rounded-md border border-border bg-surface-1 shadow-card">
       <button
         type="button"
-        onClick={() => mapRef.current?.zoomIn()}
+        onClick={() => map?.zoomIn()}
         aria-label={t('fieldRuntime.zoomInAria')}
         className="inline-flex h-11 w-11 items-center justify-center hover:bg-surface-2"
       >
@@ -5430,7 +6154,7 @@ function FieldNavCluster({
       </button>
       <button
         type="button"
-        onClick={() => mapRef.current?.zoomOut()}
+        onClick={() => map?.zoomOut()}
         aria-label={t('fieldRuntime.zoomOutAria')}
         className="inline-flex h-11 w-11 items-center justify-center border-t border-border hover:bg-surface-2"
       >
@@ -5438,20 +6162,24 @@ function FieldNavCluster({
       </button>
       <button
         type="button"
-        onClick={() => {
-          // #249.15: reset bearing AND pitch to 0. MapLibre's default
-          // compass click only resets bearing, but in a touch-driven
-          // context we routinely catch a 3D pitch from a two-finger
-          // drag. Resetting both with one tap matches the "I want
-          // north up, flat" mental model.
-          mapRef.current?.easeTo({ bearing: 0, pitch: 0, duration: 300 });
-        }}
-        aria-label={t('fieldRuntime.resetBearingAria')}
-        className="inline-flex h-11 w-11 items-center justify-center border-t border-border hover:bg-surface-2"
+        onClick={onCompassTap}
+        aria-label={
+          offNorth && !compassMode
+            ? t('fieldRuntime.resetBearingAria')
+            : t('fieldRuntime.compassFollowAria')
+        }
+        aria-pressed={compassMode}
+        className={`inline-flex h-11 w-11 items-center justify-center border-t border-border ${
+          compassMode ? 'bg-accent hover:opacity-90' : 'hover:bg-surface-2'
+        }`}
       >
         <Compass
           className={`h-5 w-5 transition-colors ${
-            offNorth ? 'text-ink-0' : 'text-muted'
+            compassMode
+              ? 'text-accent-foreground'
+              : offNorth
+                ? 'text-ink-0'
+                : 'text-muted'
           }`}
           // The arrow rotates with the map bearing so the user sees
           // which direction is north at a glance. Negative because

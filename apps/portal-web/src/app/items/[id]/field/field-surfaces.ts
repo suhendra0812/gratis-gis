@@ -14,7 +14,7 @@
 
 // `import type` only, so this cycle back to field-runtime.tsx is
 // erased at compile time and creates no runtime import cycle.
-import type { EditableLayer } from './field-runtime';
+import type { EditableLayer, RelatedChildLayer } from './field-runtime';
 
 /** One feature the collector tapped, as the sheet renders it. */
 export interface FeatureSheetHit {
@@ -89,7 +89,25 @@ export type FormModalState =
       featureId: string;
       properties: Record<string, unknown>;
       geometry: GeoJSON.Geometry | null;
+      /** Open straight into one related record of this feature (a row
+       *  tapped in the feature sheet). Back from it lands on this
+       *  feature's own form, the way the map builder's Edit feature
+       *  panel drills into a related record. */
+      openRelated?: RelatedRecordRef;
     };
+
+/** A related record and the table it lives in. */
+export interface RelatedRecordRef {
+  child: RelatedChildLayer;
+  layer: EditableLayer;
+  row: {
+    id: string;
+    properties: Record<string, unknown>;
+    geometry: GeoJSON.Geometry | null;
+    /** Still in this device's queue, not on the server yet. */
+    _pending?: boolean;
+  };
+}
 
 /**
  * What the map tap gesture currently means.
@@ -137,3 +155,4 @@ export type MapInteractionMode =
  * have invented an exclusivity the product does not have.
  */
 export type BottomSheet = 'none' | 'form' | 'picker' | 'feature';
+

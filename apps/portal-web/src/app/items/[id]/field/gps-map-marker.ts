@@ -34,6 +34,35 @@ import type { GpsPosition } from './use-geolocation';
 const SOURCE_ID = 'gg-gps-source';
 const RING_LAYER_ID = 'gg-gps-ring';
 const DOT_LAYER_ID = 'gg-gps-dot';
+const HEADING_LAYER_ID = 'gg-gps-heading';
+const HEADING_IMAGE_ID = 'gg-gps-heading-cone';
+
+/**
+ * The "which way am I facing" cone under the dot, pointing up (north)
+ * before rotation: a 60° wedge fading out from the centre, the way
+ * Google and Apple Maps draw it. Drawn once on a canvas at 2x and added
+ * as a style image; the symbol layer rotates it per feature.
+ */
+function headingConeImage(): ImageData | null {
+  if (typeof document === 'undefined') return null;
+  const size = 112;
+  const canvas = document.createElement('canvas');
+  canvas.width = size;
+  canvas.height = size;
+  const g = canvas.getContext('2d');
+  if (!g) return null;
+  const c = size / 2;
+  const grad = g.createRadialGradient(c, c, 0, c, c, c);
+  grad.addColorStop(0, 'rgba(29, 78, 216, 0.6)');
+  grad.addColorStop(1, 'rgba(29, 78, 216, 0)');
+  g.fillStyle = grad;
+  g.beginPath();
+  g.moveTo(c, c);
+  g.arc(c, c, c, -Math.PI / 2 - Math.PI / 6, -Math.PI / 2 + Math.PI / 6);
+  g.closePath();
+  g.fill();
+  return g.getImageData(0, 0, size, size);
+}
 
 /**
  * MapLibre's circle-radius is in pixels. To paint a disc that
@@ -53,12 +82,17 @@ export interface GpsMarkerHandle {
   /** Push a new position into the source. Pass `null` to hide the
    *  marker (and stop reading-pixels-per-meter on move). */
   update: (pos: GpsPosition | null) => void;
+  /** Which way the user faces, degrees clockwise from north; null
+   *  hides the cone. Separate from update() because the compass ticks
+   *  far more often than the GPS fix. */
+  setHeading: (deg: number | null) => void;
   /** Detach: removes layers, source, and the move listener. */
   detach: () => void;
 }
 
 export function createGpsMarker(map: maplibregl.Map): GpsMarkerHandle {
   let lastPosition: GpsPosition | null = null;
+  let lastHeading: number | null = null;
 
   function recomputeRingRadiusPx(): number {
     if (!lastPosition) return 0;
@@ -89,9 +123,11 @@ export function createGpsMarker(map: maplibregl.Map): GpsMarkerHandle {
             type: 'Point',
             coordinates: [lastPosition.lon, lastPosition.lat],
           },
+          // heading is left out, not null, when unknown: the cone's
+          // filter is "has heading".
           properties: {
             ringPx: recomputeRingRadiusPx(),
-            heading: lastPosition.headingDeg,
+            ...(lastHeading !== null ? { heading: lastHeading } : {}),
           },
         },
       ],
@@ -131,6 +167,33 @@ export function createGpsMarker(map: maplibregl.Map): GpsMarkerHandle {
           'circle-stroke-opacity': 0.45,
         },
       });
+    }
+    if (!map.hasImage(HEADING_IMAGE_ID)) {
+      const img = headingConeImage();
+      if (img) map.addImage(HEADING_IMAGE_ID, img, { pixelRatio: 2 });
+    }
+    if (!map.getLayer(HEADING_LAYER_ID) && map.hasImage(HEADING_IMAGE_ID)) {
+      // Under the dot: before it when the dot already exists (a
+      // re-attach), otherwise added first and the dot lands on top.
+      map.addLayer(
+        {
+          id: HEADING_LAYER_ID,
+          type: 'symbol',
+          source: SOURCE_ID,
+          filter: ['has', 'heading'],
+          layout: {
+            'icon-image': HEADING_IMAGE_ID,
+            'icon-rotate': ['get', 'heading'],
+            // Relative to the map, so the cone keeps pointing the
+            // right way when the map itself is rotated.
+            'icon-rotation-alignment': 'map',
+            'icon-pitch-alignment': 'map',
+            'icon-allow-overlap': true,
+            'icon-ignore-placement': true,
+          },
+        },
+        map.getLayer(DOT_LAYER_ID) ? DOT_LAYER_ID : undefined,
+      );
     }
     if (!map.getLayer(DOT_LAYER_ID)) {
       map.addLayer({
@@ -198,10 +261,17 @@ export function createGpsMarker(map: maplibregl.Map): GpsMarkerHandle {
       ensureSourceAndLayers();
       pushSourceData();
     },
+    setHeading(deg) {
+      if (deg === lastHeading) return;
+      lastHeading = deg;
+      if (!lastPosition || !map.isStyleLoaded()) return;
+      pushSourceData();
+    },
     detach() {
       map.off('zoom', onMove);
       map.off('styledata', onStyleData);
       if (map.getLayer(DOT_LAYER_ID)) map.removeLayer(DOT_LAYER_ID);
+      if (map.getLayer(HEADING_LAYER_ID)) map.removeLayer(HEADING_LAYER_ID);
       if (map.getLayer(RING_LAYER_ID)) map.removeLayer(RING_LAYER_ID);
       if (map.getSource(SOURCE_ID)) map.removeSource(SOURCE_ID);
     },

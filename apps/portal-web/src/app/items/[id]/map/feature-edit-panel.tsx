@@ -262,7 +262,7 @@ export function FeatureEditPanel(props: FeatureEditPanelProps) {
   );
 }
 
-function ShapeStatus({ dirty, error }: { dirty: boolean; error: string | null }) {
+export function ShapeStatus({ dirty, error }: { dirty: boolean; error: string | null }) {
   const t = useT();
   return (
     <section className="rounded-md border border-border bg-surface-2 px-3 py-2">

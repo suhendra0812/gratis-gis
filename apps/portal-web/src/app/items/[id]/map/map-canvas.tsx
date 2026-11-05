@@ -4508,7 +4508,7 @@ function popupActionBar({
 }
 
 /** Fit the camera to a geometry; a point eases in to street level. */
-function zoomToGeometry(m: maplibregl.Map, g: GeoJSON.Geometry) {
+export function zoomToGeometry(m: maplibregl.Map, g: GeoJSON.Geometry) {
   let minX = Infinity;
   let minY = Infinity;
   let maxX = -Infinity;
