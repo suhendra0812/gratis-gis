@@ -40,6 +40,12 @@ versioning policy is in [docs/VERSIONING.md](./docs/VERSIONING.md).
   app list and add related rows through these and through in-item
   event-tracking tables alike, from one resolver
   (`relatedTableRefs`).
+- App Builder: dropping or resizing a widget over others pushes them
+  down to just below it, cascading, the way Experience Builder does;
+  maps and tabs stay backgrounds that widgets float over, and holding
+  **Alt** places freely. Guides show when a dragged widget's edges or
+  centre line up with another's. A **Desktop / Phone** switch
+  previews the runtime's stacked phone layout while designing.
 - Home NAS installs run the point-cloud worker when `GRATIS_ANALYSIS`
   is `on` (the default) and sleep it when set to `off`. Admin backups
   are stored on a volume that survives recreating the API container.

@@ -639,6 +639,19 @@
   }
 }
 
+/* App Builder phone preview: each slot is placed by the runtime's
+   phone stacking (mobilePlacements); the widget card inside fills it
+   and ignores its desktop grid placement (the slot is not a grid). */
+.app-designer-phone-slot {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.app-designer-phone-slot > * {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
 /* Phone layout for a custom app / dashboard. The authoring grid is
    192 columns and stays that way on a wide screen. Below the md
    breakpoint the same widgets reflow from the --m-* variables the

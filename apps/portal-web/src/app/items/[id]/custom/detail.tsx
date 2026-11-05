@@ -43,6 +43,8 @@ import {
   Search,
   Settings,
   Sparkles,
+  Monitor,
+  Smartphone,
   Square,
   Table2,
   Trash2,
@@ -51,6 +53,8 @@ import {
   X,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
+import { alignmentGuides, pushDownCollisions, type GridBox } from '@/lib/grid-collision';
+import { mobilePlacements } from '@/lib/mobile-canvas';
 import type {
   AppDataSource,
   BasemapData,
@@ -1139,6 +1143,25 @@ export function CustomAppDetail({
                 addWidgetAt(kind, col, row, targetParentId, targetLayout)
               }
               onWidgetLayout={(id, layout) => updateWidget(id, { layout })}
+              onPushRows={(rows) => {
+                setApp((cur) => ({
+                  ...cur,
+                  pages: cur.pages.map((p, i) =>
+                    i !== activePageIdx
+                      ? p
+                      : {
+                          ...p,
+                          widgets: p.widgets.map((w) => {
+                            const row = rows.get(w.id);
+                            return row === undefined
+                              ? w
+                              : { ...w, layout: { ...w.layout, row } };
+                          }),
+                        },
+                  ),
+                }));
+                setDirty(true);
+              }}
               onWidgetMove={(id, targetParentId, targetIndex, pageLayout) => {
                 setApp((cur) => ({
                   ...cur,
@@ -1913,6 +1936,12 @@ function PageTabs({
 // ROW_HEIGHT_PX is gone (#80): rows are viewport-proportional now,
 // matching the runtime; px-per-row is measured live off the grid.
 const GRID_COLS = 192;
+
+/** A page widget's grid box, for collision and alignment checks. */
+function toGridBox(w: CustomWidget): GridBox {
+  const { col, row, colSpan, rowSpan } = w.layout;
+  return { id: w.id, col, row, colSpan, rowSpan };
+}
 const GAP_PX = 1.5;
 /**
  * Floor for the canvas's working width. On viewports narrower than
@@ -2020,6 +2049,7 @@ function Canvas({
   onCanvasDrop,
   onWidgetLayout,
   onWidgetMove,
+  onPushRows,
 }: {
   widgets: CustomWidget[];
   selectedId: string | null;
@@ -2074,6 +2104,11 @@ function Canvas({
   ) => void;
   onWidgetLayout: (id: string, layout: CustomLayout) => void;
   /**
+   * New `row` for page-level widgets pushed down by a drop or resize
+   * that landed on them (see pushDownCollisions).
+   */
+  onPushRows: (rows: Map<string, number>) => void;
+  /**
    * #96: reparent / reorder a widget.  Called on mouseup when the
    * move gesture crossed a parent boundary OR reordered within the
    * same container.  `targetParentId === null` means "land at the
@@ -2097,6 +2132,9 @@ function Canvas({
   // sibling slots that sticky/dock containers live in.
   const gridRef = useRef<HTMLDivElement | null>(null);
   const [gesture, setGesture] = useState<ActiveGesture | null>(null);
+  // Phone preview: the page as the runtime stacks it below 768px.
+  // Read-only; layout is authored on the desktop grid.
+  const [phonePreview, setPhonePreview] = useState(false);
   // #53 WYSIWYG: drag-from-palette drop-target indicator.  When
   // a palette tile is hovered over a container's footprint, we
   // light up that container with an outline so the user knows
@@ -2497,6 +2535,9 @@ function Canvas({
       onWidgetLayout(g.widgetId, next);
     }
     function onUp(e: MouseEvent) {
+      // A page-level resize, or a page-level move that stayed on the
+      // page, may now cover other widgets; those get pushed below it.
+      let landedOnPage = g.kind !== 'move' && g.srcParentId === null;
       // #96: on release of a move gesture, decide whether the
       // gesture crossed a parent boundary (reparent), reordered
       // within the same container, or was a pure top-level grid
@@ -2538,6 +2579,7 @@ function Canvas({
             e.clientY <= gridRect.bottom;
           if (!overGrid) targetParentId = g.srcParentId;
         }
+        landedOnPage = g.srcParentId === null && targetParentId === null;
         if (targetParentId !== g.srcParentId) {
           // Reparent.
           //
@@ -2623,6 +2665,21 @@ function Canvas({
         // targetParentId === null && srcParentId === null: pure
         // page-level grid move; onMove already applied it.
       }
+      // Push what the widget now covers down below it, unless Alt is
+      // held (place freely, overlap on purpose). Maps and tabs are
+      // backgrounds that widgets float over; see grid-collision.ts.
+      if (landedOnPage && !e.altKey) {
+        const grid = widgets.filter((w) => !isPartitionedContainer(w));
+        const pushed = pushDownCollisions(
+          grid.map(toGridBox),
+          g.widgetId,
+          (id) => {
+            const w = grid.find((x) => x.id === id);
+            return w?.kind === 'map' || w?.kind === 'tabs';
+          },
+        );
+        if (pushed.size > 0) onPushRows(pushed);
+      }
       setDropTargetId(null);
       setGesture(null);
     }
@@ -2632,7 +2689,7 @@ function Canvas({
       window.removeEventListener('mousemove', onMove);
       window.removeEventListener('mouseup', onUp);
     };
-  }, [gesture, onWidgetLayout, onWidgetMove, widgets]);
+  }, [gesture, onWidgetLayout, onWidgetMove, onPushRows, widgets]);
 
   // #98: partition top-level widgets the same way the runtime does
   // (apps/portal-web/.../runtime-client.tsx ~L651): sticky / dock
@@ -2668,13 +2725,15 @@ function Canvas({
     ...canvasWidgets.filter((w) => w.kind !== 'map' && w.kind !== 'tabs'),
   ];
 
-  const renderWidget = (w: CustomWidget, inGrid: boolean) => (
+  // `preview`: drawn in the phone preview, where the desktop grid
+  // coordinates do not apply, so it cannot be dragged or resized.
+  const renderWidget = (w: CustomWidget, inGrid: boolean, preview = false) => (
     <WidgetCard
       key={w.id}
       widget={w}
       inGrid={inGrid}
       selected={w.id === selectedId}
-      canEdit={canEdit}
+      canEdit={canEdit && !preview}
       gesturing={Boolean(gesture && gesture.widgetId === w.id)}
       anyGesture={gesture !== null}
       isDropTarget={w.id === dropTargetId}
@@ -2704,6 +2763,112 @@ function Canvas({
     />
   );
 
+  // Alignment guides while a page-level widget is dragged or
+  // resized: its edges and centre against every other grid widget.
+  const movingTop =
+    gesture && gesture.srcParentId === null
+      ? canvasWidgets.find((w) => w.id === gesture.widgetId)
+      : undefined;
+  const guides = movingTop
+    ? alignmentGuides(toGridBox(movingTop), canvasWidgets.map(toGridBox))
+    : [];
+
+  // Phone preview placements: the runtime's own stacking (indicators
+  // two-up, everything else full width, in reading order).
+  const phonePlacements = phonePreview
+    ? mobilePlacements(
+        canvasWidgets.map((w) => ({
+          id: w.id,
+          kind: w.kind,
+          col: w.layout.col,
+          row: w.layout.row,
+          colSpan: w.layout.colSpan,
+          rowSpan: w.layout.rowSpan,
+        })),
+      )
+    : [];
+
+  const viewToggle = (
+    <div
+      role="group"
+      aria-label="Canvas view"
+      className="absolute bottom-3 right-3 z-40 flex items-center gap-0.5 rounded-md border border-border bg-surface-1/95 p-0.5 shadow-card backdrop-blur-xs"
+      onClick={(e) => e.stopPropagation()}
+    >
+      {(
+        [
+          { phone: false, label: 'Desktop', Icon: Monitor },
+          { phone: true, label: 'Phone', Icon: Smartphone },
+        ] as const
+      ).map(({ phone, label, Icon }) => (
+        <button
+          key={label}
+          type="button"
+          aria-pressed={phonePreview === phone}
+          title={phone ? 'Preview the phone layout (read-only)' : 'Edit the desktop layout'}
+          onClick={() => setPhonePreview(phone)}
+          className={`inline-flex h-7 items-center gap-1 rounded px-2 text-xs font-medium ${
+            phonePreview === phone
+              ? 'bg-accent text-accent-foreground'
+              : 'text-muted hover:bg-surface-2 hover:text-ink-0'
+          }`}
+        >
+          <Icon className="h-3.5 w-3.5" />
+          {label}
+        </button>
+      ))}
+    </div>
+  );
+
+  if (phonePreview) {
+    return (
+      <div
+        ref={themeRootRef}
+        style={{ fontFamily: 'var(--app-font, var(--font-sans))' }}
+        className="relative flex h-full w-full overflow-hidden rounded-lg border border-border bg-surface-2"
+      >
+        {viewToggle}
+        <div
+          className="flex min-h-0 flex-1 justify-center overflow-auto p-6"
+          onClick={() => onSelect(null)}
+        >
+          {/* A phone-sized frame laid out like the runtime below its
+              768px breakpoint: bars and docks stacked, then the page
+              widgets two columns wide. */}
+          <div className="h-fit w-[390px] shrink-0 overflow-hidden rounded-[28px] border-8 border-ink-0/80 bg-[hsl(var(--app-surface-0))] shadow-raised">
+            {stickyTops.map((w) => renderWidget(w, false, true))}
+            {leftDocks.map((w) => renderWidget(w, false, true))}
+            <div
+              className="grid gap-2 p-2"
+              style={{ gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 1fr)' }}
+            >
+              {phonePlacements.map((m) => {
+                const w = canvasWidgets.find((x) => x.id === m.id);
+                if (!w) return null;
+                return (
+                  <div
+                    key={m.id}
+                    className="app-designer-phone-slot"
+                    style={{
+                      gridColumn: m.column,
+                      gridRow: m.row,
+                      height: m.height,
+                      minHeight: m.minHeight === '0px' ? '56px' : m.minHeight,
+                    }}
+                  >
+                    {renderWidget(w, true, true)}
+                  </div>
+                );
+              })}
+            </div>
+            {rightDocks.map((w) => renderWidget(w, false, true))}
+            {stickyBottoms.map((w) => renderWidget(w, false, true))}
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div
       ref={themeRootRef}
@@ -2717,6 +2882,7 @@ function Canvas({
       style={{ fontFamily: 'var(--app-font, var(--font-sans))' }}
       className="relative flex h-full w-full overflow-hidden rounded-lg border border-border bg-[hsl(var(--app-surface-0))]"
     >
+      {viewToggle}
       <div
         ref={canvasRef}
         onDragOver={onDragOver}
@@ -2769,6 +2935,35 @@ function Canvas({
               }}
             >
               {orderedCanvas.map((w) => renderWidget(w, true))}
+              {guides.map((gd) => {
+                // A guide sits on a grid line: the start edge of the
+                // track after it, or the end edge of the last track.
+                const isX = gd.axis === 'x';
+                const last = isX ? GRID_COLS : totalRows;
+                const track = Math.min(gd.line, last);
+                const atEnd = gd.line > last;
+                const edge = isX
+                  ? atEnd
+                    ? 'border-r'
+                    : 'border-l'
+                  : atEnd
+                    ? 'border-b'
+                    : 'border-t';
+                return (
+                  <div
+                    key={`${gd.axis}:${gd.line}:${gd.center}`}
+                    aria-hidden
+                    className={`pointer-events-none ${edge} ${
+                      gd.center ? 'border-dashed' : 'border-solid'
+                    } border-accent`}
+                    style={{
+                      gridColumn: isX ? `${track} / span 1` : '1 / -1',
+                      gridRow: isX ? '1 / -1' : `${track} / span 1`,
+                      zIndex: 40,
+                    }}
+                  />
+                );
+              })}
               {orderedCanvas.length === 0 && stickyTops.length === 0 &&
                 stickyBottoms.length === 0 && leftDocks.length === 0 &&
                 rightDocks.length === 0 && (
