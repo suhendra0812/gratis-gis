@@ -2254,6 +2254,22 @@ const iconsInFlight = new WeakMap<maplibregl.Map, boolean>();
  * registered already) must return false or the caller's tick bump
  * loops forever through the styledata events the re-sync emits.
  */
+/**
+ * `m.hasImage(id)`, or true once the map has no style: it was removed
+ * (the component unmounted) or a basemap swap is between styles.
+ *
+ * Icon loading awaits rasterising, SDF building and fetches between
+ * these checks, and the map can go away in the meantime. hasImage then
+ * reads `style.getImage` off an undefined style and throws ("Cannot
+ * read properties of undefined (reading 'getImage')"). Answering true
+ * makes every remaining step skip its addImage, so a late load just
+ * stops; the next styledata pass reloads icons on the new style.
+ */
+function hasImageOrGone(m: maplibregl.Map, id: string): boolean {
+  if (!m.style) return true;
+  return m.hasImage(id);
+}
+
 async function loadAllIcons(m: maplibregl.Map): Promise<boolean> {
   if (iconsInFlight.get(m)) return false;
   // Fast path: every icon is already registered. Avoids the
@@ -2261,7 +2277,7 @@ async function loadAllIcons(m: maplibregl.Map): Promise<boolean> {
   // tick after the initial load.
   let allLoaded = true;
   for (const name of Object.keys(MAP_ICONS)) {
-    if (!m.hasImage(iconImageId(name)) || !m.hasImage(iconSdfImageId(name))) {
+    if (!hasImageOrGone(m, iconImageId(name)) || !hasImageOrGone(m, iconSdfImageId(name))) {
       allLoaded = false;
       break;
     }
@@ -2282,12 +2298,12 @@ async function loadAllIconsImpl(m: maplibregl.Map): Promise<void> {
     Object.keys(MAP_ICONS).map(async (name) => {
       const plainId = iconImageId(name);
       const sdfId = iconSdfImageId(name);
-      if (!m.hasImage(plainId)) {
+      if (!hasImageOrGone(m, plainId)) {
         try {
           const svg = renderIconSvg(name);
           if (svg) {
             const img = await rasterizeSvg(svg, 48);
-            if (!m.hasImage(plainId)) {
+            if (!hasImageOrGone(m, plainId)) {
               m.addImage(plainId, img, { pixelRatio: 2 });
             }
           }
@@ -2295,12 +2311,12 @@ async function loadAllIconsImpl(m: maplibregl.Map): Promise<void> {
           /* non-fatal */
         }
       }
-      if (!m.hasImage(sdfId)) {
+      if (!hasImageOrGone(m, sdfId)) {
         try {
           const svg = renderIconSvgForSdf(name);
           if (svg) {
             const sdf = await svgToSdf(svg, 48);
-            if (!m.hasImage(sdfId)) {
+            if (!hasImageOrGone(m, sdfId)) {
               m.addImage(sdfId, sdf, { pixelRatio: 2, sdf: true });
             }
           }
@@ -2328,25 +2344,25 @@ async function loadAllIconsImpl(m: maplibregl.Map): Promise<void> {
         const refName = `upload:${row.storageKey}`;
         const plainId = iconImageId(refName);
         const sdfId = iconSdfImageId(refName);
-        if (m.hasImage(plainId) && m.hasImage(sdfId)) return;
+        if (hasImageOrGone(m, plainId) && hasImageOrGone(m, sdfId)) return;
         try {
           const svgResp = await fetch(row.storageUrl, { cache: 'no-store' });
           if (!svgResp.ok) return;
           const svgText = await svgResp.text();
-          if (!m.hasImage(plainId)) {
+          if (!hasImageOrGone(m, plainId)) {
             const img = await rasterizeSvg(svgText, 48);
-            if (!m.hasImage(plainId)) {
+            if (!hasImageOrGone(m, plainId)) {
               m.addImage(plainId, img, { pixelRatio: 2 });
             }
           }
-          if (!m.hasImage(sdfId)) {
+          if (!hasImageOrGone(m, sdfId)) {
             // SVGs uploaded as inline color don't tint cleanly
             // when SDF-rendered; the renderer falls back to the
             // plain image when SDF isn't available. We still
             // generate one so iconTint works for icons that
             // were authored with currentColor strokes.
             const sdf = await svgToSdf(svgText, 48);
-            if (!m.hasImage(sdfId)) {
+            if (!hasImageOrGone(m, sdfId)) {
               m.addImage(sdfId, sdf, { pixelRatio: 2, sdf: true });
             }
           }
