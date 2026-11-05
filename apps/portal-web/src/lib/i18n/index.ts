@@ -115,18 +115,8 @@ function interpolate(
     // to pass through.
     return raw;
   }
-  // Plural form first: `{name, plural, one {...} other {...}}`.
-  let out = raw.replace(
-    /\{(\w+),\s*plural,\s*([^{}]*(?:\{[^{}]*\}[^{}]*)*)\}/g,
-    (_match, name: string, body: string) => {
-      const value = params[name];
-      const n = typeof value === 'number' ? value : Number(value);
-      const cases = parsePluralBody(body);
-      const pickKey = pluralCaseFor(n);
-      const chosen = cases[pickKey] ?? cases.other ?? '';
-      return chosen.replace(/#/g, String(n));
-    },
-  );
+  // Plural form first: `{name, plural, =0 {...} one {...} other {...}}`.
+  let out = replacePlurals(raw, params);
   // Simple `{name}` placeholders next.
   out = out.replace(/\{(\w+)\}/g, (_m, name: string) => {
     const v = params[name];
@@ -135,13 +125,52 @@ function interpolate(
   return out;
 }
 
-function parsePluralBody(body: string): Record<string, string> {
-  // `one {a # b} other {x #}`: pull each `<key> { ... }` pair.
-  const out: Record<string, string> = {};
-  const re = /(\w+)\s*\{([^{}]*)\}/g;
+/**
+ * Replace every `{name, plural, ...}` block. Brace-matched rather than
+ * matched by a regex, because a case body may hold placeholders of its
+ * own (`=0 {No tables in {schema}}`): the old one-level regex missed
+ * those blocks entirely and the raw ICU text reached the screen.
+ */
+function replacePlurals(raw: string, params: Record<string, string | number>): string {
+  const head = /\{(\w+),\s*plural,/g;
+  let out = '';
+  let from = 0;
   let m: RegExpExecArray | null;
-  while ((m = re.exec(body)) !== null) {
-    out[m[1]!] = m[2]!;
+  while ((m = head.exec(raw)) !== null) {
+    const end = matchBrace(raw, m.index);
+    if (end < 0) break;
+    const value = params[m[1]!];
+    const n = typeof value === 'number' ? value : Number(value);
+    const cases = parsePluralBody(raw.slice(m.index + m[0].length, end));
+    const chosen = cases[`=${n}`] ?? cases[pluralCaseFor(n)] ?? cases.other ?? '';
+    out += raw.slice(from, m.index) + chosen.replace(/#/g, String(n));
+    from = end + 1;
+    head.lastIndex = from;
+  }
+  return out + raw.slice(from);
+}
+
+/** Index of the `}` closing the `{` at `open`, or -1. */
+function matchBrace(s: string, open: number): number {
+  let depth = 0;
+  for (let i = open; i < s.length; i++) {
+    if (s[i] === '{') depth++;
+    else if (s[i] === '}' && --depth === 0) return i;
+  }
+  return -1;
+}
+
+/** `=0 {a} one {a # b} other {x #}`: each case key and its body. */
+function parsePluralBody(body: string): Record<string, string> {
+  const out: Record<string, string> = {};
+  const key = /\s*(=\d+|\w+)\s*\{/g;
+  let m: RegExpExecArray | null;
+  while ((m = key.exec(body)) !== null) {
+    const open = m.index + m[0].length - 1;
+    const close = matchBrace(body, open);
+    if (close < 0) break;
+    out[m[1]!] = body.slice(open + 1, close);
+    key.lastIndex = close + 1;
   }
   return out;
 }

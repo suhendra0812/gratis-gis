@@ -68,6 +68,19 @@ versioning policy is in [docs/VERSIONING.md](./docs/VERSIONING.md).
 
 ### Fixed
 
+- PostgreSQL + PostGIS (live) connections can be added to a map. The
+  Add layer dialog refused them as "not renderable" although the map
+  draws them; it now adds every geometry table of the connection, read
+  fresh from the database so tables created after the connection was
+  saved are included, and the probe refreshes the connection's stored
+  table list.
+- Saving a PostGIS connection on a server without
+  `CREDENTIAL_ENCRYPTION_KEY` no longer leaves an empty connection
+  behind on each try: Save stops first with a message naming the
+  setting, and a connection that fails after creation is removed.
+- Translated plurals with an exact case (`=0`) or a placeholder inside
+  a case showed their raw `{count, plural, ...}` text, as in the
+  PostGIS connection's table preview.
 - Field app: a related table is listed only under its own parent
   layer. Every table with a link column used to appear under every
   spatial layer of the data layer, so one asset's inspections showed

@@ -2417,6 +2417,8 @@ export const es: Partial<CatalogShape> = {
       fileFeatureCollection:
         'El objeto de nivel superior debe ser un FeatureCollection de GeoJSON.',
       fileReadFailed: 'No se pudo leer el archivo.',
+      postgisProbeFailed: "No se pudieron leer las tablas de {title}: {detail}",
+      postgisNoTables: "{title} no tiene tablas con columna de geometría en su esquema. Añada una (desde QGIS, por ejemplo) o revise el esquema y GRANT SELECT, y vuelva a intentarlo.",
     },
   },
   mapSearch: {

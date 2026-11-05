@@ -2423,6 +2423,8 @@ export const fr: Partial<CatalogShape> = {
       fileFeatureCollection:
         'L’objet de niveau supérieur doit être un FeatureCollection GeoJSON.',
       fileReadFailed: 'Échec de la lecture du fichier.',
+      postgisProbeFailed: "Impossible de lire les tables de {title} : {detail}",
+      postgisNoTables: "{title} n’a aucune table avec une colonne géométrique dans son schéma. Ajoutez-en une (depuis QGIS, par exemple) ou vérifiez le schéma et GRANT SELECT, puis réessayez.",
     },
   },
   mapSearch: {

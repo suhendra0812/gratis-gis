@@ -61,6 +61,16 @@ function loadKey(): Buffer {
  * GCM tag; pass the item id so a row can't silently move between
  * items at the SQL level.
  */
+/**
+ * Throw (with the same message encrypt would) unless the master key is
+ * set and valid. For callers that must know BEFORE they write anything
+ * that a credential will be storable, so they do not leave a half-made
+ * record behind when it is not.
+ */
+export function assertCredentialKeyConfigured(): void {
+  loadKey();
+}
+
 export function encryptCredential(
   plaintext: string,
   aad: string,
