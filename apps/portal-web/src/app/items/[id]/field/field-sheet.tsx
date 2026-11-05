@@ -200,16 +200,36 @@ export function FieldSheet({
   // page, and popstate is where we hear about it. Without this, back
   // exits the field runtime and takes an in-progress form with it.
   const pushedTokenRef = useRef<number | null>(null);
+  // The pop the cleanup below owes the history stack, held back one
+  // task so that a cleanup immediately followed by another run of the
+  // effect (React StrictMode's dev double-invoke) can take its entry
+  // back instead. history.back() is asynchronous: popping right away
+  // delivered the popstate to the NEXT run's listener, which read it as
+  // the back button and closed the sheet ~50ms after it opened.
+  const pendingPopRef = useRef<{
+    token: number;
+    timer: ReturnType<typeof setTimeout>;
+  } | null>(null);
   useEffect(() => {
     if (!open) return;
-    const token = ++sheetSequence;
-    pushedTokenRef.current = token;
-    try {
-      window.history.pushState({ __ggSheet: token }, '');
-    } catch {
-      // Some embedded webviews refuse pushState. The sheet still
-      // works; back just leaves the page as it did before.
-      pushedTokenRef.current = null;
+    const pending = pendingPopRef.current;
+    pendingPopRef.current = null;
+    const current = window.history.state as { __ggSheet?: number } | null;
+    if (pending && current?.__ggSheet === pending.token) {
+      // Re-run of this same sheet: keep the entry already on top.
+      clearTimeout(pending.timer);
+      pushedTokenRef.current = pending.token;
+    } else {
+      if (pending) clearTimeout(pending.timer);
+      const token = ++sheetSequence;
+      pushedTokenRef.current = token;
+      try {
+        window.history.pushState({ __ggSheet: token }, '');
+      } catch {
+        // Some embedded webviews refuse pushState. The sheet still
+        // works; back just leaves the page as it did before.
+        pushedTokenRef.current = null;
+      }
     }
     const onPop = () => {
       // Our entry is gone already; do not try to pop it again.
@@ -233,8 +253,15 @@ export function FieldSheet({
       const token = pushedTokenRef.current;
       pushedTokenRef.current = null;
       if (token === null) return;
-      const state = window.history.state as { __ggSheet?: number } | null;
-      if (state && state.__ggSheet === token) window.history.back();
+      // Deferred, and re-checked when it runs: if another sheet pushed
+      // its own entry in the meantime (feature sheet -> form), popping
+      // now would hand that sheet a popstate and close it too.
+      const timer = setTimeout(() => {
+        if (pendingPopRef.current?.token === token) pendingPopRef.current = null;
+        const state = window.history.state as { __ggSheet?: number } | null;
+        if (state && state.__ggSheet === token) window.history.back();
+      }, 0);
+      pendingPopRef.current = { token, timer };
     };
   }, [open]);
 
