@@ -52,6 +52,7 @@ import { Color, Slider, StyleEditor } from './style-editor';
 import { RendererEditor } from './renderer-editor';
 import { FilterEditor } from './filter-editor';
 import { PopupEditor } from './popup-editor';
+import { LayerSourcePanel } from './layer-source-panel';
 import { LabelsEditor } from './labels-editor';
 import { TemplateInput } from './template-input';
 import { makeEmptyGroupLayer, uniqueGroupTitle } from './group-factory';
@@ -1063,7 +1064,8 @@ type LayerTab =
   | 'labels'
   | 'filter'
   | 'popup'
-  | 'interactions';
+  | 'interactions'
+  | 'source';
 
 /**
  * Tab strip for the layer settings.
@@ -1089,6 +1091,7 @@ function LayerTabStrip({
     { id: 'filter', label: t('mapLayerPanel.tabs.filter') },
     { id: 'popup', label: t('mapLayerPanel.tabs.popup') },
     { id: 'interactions', label: t('mapLayerPanel.tabs.actions') },
+    { id: 'source', label: t('mapLayerPanel.tabs.source') },
   ];
   return (
     <TabStrip
@@ -1629,8 +1632,31 @@ function LayerRow({
                     {t('mapLayerPanel.featureEditingHint')}
                   </p>
                 </LayerTabPanel>
+
+                {/* Where the data comes from, a link to it, and
+                    changing it (layer-source-panel.tsx). */}
+                <LayerTabPanel tab="source" active={tab}>
+                  <LayerSourcePanel
+                    layer={layer}
+                    canEdit={canEdit}
+                    geometryTypes={metadata.geometryTypes}
+                    onPatch={onPatch}
+                  />
+                </LayerTabPanel>
               </>
-            ) : null}
+            ) : (
+              // No tab strip here (a table, a point cloud, imagery, or
+              // a reader without edit rights), but the source is still
+              // worth seeing and linking to.
+              <div className="border-t border-border">
+                <LayerSourcePanel
+                  layer={layer}
+                  canEdit={canEdit}
+                  geometryTypes={metadata.geometryTypes}
+                  onPatch={onPatch}
+                />
+              </div>
+            )}
           </div>
         </div>
       </div>

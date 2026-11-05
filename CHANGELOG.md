@@ -8,6 +8,15 @@ versioning policy is in [docs/VERSIONING.md](./docs/VERSIONING.md).
 
 ### Added
 
+- Map builder: a **Source** tab in a layer's settings, after
+  Actions. It shows where the layer's data comes from (data layer and
+  sublayer, ArcGIS service, GeoJSON URL, PostGIS table, point cloud,
+  imagery, or features stored in the map), links to it in a new tab,
+  and offers **Change source**: pick another data layer and sublayer,
+  or edit an ArcGIS or GeoJSON URL. The layer keeps its style,
+  labels, filter and popup; the tab warns when the new data has
+  another geometry. Layers without settings tabs show the same
+  source block.
 - Form location questions can be answered on a map. In the default
   `auto` mode the GPS button now sits above a small map: tap it or
   drag the pin to report a spot you are not standing on, or when

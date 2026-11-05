@@ -53,6 +53,32 @@ The legend, markup, and comments panels use the screen width
 instead of a fixed desktop card. The attribute table docks to
 the bottom and its toolbar wraps.
 
+## A layer's source
+
+In the builder, click a layer and open its **Source** tab (after
+**Actions**). It shows where the layer's data comes from: the data
+layer item and its sublayer, an ArcGIS service URL and layer ID, a
+GeoJSON URL, a PostGIS table, or features stored in the map itself.
+A link opens that source in a new tab, so unsaved map changes are
+kept.
+
+**Change source** points the layer at other data without rebuilding
+it:
+
+- **Data layer**: search and pick another data layer item and, for
+  a multi-layer item, which layer. This also turns a GeoJSON or
+  ArcGIS layer into a data layer one.
+- **Edit URL**: for an ArcGIS service or GeoJSON URL layer, change
+  the URL (and the ArcGIS layer ID).
+
+The layer keeps its style, labels, filter and popup. If the new
+data has different fields, or another geometry (the tab warns when
+it does), review those settings. Popup related tables of the old
+data layer are removed, since they do not apply to the new one.
+Point clouds, imagery and PostGIS tables show their source and link
+but are changed by adding a new layer. Save the map to keep the
+change.
+
 ## Sharing
 
 Maps follow the standard three-tier sharing (Owner only,
