@@ -79,6 +79,10 @@ Point clouds, imagery and PostGIS tables show their source and link
 but are changed by adding a new layer. Save the map to keep the
 change.
 
+A non-spatial table on the map (inspection records, say) has only
+two tabs: **Filter**, which limits the records the attribute table
+lists, and **Source**. It has nothing to style, label or pop up.
+
 ## Sharing
 
 Maps follow the standard three-tier sharing (Owner only,

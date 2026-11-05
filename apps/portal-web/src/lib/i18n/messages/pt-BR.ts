@@ -961,6 +961,7 @@ export const ptBR: Partial<CatalogShape> = {
     pointSize: 'Tamanho do ponto',
     hint: 'Transmitido pela área visível em 3D. Incline o mapa para ver o terreno.',
   },
+    tableFilterHint: "O filtro limita quais registros desta tabela aparecem na tabela de atributos.",
     tableLayerHint: 'Tabela não espacial. Abra a tabela de atributos no menu de três pontos para ver os registros.',
     toggles: {
     clickShowsPopup: 'Clique mostra pop-up',

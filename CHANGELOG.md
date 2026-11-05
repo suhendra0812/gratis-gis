@@ -15,8 +15,9 @@ versioning policy is in [docs/VERSIONING.md](./docs/VERSIONING.md).
   and offers **Change source**: pick another data layer and sublayer,
   or edit an ArcGIS or GeoJSON URL. The layer keeps its style,
   labels, filter and popup; the tab warns when the new data has
-  another geometry. Layers without settings tabs show the same
-  source block.
+  another geometry. A non-spatial table layer gets a settings panel
+  with just **Filter** (which records the attribute table lists) and
+  **Source**; point clouds and imagery show the same source block.
 - Form location questions can be answered on a map. In the default
   `auto` mode the GPS button now sits above a small map: tap it or
   drag the pin to report a spot you are not standing on, or when

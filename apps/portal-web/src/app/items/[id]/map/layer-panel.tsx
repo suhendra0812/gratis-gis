@@ -1059,6 +1059,9 @@ interface RowProps {
  * popup on/off switch in a different section from the popup's own
  * content.
  */
+/** The tabs a non-spatial table layer has. */
+const TABLE_TABS: ReadonlyArray<LayerTab> = ['filter', 'source'];
+
 type LayerTab =
   | 'style'
   | 'labels'
@@ -1080,12 +1083,15 @@ type LayerTab =
 function LayerTabStrip({
   value,
   onChange,
+  only,
 }: {
   value: LayerTab;
   onChange: (next: LayerTab) => void;
+  /** Show just these tabs (a table layer has no style, labels or popup). */
+  only?: ReadonlyArray<LayerTab>;
 }) {
   const t = useT();
-  const tabs: ReadonlyArray<{ id: LayerTab; label: string }> = [
+  const all: ReadonlyArray<{ id: LayerTab; label: string }> = [
     { id: 'style', label: t('mapLayerPanel.tabs.style') },
     { id: 'labels', label: t('mapLayerPanel.tabs.labels') },
     { id: 'filter', label: t('mapLayerPanel.tabs.filter') },
@@ -1093,6 +1099,7 @@ function LayerTabStrip({
     { id: 'interactions', label: t('mapLayerPanel.tabs.actions') },
     { id: 'source', label: t('mapLayerPanel.tabs.source') },
   ];
+  const tabs = only ? all.filter((tab) => only.includes(tab.id)) : all;
   return (
     <TabStrip
       tabs={tabs}
@@ -1209,6 +1216,9 @@ function LayerRow({
   // author working through popups on several layers should not be
   // sent back to Style each time.
   const [tab, setTab] = useState<LayerTab>('style');
+  // A table shows only Filter and Source; land on Filter when the
+  // remembered tab is one it does not have.
+  const tableTab: LayerTab = tab === 'filter' || tab === 'source' ? tab : 'filter';
   // Inline rename (#72). Click the title or the kebab's Rename
   // item to start; commit on blur or Enter, cancel on Escape.
   // Same pattern as GroupHeaderRow so the two row types feel
@@ -1644,10 +1654,36 @@ function LayerRow({
                   />
                 </LayerTabPanel>
               </>
+            ) : canEdit && isTable ? (
+              // A non-spatial table has nothing to style, label or pop
+              // up, but its records can be filtered (the attribute
+              // table lists only those that pass) and its source seen
+              // and changed.
+              <>
+                <LayerTabStrip value={tableTab} onChange={setTab} only={TABLE_TABS} />
+                <LayerTabPanel tab="filter" active={tableTab}>
+                  <p className="pt-3 text-2xs text-muted">
+                    {t('mapLayerPanel.tableFilterHint')}
+                  </p>
+                  <FilterEditor
+                    value={layer.filter}
+                    metadata={metadata}
+                    onChange={(filter) => onPatch({ filter })}
+                  />
+                </LayerTabPanel>
+                <LayerTabPanel tab="source" active={tableTab}>
+                  <LayerSourcePanel
+                    layer={layer}
+                    canEdit={canEdit}
+                    geometryTypes={metadata.geometryTypes}
+                    onPatch={onPatch}
+                  />
+                </LayerTabPanel>
+              </>
             ) : (
-              // No tab strip here (a table, a point cloud, imagery, or
-              // a reader without edit rights), but the source is still
-              // worth seeing and linking to.
+              // No tab strip here (a point cloud, imagery, or a reader
+              // without edit rights), but the source is still worth
+              // seeing and linking to.
               <div className="border-t border-border">
                 <LayerSourcePanel
                   layer={layer}

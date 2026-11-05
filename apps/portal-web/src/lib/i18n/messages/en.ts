@@ -1004,6 +1004,7 @@ export const en = {
     pointSize: 'Point size',
     hint: 'Streams by viewport in 3D. Tilt the map to look across the terrain.',
   },
+    tableFilterHint: "The filter limits which records this table lists in the attribute table.",
     tableLayerHint: 'This is a non-spatial table. Open the attribute table from the kebab menu to view its records.',
     toggles: {
     clickShowsPopup: 'Click shows popup',

@@ -964,6 +964,7 @@ export const es: Partial<CatalogShape> = {
     pointSize: 'Tamaño de punto',
     hint: 'Se transmite por el visor en 3D. Inclina el mapa para ver el terreno.',
   },
+    tableFilterHint: "El filtro limita qué registros de esta tabla aparecen en la tabla de atributos.",
     tableLayerHint: 'Esta es una tabla no espacial. Abre la tabla de atributos desde el menú de tres puntos para ver sus registros.',
     toggles: {
     clickShowsPopup: 'El clic muestra la ventana emergente',

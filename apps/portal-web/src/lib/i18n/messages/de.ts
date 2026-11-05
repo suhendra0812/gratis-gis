@@ -963,6 +963,7 @@ export const de: Partial<CatalogShape> = {
     pointSize: 'Punktgröße',
     hint: 'Wird im 3D-Ansichtsfenster geladen. Kippen Sie die Karte, um das Gelände zu sehen.',
   },
+    tableFilterHint: "Der Filter legt fest, welche Datensätze diese Tabelle in der Attributtabelle zeigt.",
     tableLayerHint: 'Nicht-räumliche Tabelle. Öffnen Sie die Attributtabelle über das Kebab-Menü, um die Datensätze anzuzeigen.',
     toggles: {
     clickShowsPopup: 'Klick zeigt Pop-up',

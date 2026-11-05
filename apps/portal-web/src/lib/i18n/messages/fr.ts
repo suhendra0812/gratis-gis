@@ -963,6 +963,7 @@ export const fr: Partial<CatalogShape> = {
     pointSize: 'Taille des points',
     hint: 'Diffusé par la fenêtre en 3D. Inclinez la carte pour parcourir le relief.',
   },
+    tableFilterHint: "Le filtre limite les enregistrements de cette table affichés dans la table attributaire.",
     tableLayerHint: 'Table non spatiale. Ouvrez la table attributaire depuis le menu ⋮ pour voir les enregistrements.',
     toggles: {
     clickShowsPopup: 'Le clic affiche la fenêtre',
