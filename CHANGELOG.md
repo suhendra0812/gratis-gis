@@ -8,6 +8,20 @@ versioning policy is in [docs/VERSIONING.md](./docs/VERSIONING.md).
 
 ### Added
 
+- Field app: edit, delete and related records the way the map
+  builder does. A feature's details offer **Zoom to**, **Edit**,
+  **Copy** and **Delete**. The edit form loads the row from the
+  portal, lets you drag the shape on the map, and **Update** sends
+  only the changed fields plus the moved shape; **Delete** sits at its
+  foot. Related records open inside the feature's form (update,
+  delete, add with the link set), and **Back** keeps the feature's
+  unsaved edits. Offline, edits and deletes queue; a record with
+  unsynced edits always goes through the queue, and one captured and
+  deleted before it synced never reaches the server.
+- Field app: a point's position can be **Manual** (tap the map or
+  drag the point) or follow **GPS**, which also keeps the map on the
+  point. The GPS dot shows a heading cone from the device compass,
+  and the compass button switches the map to heading-up.
 - Map builder: a **Source** tab in a layer's settings, after
   Actions. It shows where the layer's data comes from (data layer and
   sublayer, ArcGIS service, GeoJSON URL, PostGIS table, point cloud,
@@ -61,6 +75,10 @@ versioning policy is in [docs/VERSIONING.md](./docs/VERSIONING.md).
 
 ### Changed
 
+- Field app: **+** opens a point feature's form straight away, at the
+  GPS fix or the map centre; the "Add at center" step is gone. The
+  header, GPS strip, layers, search, zoom and locate stay up while a
+  form is open.
 - Map builder: the toolbar's **Edit shape** tool is now **Edit
   feature**. Clicking a feature opens the Edit feature panel, where
   the shape is edited alongside the attributes, instead of a
@@ -68,6 +86,8 @@ versioning policy is in [docs/VERSIONING.md](./docs/VERSIONING.md).
 
 ### Fixed
 
+- Field app: the compass button follows the map's bearing and resets
+  it; it subscribed to a map that did not exist yet when it mounted.
 - Field app: the feature details sheet, the add and edit form and the
   template picker no longer close by themselves right after opening.
   A sheet popped its history entry asynchronously when it closed, and
