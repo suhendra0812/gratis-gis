@@ -46,6 +46,13 @@ the designer enforces compatibility.
 - **Datetime**. Combined. Compatible with `timestamp` or
  `timestamp with timezone`.
 
+Each of the three has a **Default value** in the designer's
+properties: **None**, or **Current date and time** (**Today** for a
+date). With it set, a new response opens with the moment the form
+was opened, in the respondent's local time, and the respondent can
+still change it. Editing an existing record in the field app keeps
+the record's own value.
+
 ## Choice
 
 - **Single select (dropdown)**. One option from a list.

@@ -8,6 +8,10 @@ versioning policy is in [docs/VERSIONING.md](./docs/VERSIONING.md).
 
 ### Added
 
+- Forms: a date, time or datetime question can default to the current
+  date and time (**Default value** in the designer). A new response
+  opens with it filled in, in local time, and the respondent can still
+  change it. Editing an existing field record keeps its own value.
 - Field app: edit, delete and related records the way the map
   builder does. A feature's details offer **Zoom to**, **Edit**,
   **Copy** and **Delete**. The edit form loads the row from the
