@@ -28,6 +28,7 @@ import { parseApiError } from '@/lib/api-error';
 import { useT } from '@/lib/i18n/locale-context';
 import { useConfirm } from '@/components/dialog-provider';
 import { changedValues } from '@/lib/feature-attribute-diff';
+import { clientUuid } from '@/lib/uuid';
 import { AttributeForm } from '../editor/attribute-form';
 import { relatedTableKey, useRelatedTables, type RelatedTable } from './related-tables';
 
@@ -94,7 +95,7 @@ export function FeatureEditPanel(props: FeatureEditPanelProps) {
           body: JSON.stringify({
             features: [
               {
-                globalId: crypto.randomUUID(),
+                globalId: clientUuid(),
                 geometry: null,
                 // The link to this feature is set here, not typed.
                 properties: { ...values, [fk]: props.featureId },

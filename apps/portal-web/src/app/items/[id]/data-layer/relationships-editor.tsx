@@ -26,6 +26,7 @@ import type {
   SublayerRelationship,
 } from '@gratis-gis/shared-types';
 import { useT } from '@/lib/i18n/locale-context';
+import { clientUuid } from '@/lib/uuid';
 
 type LayerOption = { id: string; label: string };
 
@@ -316,7 +317,7 @@ function AddRelationship({
           disabled={!canSubmit}
           onClick={() =>
             onAdd(parentId, {
-              id: crypto.randomUUID(),
+              id: clientUuid(),
               label: label.trim() || childLayer?.label || childLayerId,
               childItemId,
               childLayerId,
