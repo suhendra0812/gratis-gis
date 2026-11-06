@@ -828,6 +828,7 @@ export function MapEditor({
         [layer.id]: {
           fields: prev[layer.id]?.fields ?? [],
           valuesByField: prev[layer.id]?.valuesByField ?? {},
+          objectFields: prev[layer.id]?.objectFields ?? [],
           sampleProperties: prev[layer.id]?.sampleProperties ?? null,
           featureCollection: prev[layer.id]?.featureCollection ?? null,
           geometryTypes: prev[layer.id]?.geometryTypes ?? new Set(),

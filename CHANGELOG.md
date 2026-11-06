@@ -8,6 +8,12 @@ versioning policy is in [docs/VERSIONING.md](./docs/VERSIONING.md).
 
 ### Added
 
+- Map popups: an attachments section for data layers (**Show
+  attachments** in the layer's Popup tab), as a thumbnail **Gallery**
+  or a **List** of file names and sizes. Files are read from the
+  feature's attachments endpoint when the popup opens; only
+  same-origin storage URLs are linked. Config lives in
+  `MapLayerPopup.attachments` (`{ display: 'gallery' | 'list' }`).
 - Forms: a date, time or datetime question can default to the current
   date and time (**Default value** in the designer). A new response
   opens with it filled in, in local time, and the respondent can still
@@ -91,6 +97,10 @@ versioning policy is in [docs/VERSIONING.md](./docs/VERSIONING.md).
 
 ### Fixed
 
+- Map popups: a form submissions layer showed "[object Object]" for
+  geopoint, photo and signature answers. The popup now skips
+  structured values in **All fields**, **Picked** and templates, and
+  the popup field pickers no longer offer them.
 - Field app: the compass button follows the map's bearing and resets
   it; it subscribed to a map that did not exist yet when it mounted.
 - Field app: the feature details sheet, the add and edit form and the

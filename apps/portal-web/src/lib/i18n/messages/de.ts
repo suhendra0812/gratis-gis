@@ -1264,6 +1264,15 @@ export const de: Partial<CatalogShape> = {
     fieldsDefault: "Die ersten drei Felder",
     maxRows: "Anzuzeigende Zeilen",
   },
+  mapPopupAttachments: {
+    heading: "Anhänge",
+    none: "Keine Anhänge.",
+    failed: "Anhänge konnten nicht geladen werden.",
+    show: "Anhänge anzeigen",
+    gallery: "Galerie",
+    list: "Liste",
+    hint: "Fotos, Unterschriften und Dateien des Objekts, geladen beim Öffnen des Popups.",
+  },
   mapLabelsEditor: {
     showLabels: 'Beschriftungen anzeigen',
     labelText: 'Beschriftungstext',

@@ -27,8 +27,13 @@ text.
 - **Field list mode** (alternative to body template). Pick which
  fields show, in what order, with optional per-field labels and
  formatting (date format, number precision, percent).
-- **Attachments section.** Toggle on if the layer has attachments;
- thumbnails open in a lightbox.
+- **Attachments section.** For a data layer, tick **Show
+ attachments** to list the feature's photos, signatures and files
+ under the attributes. Pick **Gallery** (image thumbnails in a
+ grid, other files as named tiles) or **List** (one row per file
+ with its name and size). The files load when the popup opens, not
+ on hover. Click a thumbnail or a name to open the file in a new
+ tab.
 - **Related records.** For a data layer with related tables (tables
  in the same data layer item that have this layer as their parent,
  such as inspections of an asset, and tables in other data layers
@@ -69,6 +74,12 @@ overlay, for example).
 
 ## Notes
 
+- **Locations, photos and signatures are not attributes.** A form
+ submissions layer keeps a geopoint answer as a location and a photo
+ or signature answer as a list of files. The popup leaves these out
+ of **All fields** and **Picked**, and the field pickers do not offer
+ them: the point is already on the map, and the files show in the
+ attachments section.
 - **Popups don't render expressions.** No conditional logic in
  the title or body. If you need "show 'Open' if status = 'O',
  'Closed' otherwise," compute a derived column on the layer and

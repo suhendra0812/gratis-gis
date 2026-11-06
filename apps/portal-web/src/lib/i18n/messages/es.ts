@@ -1265,6 +1265,15 @@ export const es: Partial<CatalogShape> = {
     fieldsDefault: "Los tres primeros campos",
     maxRows: "Filas a mostrar",
   },
+  mapPopupAttachments: {
+    heading: "Adjuntos",
+    none: "Sin adjuntos.",
+    failed: "No se pudieron cargar los adjuntos.",
+    show: "Mostrar adjuntos",
+    gallery: "Galería",
+    list: "Lista",
+    hint: "Fotos, firmas y archivos de la entidad, cargados al abrir la ventana emergente.",
+  },
   mapLabelsEditor: {
     showLabels: 'Mostrar etiquetas',
     labelText: 'Texto de etiqueta',

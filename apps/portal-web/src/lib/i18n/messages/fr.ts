@@ -1264,6 +1264,15 @@ export const fr: Partial<CatalogShape> = {
     fieldsDefault: "Les trois premiers champs",
     maxRows: "Lignes à afficher",
   },
+  mapPopupAttachments: {
+    heading: "Pièces jointes",
+    none: "Aucune pièce jointe.",
+    failed: "Impossible de charger les pièces jointes.",
+    show: "Afficher les pièces jointes",
+    gallery: "Galerie",
+    list: "Liste",
+    hint: "Photos, signatures et fichiers de l’entité, chargés à l’ouverture de la fenêtre.",
+  },
   mapLabelsEditor: {
     showLabels: 'Afficher les étiquettes',
     labelText: 'Texte d’étiquette',

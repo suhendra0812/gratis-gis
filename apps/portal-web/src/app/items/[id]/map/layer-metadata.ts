@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import type { MapLayer } from '@gratis-gis/shared-types';
 import { prefetchUserNames } from '@/lib/user-name-cache';
+import { isStructuredValue } from '@/lib/popup-values';
 
 export type GeometryFamily = 'point' | 'line' | 'polygon';
 
@@ -9,6 +10,13 @@ export interface LayerMetadata {
   fields: string[];
   /** Cached distinct values per field (capped at 64 per field to stay bounded). */
   valuesByField: Record<string, string[]>;
+  /**
+   * Fields seen holding a structured value (an object, or an array of
+   * them): a form's geopoint, photo or signature answer. Popups cannot
+   * print these, so the popup field pickers leave them out. Absent on
+   * metadata built before any features were sampled.
+   */
+  objectFields?: string[];
   /**
    * A real feature's property bag, used to power live previews in the
    * popup / label editors. Null if the layer is empty or pre-load.
@@ -349,6 +357,7 @@ export async function discoverLayerMetadata(
     for (const name of schemaFields) fieldSet.add(name);
   }
   const valuesByField: Record<string, Set<string>> = {};
+  const objectFields = new Set<string>();
   const geometryTypes = new Set<GeometryFamily>();
 
   const sampleSlice = features.slice(0, FEATURE_SAMPLE_CAP);
@@ -366,6 +375,7 @@ export async function discoverLayerMetadata(
       fieldSet.add(key);
       const v = props[key];
       if (v === null || v === undefined) continue;
+      if (isStructuredValue(v)) objectFields.add(key);
       if (typeof v === 'object') continue; // skip nested objects
       const s = String(v);
       let set = valuesByField[key];
@@ -418,6 +428,7 @@ export async function discoverLayerMetadata(
     valuesByField: Object.fromEntries(
       Object.entries(valuesByField).map(([k, set]) => [k, [...set].sort()]),
     ),
+    objectFields: [...objectFields].sort(),
     sampleProperties: withProps?.properties ?? null,
     featureCollection,
     geometryTypes,
@@ -466,6 +477,7 @@ export function metadataFromFeatureCollection(
   const features = fc.features.slice(0, FEATURE_SAMPLE_CAP);
   const fieldSet = new Set<string>();
   const valuesByField: Record<string, Set<string>> = {};
+  const objectFields = new Set<string>();
   const geometryTypes = new Set<GeometryFamily>();
   for (const f of features) {
     const fam = geometryFamily(f.geometry?.type);
@@ -475,6 +487,7 @@ export function metadataFromFeatureCollection(
       fieldSet.add(key);
       const v = props[key];
       if (v === null || v === undefined) continue;
+      if (isStructuredValue(v)) objectFields.add(key);
       if (typeof v === 'object') continue;
       const s = String(v);
       let set = valuesByField[key];
@@ -495,6 +508,7 @@ export function metadataFromFeatureCollection(
     valuesByField: Object.fromEntries(
       Object.entries(valuesByField).map(([k, set]) => [k, [...set].sort()]),
     ),
+    objectFields: [...objectFields].sort(),
     sampleProperties,
     featureCollection: fc,
     geometryTypes,
