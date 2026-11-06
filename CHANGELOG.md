@@ -68,6 +68,13 @@ versioning policy is in [docs/VERSIONING.md](./docs/VERSIONING.md).
 
 ### Fixed
 
+- Field app: the feature details sheet, the add and edit form and the
+  template picker no longer close by themselves right after opening.
+  A sheet popped its history entry asynchronously when it closed, and
+  the next sheet heard that pop as the back button: in development
+  (React StrictMode) every sheet closed about 50 ms after a tap, and
+  in any build the form opened from a feature's Edit or from the
+  picker closed at once, so features could not be added or edited.
 - Field app: a related table is listed only under its own parent
   layer. Every table with a link column used to appear under every
   spatial layer of the data layer, so one asset's inspections showed
