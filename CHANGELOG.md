@@ -68,6 +68,10 @@ versioning policy is in [docs/VERSIONING.md](./docs/VERSIONING.md).
 
 ### Fixed
 
+- Forms: a photo picked on the respond page showed a broken preview.
+  Its storage link only answers after the submission is saved, so the
+  preview, the audio and video length check and a redrawn signature
+  now use the file already on the device.
 - Field app: a related table is listed only under its own parent
   layer. Every table with a link column used to appear under every
   spatial layer of the data layer, so one asset's inspections showed

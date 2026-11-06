@@ -27,6 +27,7 @@
  */
 import { useEffect, useRef, useState } from 'react';
 import { Trash2 } from 'lucide-react';
+import { attachmentPreviewSrc } from '@/lib/form-attachment-upload';
 
 interface SignatureAttachment {
   name: string;
@@ -118,7 +119,7 @@ export function SignatureInput({ value, readOnly, onChange, labels }: Props) {
       ctx.drawImage(img, 0, 0, W, H);
       inked.current = true;
     };
-    img.src = existing;
+    img.src = existing.startsWith('data:') ? existing : attachmentPreviewSrc(existing);
   }, [existing]);
 
   function toCanvas(e: React.PointerEvent<HTMLCanvasElement>) {

@@ -32,7 +32,7 @@ import {
   type Response,
   type ValidationError,
 } from '@gratis-gis/form-schema';
-import { uploadFormAttachment } from '@/lib/form-attachment-upload';
+import { attachmentPreviewSrc, uploadFormAttachment } from '@/lib/form-attachment-upload';
 import { GeoPointMapPicker } from './form-inputs/geopoint-map-picker';
 import { SignatureInput } from './form-inputs/signature-input';
 import { useFormat } from '@/lib/i18n/format';
@@ -1314,7 +1314,7 @@ function normalizePhotoValue(value: unknown): PhotoEntry[] {
 }
 
 function photoSrc(p: PhotoEntry): string {
-  return 'url' in p ? p.url : p.dataUrl;
+  return 'url' in p ? attachmentPreviewSrc(p.url) : p.dataUrl;
 }
 
 function PhotoInput({
@@ -1486,7 +1486,8 @@ function MediaCaptureInput({
         dataUrl: string;
         durationSec?: number;
       };
-  const clipSrc = (c: Clip): string => ('url' in c ? c.url : c.dataUrl);
+  const clipSrc = (c: Clip): string =>
+    'url' in c ? attachmentPreviewSrc(c.url) : c.dataUrl;
   const clips: Clip[] = Array.isArray(value)
     ? (value as Clip[]).filter(
         (c): c is Clip =>
@@ -1613,9 +1614,11 @@ function MediaCaptureInput({
                 if (typeof navigator !== 'undefined' && navigator.onLine) {
                   try {
                     const uploaded = await uploadFormAttachment(file);
-                    // Probe duration from the public URL post-upload
-                    // (a media element can stream from MinIO).
-                    const durationSec = await probeDuration(uploaded.url);
+                    // Probe duration from the local copy post-upload
+                    // (the storage URL answers only after submission).
+                    const durationSec = await probeDuration(
+                      attachmentPreviewSrc(uploaded.url),
+                    );
                     const next: Clip = {
                       ...uploaded,
                       ...(typeof durationSec === 'number'
