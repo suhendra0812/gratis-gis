@@ -117,12 +117,21 @@ if [ ! -f "$COMPOSE_PROD" ]; then
   warn "docker-compose.prod.yml not found; skipped"
 else
   MEM_MB="$(awk '/MemTotal/ {printf "%d", $2/1024}' /proc/meminfo 2>/dev/null || echo 0)"
+  # The memory settings are ${NAME:-default} so .env.prod can resize
+  # them. Read a copy with each one resolved the way compose does:
+  # the .env.prod value when set and non-empty, else the default.
+  COMPOSE_SIZED="$(mktemp)"
+  perl -e 'my %e; if (open my $f, "<", $ARGV[0]) { while (<$f>) { chomp; next if /^\s*#/; $e{$1} = $2 if /^([A-Za-z0-9_]+)=(.*)$/ } }
+    open my $c, "<", $ARGV[1] or exit 1;
+    while (<$c>) { s/\$\{([A-Za-z0-9_]+):-([^}]*)\}/defined $e{$1} && length $e{$1} ? $e{$1} : $2/ge; print }' \
+    "$ENV_FILE" "$COMPOSE_PROD" > "$COMPOSE_SIZED" 2>/dev/null || cp "$COMPOSE_PROD" "$COMPOSE_SIZED"
   # awk tracks the current top-level compose service (two-space
   # indented key) so each heap flag is attributed to its service.
-  API_HEAP_MB="$(awk '/^  [A-Za-z0-9_-]+:/ {svc=$1; sub(":","",svc)} /max-old-space-size=/ {if (svc=="portal-api") {match($0,/max-old-space-size=[0-9]+/); print substr($0,RSTART+19,RLENGTH-19); exit}}' "$COMPOSE_PROD")"
-  WORKER_HEAP_MB="$(awk '/^  [A-Za-z0-9_-]+:/ {svc=$1; sub(":","",svc)} /max-old-space-size=/ {if (svc=="portal-worker") {match($0,/max-old-space-size=[0-9]+/); print substr($0,RSTART+19,RLENGTH-19); exit}}' "$COMPOSE_PROD")"
-  API_REPLICAS="$(awk '/^  [A-Za-z0-9_-]+:/ {svc=$1; sub(":","",svc)} /^ *replicas:/ {if (svc=="portal-api") {print $2; exit}}' "$COMPOSE_PROD")"
-  KC_XMX_MB="$(grep -o -- '-Xmx[0-9]*m' "$COMPOSE_PROD" 2>/dev/null | head -1 | tr -dc '0-9' || true)"
+  API_HEAP_MB="$(awk '/^  [A-Za-z0-9_-]+:/ {svc=$1; sub(":","",svc)} /max-old-space-size=/ {if (svc=="portal-api") {match($0,/max-old-space-size=[0-9]+/); print substr($0,RSTART+19,RLENGTH-19); exit}}' "$COMPOSE_SIZED")"
+  WORKER_HEAP_MB="$(awk '/^  [A-Za-z0-9_-]+:/ {svc=$1; sub(":","",svc)} /max-old-space-size=/ {if (svc=="portal-worker") {match($0,/max-old-space-size=[0-9]+/); print substr($0,RSTART+19,RLENGTH-19); exit}}' "$COMPOSE_SIZED")"
+  API_REPLICAS="$(awk '/^  [A-Za-z0-9_-]+:/ {svc=$1; sub(":","",svc)} /^ *replicas:/ {if (svc=="portal-api") {print $2; exit}}' "$COMPOSE_SIZED")"
+  KC_XMX_MB="$(grep -o -- '-Xmx[0-9]*m' "$COMPOSE_SIZED" 2>/dev/null | head -1 | tr -dc '0-9' || true)"
+  rm -f "$COMPOSE_SIZED"
   SHM_RAW="$(awk '/shm_size:/ {print $2; exit}' "$COMPOSE_PROD" 2>/dev/null || true)"
   case "$SHM_RAW" in
     *g|*G) SHM_MB=$(( ${SHM_RAW%[gG]} * 1024 )) ;;

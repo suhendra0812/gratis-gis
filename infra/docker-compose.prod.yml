@@ -33,6 +33,18 @@ name: gratis-gis-prod
 # docs/truenas.md.
 
 services:
+  # Small-host sizing (deploy branch of suhendra0812/gratis-gis).
+  # The defaults below fit a 4 vCPU / 4 GB VPS with 4 GB of swap:
+  # one portal-api replica, smaller Node and Keycloak heaps, and half
+  # the Postgres memory of the 8 GB demo host. On a bigger server,
+  # set these in infra/.env.prod instead of editing this file
+  # (deploy.sh resets the checkout). The 8 GB demo-host values:
+  #   PG_SHARED_BUFFERS=1GB PG_EFFECTIVE_CACHE_SIZE=3GB
+  #   PG_WORK_MEM=32MB PG_MAINTENANCE_WORK_MEM=512MB
+  #   KEYCLOAK_HEAP=1024m KEYCLOAK_MEM_LIMIT=1536m
+  #   PORTAL_API_REPLICAS=2 PORTAL_API_HEAP_MB=2048
+  #   PORTAL_API_MEM_LIMIT=2560m PORTAL_WORKER_HEAP_MB=3072
+  #   PORTAL_WORKER_MEM_LIMIT=3584m
   postgres:
     build:
       # Context is infra/ so the Dockerfile can COPY the init scripts
@@ -96,13 +108,13 @@ services:
       # could each claim at once; 512 MB for CREATE INDEX / VACUUM by
       # hand, 128 MB per autovacuum worker.
       - -c
-      - shared_buffers=1GB
+      - shared_buffers=${PG_SHARED_BUFFERS:-512MB}
       - -c
-      - effective_cache_size=3GB
+      - effective_cache_size=${PG_EFFECTIVE_CACHE_SIZE:-1536MB}
       - -c
-      - work_mem=32MB
+      - work_mem=${PG_WORK_MEM:-16MB}
       - -c
-      - maintenance_work_mem=512MB
+      - maintenance_work_mem=${PG_MAINTENANCE_WORK_MEM:-256MB}
       - -c
       - autovacuum_work_mem=128MB
       # Planner. The disk is an SSD: random reads cost about the same
@@ -254,7 +266,7 @@ services:
       # Keycloak 26 does not expose these as KC_DB_* yet.
       JAVA_OPTS_APPEND: >-
         -Xms256m
-        -Xmx1024m
+        -Xmx${KEYCLOAK_HEAP:-512m}
         -Dquarkus.datasource.jdbc.background-validation-interval=30S
         -Dquarkus.datasource.jdbc.foreground-validation-interval=10S
         -Dquarkus.datasource.jdbc.acquisition-timeout=5S
@@ -300,7 +312,7 @@ services:
     # for metaspace, thread stacks, and native buffers on top of the
     # heap. See the memory-budget comment on portal-api below for the
     # host-wide arithmetic.
-    mem_limit: 1536m
+    mem_limit: ${KEYCLOAK_MEM_LIMIT:-1024m}
     networks:
       - gratis-net
 
@@ -406,7 +418,7 @@ services:
       dockerfile: apps/portal-api/Dockerfile
     restart: unless-stopped
     deploy:
-      replicas: 2
+      replicas: ${PORTAL_API_REPLICAS:-1}
     # Memory budget for the 7.6 GiB (8 GB nominal) prod box. Two
     # things are capped per service: the V8 old-space ceiling
     # (NODE_OPTIONS) and the cgroup limit (mem_limit, heap plus
@@ -429,7 +441,7 @@ services:
     # OS are left uncapped on purpose; they are the last things that
     # should die. Operators on bigger boxes: raise NODE_OPTIONS and
     # mem_limit together, keeping the ~512 MiB native headroom.
-    mem_limit: 2560m
+    mem_limit: ${PORTAL_API_MEM_LIMIT:-1536m}
     depends_on:
       postgres:
         condition: service_healthy
@@ -454,7 +466,7 @@ services:
       # ~12 GiB of allowed heap on a 7.6 GiB box, which is how a
       # busy day could OOM the host. Streaming ingest in batches
       # (#103) remains the real fix for the memory shape.
-      NODE_OPTIONS: --max-old-space-size=2048
+      NODE_OPTIONS: --max-old-space-size=${PORTAL_API_HEAP_MB:-1024}
       # Migrations are owned by the portal-migrate one-shot. Skip on
       # every long-lived process so N replicas + the worker don't all
       # take the migration lock at boot.
@@ -664,7 +676,7 @@ services:
     # FeatureCollection in memory before insertFeatures) runs here;
     # 3 GiB covers roughly 2M polygon features. Streaming ingest in
     # batches (#103) is the real fix.
-    mem_limit: 3584m
+    mem_limit: ${PORTAL_WORKER_MEM_LIMIT:-2048m}
     depends_on:
       postgres:
         condition: service_healthy
@@ -676,7 +688,7 @@ services:
         condition: service_completed_successfully
     environment:
       NODE_ENV: production
-      NODE_OPTIONS: --max-old-space-size=3072
+      NODE_OPTIONS: --max-old-space-size=${PORTAL_WORKER_HEAP_MB:-1536}
       SKIP_MIGRATE: "true"
       STAGING_DIR: /var/lib/gg-staging
       # The worker never runs the cron leader-election lock because
