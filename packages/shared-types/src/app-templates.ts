@@ -671,35 +671,66 @@ function kpiDashboardSeed(): CustomAppData {
         id: 'home',
         title: 'Overview',
         widgets: [
-          indicator('count', 'Total records', 1),
-          indicator('count', 'Records', 49),
-          indicator('count', 'Records', 97),
-          indicator('count', 'Records', 145),
+          // The indicators and the charts each sit in a Row: moving,
+          // resizing or removing one reflows its neighbours instead
+          // of leaving a hole or an overlap.
+          {
+            id: wid(),
+            kind: 'container',
+            layout: { col: 1, row: 1, colSpan: 192, rowSpan: 40 },
+            config: {
+              kind: 'container',
+              position: 'inline',
+              arrange: 'row',
+              layout: 'row',
+              variant: 'none',
+              widgets: [
+                indicator('count', 'Total records', 1),
+                indicator('count', 'Records', 49),
+                indicator('count', 'Records', 97),
+                indicator('count', 'Records', 145),
+              ],
+            },
+          },
           // The charts and the map can be expanded; the indicators
           // cannot, because a single number gains nothing from a
           // full page.
           {
             id: wid(),
-            kind: 'chart',
-            layout: { col: 1, row: 41, colSpan: 96, rowSpan: 110 },
-            allowMaximize: true,
+            kind: 'container',
+            layout: { col: 1, row: 41, colSpan: 192, rowSpan: 110 },
             config: {
-              kind: 'chart',
-              targetIndex: 0,
-              chartType: 'bar',
-              aggregate: 'count',
-            },
-          },
-          {
-            id: wid(),
-            kind: 'chart',
-            layout: { col: 97, row: 41, colSpan: 96, rowSpan: 110 },
-            allowMaximize: true,
-            config: {
-              kind: 'chart',
-              targetIndex: 0,
-              chartType: 'pie',
-              aggregate: 'count',
+              kind: 'container',
+              position: 'inline',
+              arrange: 'row',
+              layout: 'row',
+              variant: 'none',
+              widgets: [
+                {
+                  id: wid(),
+                  kind: 'chart',
+                  layout: { col: 1, row: 1, colSpan: 96, rowSpan: 110 },
+                  allowMaximize: true,
+                  config: {
+                    kind: 'chart',
+                    targetIndex: 0,
+                    chartType: 'bar',
+                    aggregate: 'count',
+                  },
+                },
+                {
+                  id: wid(),
+                  kind: 'chart',
+                  layout: { col: 1, row: 1, colSpan: 96, rowSpan: 110 },
+                  allowMaximize: true,
+                  config: {
+                    kind: 'chart',
+                    targetIndex: 0,
+                    chartType: 'pie',
+                    aggregate: 'count',
+                  },
+                },
+              ],
             },
           },
           {

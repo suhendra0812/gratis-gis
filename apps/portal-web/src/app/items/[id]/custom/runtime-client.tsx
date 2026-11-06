@@ -80,6 +80,7 @@ import type {
 } from '@gratis-gis/shared-types';
 import {
   applySelectionToLayers,
+  containerArrange,
   customTargetLayerId,
   resolveSourceScope,
   DEFAULT_LAYER_ACCESS,
@@ -100,7 +101,7 @@ import {
   type OsmOverlayFeature,
 } from './osm-overlay-layer';
 import type { CustomBasemap } from '@/lib/custom-basemap';
-import { mobilePlacements, type MobilePlacement } from '@/lib/mobile-canvas';
+import { mobileKind, mobilePlacements, type MobilePlacement } from '@/lib/mobile-canvas';
 import { customBasemapToData } from '@/lib/custom-basemap';
 import {
   exportFeatures,
@@ -712,7 +713,7 @@ export function CustomRuntimeClient({
     const placed = mobilePlacements(
       canvas.map((widget) => ({
         id: widget.id,
-        kind: widget.kind,
+        kind: mobileKind(widget),
         col: widget.layout.col,
         row: widget.layout.row,
         colSpan: widget.layout.colSpan,
@@ -1293,9 +1294,12 @@ function sortForOverlapStacking(widgets: CustomWidget[]): CustomWidget[] {
 function WidgetSlot({
   widget,
   mobile,
+  inCell = false,
 }: {
   widget: CustomWidget;
   mobile?: MobilePlacement;
+  /** A child of a row / column / grid container: fills its cell. */
+  inCell?: boolean;
 }) {
   const t = useT();
   // #364: tool-mode widgets render as a small icon button in the
@@ -1330,10 +1334,23 @@ function WidgetSlot({
     return () => window.removeEventListener('keydown', onKey);
   }, [expanded]);
 
+  // A row / column / grid container draws no card of its own: its
+  // children are the cards, each framed like a page widget.
+  const arranged =
+    widget.kind === 'container' &&
+    widget.config.kind === 'container' &&
+    containerArrange(widget.config) !== 'free';
+
   return (
     <section
       style={
-        expanded
+        expanded && inCell
+          ? // A cell's positioned ancestor is its container, so the
+            // page-filling absolute below would only fill the row.
+            { position: 'fixed', inset: 0, zIndex: 60 }
+          : inCell
+            ? { position: 'relative' }
+            : expanded
           ? {
               // Absolute against the page grid, which is positioned,
               // so an expanded panel fills the canvas and leaves any
@@ -1359,6 +1376,8 @@ function WidgetSlot({
       className={
         (isToolMode
           ? 'flex h-full w-full items-stretch'
+          : arranged
+            ? 'flex h-full w-full min-w-0 flex-col'
           : 'flex h-full w-full min-w-0 flex-col overflow-hidden rounded-md border border-[hsl(var(--app-border))] bg-[hsl(var(--app-surface-1))]' +
             (expanded ? ' shadow-2xl' : '')) +
         (expanded ? ' is-expanded' : '')
@@ -9923,9 +9942,22 @@ function ContainerWidgetRender({ widget }: { widget: CustomWidget }) {
   return (
     <Container
       config={widget.config}
-      renderChild={renderWidgetInContainer}
+      renderChild={
+        containerArrange(widget.config) === 'free'
+          ? renderWidgetInContainer
+          : renderWidgetInCell
+      }
     />
   );
+}
+
+/**
+ * A child of a row / column / grid container. Unlike a toolbar or
+ * dock child it is a panel in its own right, so it keeps its own
+ * frame and title, and fills its cell.
+ */
+function renderWidgetInCell(widget: CustomWidget): React.ReactNode {
+  return <WidgetSlot widget={widget} inCell />;
 }
 
 // ---- Shared frame ----------------------------------------------------------

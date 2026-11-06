@@ -83,6 +83,19 @@ versioning policy is in [docs/VERSIONING.md](./docs/VERSIONING.md).
   submissions without one. The Android app skips signature questions
   until it has a pad, so on Android a required one cannot be answered
   yet.
+- App Builder: dropping or resizing a widget over others pushes them
+  down to just below it, cascading, the way Experience Builder does;
+  maps and tabs stay backgrounds that widgets float over, and holding
+  **Alt** places freely. Guides show when a dragged widget's edges or
+  centre line up with another's. A **Desktop / Phone** switch
+  previews the runtime's stacked phone layout while designing.
+- App Builder: **Row**, **Column** and **Grid** layout widgets, as in
+  Experience Builder. They arrange their widgets edge to edge; drag
+  the divider between two widgets in a row or column to resize them,
+  drag a widget to reorder it, and set a grid's columns and the gap
+  in settings. Any inline container can switch with **Arrange**. On
+  a phone rows stack and grids drop to two columns. The KPI Dashboard
+  template now puts its indicators and its charts in Rows.
 
 ### Changed
 
@@ -123,6 +136,12 @@ versioning policy is in [docs/VERSIONING.md](./docs/VERSIONING.md).
 - Translated plurals with an exact case (`=0`) or a placeholder inside
   a case showed their raw `{count, plural, ...}` text, as in the
   PostGIS connection's table preview.
+- Maps no longer crash with "Cannot read properties of undefined
+  (reading 'getImage')" when the map is closed or its basemap is
+  switched while symbol icons are still loading.
+- App Builder: dragging a widget to a later position inside a
+  container (a dock, a toolbar) dropped it one place short of where
+  it was released, so it could never reach the end.
 - Field app: a related table is listed only under its own parent
   layer. Every table with a link column used to appear under every
   spatial layer of the data layer, so one asset's inspections showed

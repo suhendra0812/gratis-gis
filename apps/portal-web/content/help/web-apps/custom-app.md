@@ -61,6 +61,52 @@ config panel. Common config options:
 - **Visibility**. Always visible, hidden until opened, or
  opened by default on first load.
 
+## Layout widgets: Row, Column, Grid
+
+Under **Layout** in the widget list, **Row**, **Column** and
+**Grid** are containers that arrange what you drop into them, like
+the layout widgets of ArcGIS Experience Builder. Use them for
+anything that should share space, such as a band of indicators or
+two charts side by side.
+
+- **Row** puts its widgets side by side and **Column** stacks them;
+  together they fill the container edge to edge. Drag the divider
+  between two widgets to give one more room; the other gives it
+  up. **Equal sizes** in the container's settings resets them.
+- **Grid** lays its widgets out in equal cells, filled in order.
+  Set **Columns** in its settings.
+- Drag a widget within the container to reorder it, onto another
+  container to move it there, or onto the page to take it out.
+  Drop a widget from the list onto a container to add it.
+- **Gap** sets the space between the widgets.
+- On a phone, a row stacks into a column (a row of indicators stays
+  two across), and a grid shows at most two columns, with maps,
+  charts and tables full width.
+
+Any **Container** can be switched to these arrangements with
+**Arrange** in its settings; **Free** keeps children where they
+were dropped, which suits a toolbar of tool buttons. The KPI
+Dashboard template now builds its indicators and charts this way.
+
+## Moving and resizing widgets
+
+Drag a widget's body to move it, or a handle on its edges and
+corners to resize it. While you drag:
+
+- **Guides** show where the widget's edges or centre line up with
+  another widget's, so a row of panels can be lined up by eye.
+- **Widgets it lands on move out of the way.** When you drop or
+  resize a widget over others, they are pushed down to just below
+  it, and anything those land on moves down too. A **map** or
+  **tabs** widget is a background: buttons and panels may sit on
+  top of it, so it never pushes or gets pushed.
+- **Hold Alt** as you release to place the widget exactly where it
+  is, overlapping on purpose.
+
+**Desktop / Phone** at the bottom right of the canvas switches to a
+read-only preview of the stacked phone layout (see Notes). Layout
+is edited in the Desktop view.
+
 ## Saving and previewing
 
 - **Save** persists the app config; the app item updates.
@@ -88,4 +134,5 @@ Org-only app requires sign-in.
  canvas stops using the 192-column grid. Indicators that share
  a row sit two across, and maps, charts, and tables each take
  the width of the screen. Widen the window and the authored
- grid comes back.
+ grid comes back. The builder's **Phone** view shows this layout
+ while you design.

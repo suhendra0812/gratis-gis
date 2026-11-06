@@ -1777,6 +1777,47 @@ export interface ContainerWidgetConfig {
   /** Overlay-trigger only: icon hint for the trigger button.
    *  Defaults vary by `edge`. */
   triggerIcon?: 'menu' | 'layers' | 'tools' | 'filter';
+  /**
+   * How an inline container arranges its children, like the Row,
+   * Column and Grid layout widgets of ArcGIS Experience Builder.
+   *
+   *  - 'free' (default, and what every container saved before this
+   *    field existed does): children sit where they were dropped,
+   *    positioned by their own col / row. Meant for tool buttons.
+   *  - 'row' / 'column': children share the width / height in
+   *    proportion to `sizes`, filling it edge to edge. Moving one
+   *    reorders it among the others; resizing one takes the room
+   *    from its neighbour.
+   *  - 'grid': `gridColumns` equal columns; children fill the cells
+   *    in order and the rows share the height.
+   *
+   * On a phone, rows stack into a column and grids drop to at most
+   * two columns. Only inline containers arrange; other positions
+   * ignore it.
+   */
+  arrange?: ContainerArrange;
+  /** 'grid' only: number of columns (1 to 6). Default 2. */
+  gridColumns?: number;
+  /** Space between arranged children in CSS px. Default 8. */
+  gapPx?: number;
+  /**
+   * 'row' / 'column' only: each child's share of the main axis,
+   * keyed by child widget id. A missing entry counts as 1, so equal
+   * shares need no entries at all.
+   */
+  sizes?: Record<string, number>;
+}
+
+export type ContainerArrange = 'free' | 'row' | 'column' | 'grid';
+
+export const CONTAINER_GRID_MAX_COLUMNS = 6;
+export const CONTAINER_DEFAULT_GAP_PX = 8;
+
+/** The arrangement an inline container uses ('free' unless set). */
+export function containerArrange(config: ContainerWidgetConfig): ContainerArrange {
+  const position = config.position ?? 'inline';
+  if (position !== 'inline') return 'free';
+  return config.arrange ?? 'free';
 }
 
 /**

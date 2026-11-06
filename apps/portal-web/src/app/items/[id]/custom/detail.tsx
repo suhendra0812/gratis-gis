@@ -44,6 +44,10 @@ import {
   Search,
   Settings,
   Sparkles,
+  Columns3,
+  Monitor,
+  Rows3,
+  Smartphone,
   Square,
   Table2,
   Trash2,
@@ -52,8 +56,11 @@ import {
   X,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
+import { alignmentGuides, pushDownCollisions, type GridBox } from '@/lib/grid-collision';
+import { mobileKind, mobilePlacements } from '@/lib/mobile-canvas';
 import type {
   AppDataSource,
+  ContainerArrange,
   BasemapData,
   ChartReferenceLine,
   CustomAppData,
@@ -71,6 +78,9 @@ import type {
 } from '@gratis-gis/shared-types';
 import {
   APP_THEMES,
+  CONTAINER_DEFAULT_GAP_PX,
+  CONTAINER_GRID_MAX_COLUMNS,
+  containerArrange,
   customTargetLayerId,
   DEFAULT_LAYER_ACCESS,
   DEFAULT_LAYER_INTERACTIONS,
@@ -719,13 +729,15 @@ export function CustomAppDetail({
       // the drop spot instead of the placeholder origin.  Ignored
       // when targetParentId is null.
       targetLayout: CustomLayout | null = null,
+      // Row / Column / Grid tile: stamp the container arranged.
+      preset?: ContainerArrange,
     ) => {
       const layout: CustomLayout = {
         ...defaultLayoutForKind(kind),
         col: clampCol(col),
         row: Math.max(1, Math.round(row)),
       };
-      const widget = stampWidget(kind, layout);
+      const widget = withContainerPreset(stampWidget(kind, layout), preset);
       let routedToTab = false;
       setApp((cur) => {
         const page = cur.pages[activePageIdx];
@@ -750,7 +762,7 @@ export function CustomAppDetail({
           const childLayout = targetLayout
             ? targetLayout
             : { ...defaultLayoutForKind(kind), col: 1, row: 1 };
-          const childWidget = stampWidget(kind, childLayout);
+          const childWidget = withContainerPreset(stampWidget(kind, childLayout), preset);
           const onlyMap =
             page.widgets.filter((w) => w.kind === 'map').length === 1
               ? page.widgets.find((w) => w.kind === 'map')
@@ -791,7 +803,7 @@ export function CustomAppDetail({
           // for nested widgets and stacks them anyway, but the
           // values still feed rowSpan-derived min-height.
           const childLayout = { ...defaultLayoutForKind(kind), col: 1, row: 1 };
-          const childWidget = stampWidget(kind, childLayout);
+          const childWidget = withContainerPreset(stampWidget(kind, childLayout), preset);
           // Auto-bind nested map-followers to the host page's
           // single Map widget (parent-page scope).
           const onlyMap =
@@ -1136,10 +1148,30 @@ export function CustomAppDetail({
               itemTitle={itemTitle}
               onSetActiveTabIdx={setActiveTabIdx}
               onSelect={setSelectedWidgetId}
-              onCanvasDrop={(kind, col, row, targetParentId, targetLayout) =>
-                addWidgetAt(kind, col, row, targetParentId, targetLayout)
+              onCanvasDrop={(kind, col, row, targetParentId, targetLayout, preset) =>
+                addWidgetAt(kind, col, row, targetParentId, targetLayout, preset)
               }
               onWidgetLayout={(id, layout) => updateWidget(id, { layout })}
+              onWidgetConfig={(id, config) => updateWidget(id, { config })}
+              onPushRows={(rows) => {
+                setApp((cur) => ({
+                  ...cur,
+                  pages: cur.pages.map((p, i) =>
+                    i !== activePageIdx
+                      ? p
+                      : {
+                          ...p,
+                          widgets: p.widgets.map((w) => {
+                            const row = rows.get(w.id);
+                            return row === undefined
+                              ? w
+                              : { ...w, layout: { ...w.layout, row } };
+                          }),
+                        },
+                  ),
+                }));
+                setDirty(true);
+              }}
               onWidgetMove={(id, targetParentId, targetIndex, pageLayout) => {
                 setApp((cur) => ({
                   ...cur,
@@ -1400,6 +1432,8 @@ const PALETTE_TILES: Array<{
   Icon: LucideIcon;
   hint: string;
   category: PaletteCategory;
+  /** Container tiles only: drop it already arranged as a row, column or grid. */
+  preset?: ContainerArrange;
 }> = [
   // -- Map widgets -----------------------------------------------
   {
@@ -1619,7 +1653,52 @@ const PALETTE_TILES: Array<{
     hint: 'Generic layout region: drop widgets inside; chrome (sticky bar, side dock, drawer) is configurable.',
     category: 'layout',
   },
+  // Layout widgets in the manner of Experience Builder: containers
+  // that arrange their children edge to edge and reflow as one is
+  // moved, resized or removed.
+  {
+    kind: 'container',
+    preset: 'row',
+    label: 'Row',
+    Icon: Columns3,
+    hint: 'Widgets side by side, sharing the width. Drag a divider to resize; drag a widget to reorder.',
+    category: 'layout',
+  },
+  {
+    kind: 'container',
+    preset: 'column',
+    label: 'Column',
+    Icon: Rows3,
+    hint: 'Widgets stacked, sharing the height. Drag a divider to resize; drag a widget to reorder.',
+    category: 'layout',
+  },
+  {
+    kind: 'container',
+    preset: 'grid',
+    label: 'Grid',
+    Icon: LayoutGrid,
+    hint: 'Equal cells, filled in order. Set the number of columns in its settings.',
+    category: 'layout',
+  },
 ];
+
+/**
+ * A container stamped from the Row / Column / Grid tile: arranged,
+ * chrome-less, and (for a grid) two columns to start.
+ */
+function withContainerPreset(widget: CustomWidget, preset: ContainerArrange | undefined): CustomWidget {
+  if (!preset || preset === 'free' || widget.config.kind !== 'container') return widget;
+  return {
+    ...widget,
+    config: {
+      ...widget.config,
+      arrange: preset,
+      layout: preset === 'row' ? 'row' : 'column',
+      variant: 'none',
+      ...(preset === 'grid' ? { gridColumns: 2 } : {}),
+    },
+  };
+}
 
 function Palette({ canEdit }: { canEdit: boolean }) {
   // Bucket once at module scope so we don't refilter every render.
@@ -1646,7 +1725,7 @@ function Palette({ canEdit }: { canEdit: boolean }) {
           </div>
           <div className="flex flex-col">
             {group.tiles.map((tile) => (
-              <PaletteTile key={tile.kind} {...tile} canEdit={canEdit} />
+              <PaletteTile key={`${tile.kind}:${tile.preset ?? ''}`} {...tile} canEdit={canEdit} />
             ))}
           </div>
         </div>
@@ -1682,14 +1761,16 @@ function PaletteTile({
   Icon,
   hint,
   canEdit,
+  preset,
 }: {
   kind: CustomWidgetKind;
   label: string;
   Icon: LucideIcon;
   hint: string;
   canEdit: boolean;
+  preset?: ContainerArrange | undefined;
 }) {
-  const helpId = WIDGET_HELP_BINDING[kind];
+  const helpId = preset ? undefined : WIDGET_HELP_BINDING[kind];
   return (
     <button
       type="button"
@@ -1700,6 +1781,7 @@ function PaletteTile({
       draggable={canEdit}
       onDragStart={(e) => {
         e.dataTransfer.setData('text/x-widget-kind', kind);
+        if (preset) e.dataTransfer.setData('text/x-widget-preset', preset);
         e.dataTransfer.effectAllowed = 'copy';
       }}
       title={hint}
@@ -1914,6 +1996,12 @@ function PageTabs({
 // ROW_HEIGHT_PX is gone (#80): rows are viewport-proportional now,
 // matching the runtime; px-per-row is measured live off the grid.
 const GRID_COLS = 192;
+
+/** A page widget's grid box, for collision and alignment checks. */
+function toGridBox(w: CustomWidget): GridBox {
+  const { col, row, colSpan, rowSpan } = w.layout;
+  return { id: w.id, col, row, colSpan, rowSpan };
+}
 const GAP_PX = 1.5;
 /**
  * Floor for the canvas's working width. On viewports narrower than
@@ -2021,6 +2109,8 @@ function Canvas({
   onCanvasDrop,
   onWidgetLayout,
   onWidgetMove,
+  onPushRows,
+  onWidgetConfig,
 }: {
   widgets: CustomWidget[];
   selectedId: string | null;
@@ -2072,8 +2162,17 @@ function Canvas({
     // applies it to the new child so the drop lands where the user
     // released, instead of at the placeholder origin.
     targetLayout: CustomLayout | null,
+    /** A Row / Column / Grid tile: the container's arrangement. */
+    preset?: ContainerArrange,
   ) => void;
   onWidgetLayout: (id: string, layout: CustomLayout) => void;
+  /**
+   * New `row` for page-level widgets pushed down by a drop or resize
+   * that landed on them (see pushDownCollisions).
+   */
+  onPushRows: (rows: Map<string, number>) => void;
+  /** Replace a widget's config (any depth); used for row / column sizes. */
+  onWidgetConfig: (id: string, config: CustomWidget['config']) => void;
   /**
    * #96: reparent / reorder a widget.  Called on mouseup when the
    * move gesture crossed a parent boundary OR reordered within the
@@ -2098,6 +2197,9 @@ function Canvas({
   // sibling slots that sticky/dock containers live in.
   const gridRef = useRef<HTMLDivElement | null>(null);
   const [gesture, setGesture] = useState<ActiveGesture | null>(null);
+  // Phone preview: the page as the runtime stacks it below 768px.
+  // Read-only; layout is authored on the desktop grid.
+  const [phonePreview, setPhonePreview] = useState(false);
   // #53 WYSIWYG: drag-from-palette drop-target indicator.  When
   // a palette tile is hovered over a container's footprint, we
   // light up that container with an outline so the user knows
@@ -2236,7 +2338,15 @@ function Canvas({
         };
       }
     }
-    onCanvasDrop(kind as CustomWidgetKind, col, row, host?.id ?? null, targetLayout);
+    const preset = e.dataTransfer.getData('text/x-widget-preset') as ContainerArrange | '';
+    onCanvasDrop(
+      kind as CustomWidgetKind,
+      col,
+      row,
+      host?.id ?? null,
+      targetLayout,
+      preset || undefined,
+    );
   }
 
   // Begin a gesture. Called from WidgetCard's mousedown handler
@@ -2396,8 +2506,11 @@ function Canvas({
           // coords.
           const parent = findWidgetWithParent(widgets, g.srcParentId);
           const parentCfg = parent?.widget.config;
+          // Row / column / grid parents order their children; a
+          // drag reorders by index on release, like a dock.
           const isFlowParent =
             parentCfg?.kind === 'container' &&
+            containerArrange(parentCfg) === 'free' &&
             (parentCfg.position === undefined ||
               parentCfg.position === 'inline' ||
               parentCfg.position === 'sticky-top' ||
@@ -2498,6 +2611,9 @@ function Canvas({
       onWidgetLayout(g.widgetId, next);
     }
     function onUp(e: MouseEvent) {
+      // A page-level resize, or a page-level move that stayed on the
+      // page, may now cover other widgets; those get pushed below it.
+      let landedOnPage = g.kind !== 'move' && g.srcParentId === null;
       // #96: on release of a move gesture, decide whether the
       // gesture crossed a parent boundary (reparent), reordered
       // within the same container, or was a pure top-level grid
@@ -2539,6 +2655,7 @@ function Canvas({
             e.clientY <= gridRect.bottom;
           if (!overGrid) targetParentId = g.srcParentId;
         }
+        landedOnPage = g.srcParentId === null && targetParentId === null;
         if (targetParentId !== g.srcParentId) {
           // Reparent.
           //
@@ -2606,8 +2723,11 @@ function Canvas({
           // still rearrange children in those containers via drag.
           const parent = findWidgetWithParent(widgets, targetParentId);
           const parentCfg = parent?.widget.config;
+          // Row / column / grid parents order their children; a
+          // drag reorders by index on release, like a dock.
           const isFlowParent =
             parentCfg?.kind === 'container' &&
+            containerArrange(parentCfg) === 'free' &&
             (parentCfg.position === undefined ||
               parentCfg.position === 'inline' ||
               parentCfg.position === 'sticky-top' ||
@@ -2624,6 +2744,21 @@ function Canvas({
         // targetParentId === null && srcParentId === null: pure
         // page-level grid move; onMove already applied it.
       }
+      // Push what the widget now covers down below it, unless Alt is
+      // held (place freely, overlap on purpose). Maps and tabs are
+      // backgrounds that widgets float over; see grid-collision.ts.
+      if (landedOnPage && !e.altKey) {
+        const grid = widgets.filter((w) => !isPartitionedContainer(w));
+        const pushed = pushDownCollisions(
+          grid.map(toGridBox),
+          g.widgetId,
+          (id) => {
+            const w = grid.find((x) => x.id === id);
+            return w?.kind === 'map' || w?.kind === 'tabs';
+          },
+        );
+        if (pushed.size > 0) onPushRows(pushed);
+      }
       setDropTargetId(null);
       setGesture(null);
     }
@@ -2633,7 +2768,7 @@ function Canvas({
       window.removeEventListener('mousemove', onMove);
       window.removeEventListener('mouseup', onUp);
     };
-  }, [gesture, onWidgetLayout, onWidgetMove, widgets]);
+  }, [gesture, onWidgetLayout, onWidgetMove, onPushRows, widgets]);
 
   // #98: partition top-level widgets the same way the runtime does
   // (apps/portal-web/.../runtime-client.tsx ~L651): sticky / dock
@@ -2669,13 +2804,65 @@ function Canvas({
     ...canvasWidgets.filter((w) => w.kind !== 'map' && w.kind !== 'tabs'),
   ];
 
-  const renderWidget = (w: CustomWidget, inGrid: boolean) => (
+  // Divider drag in a row / column container: store the new shares.
+  const onContainerSizes = (containerId: string, sizes: Record<string, number>) => {
+    const found = findWidgetWithParent(widgets, containerId);
+    const cfg = found?.widget.config;
+    if (cfg?.kind !== 'container') return;
+    onWidgetConfig(containerId, { ...cfg, sizes });
+  };
+
+  // A child of a row / column / grid container, drawn as the same
+  // preview card the page grid uses. It fills its cell, drags to
+  // reorder or out of the container, and nests: a row inside a
+  // column draws its own children the same way.
+  const renderArrangedChild = (
+    child: CustomWidget,
+    parentId: string,
+    preview = false,
+  ): React.ReactNode => (
+    <div data-child-id={child.id} className="h-full w-full min-h-0 min-w-0">
+      <WidgetCard
+        widget={child}
+        inGrid={false}
+        inCell
+        selected={child.id === selectedId}
+        canEdit={canEdit && !preview}
+        gesturing={Boolean(gesture && gesture.widgetId === child.id)}
+        anyGesture={gesture !== null}
+        isDropTarget={child.id === dropTargetId}
+        previewMapData={widgetMapData[child.id] ?? previewMapData}
+        previewBasemaps={previewBasemaps}
+        resolvedTargets={resolvedTargets}
+        sources={sources}
+        previewStatesByMapWidget={previewStatesByMapWidget}
+        activeTabIdx={activeTabIdxByWidget[child.id] ?? 0}
+        itemTitle={itemTitle}
+        selectedChildId={selectedId}
+        onSelectChild={onSelect}
+        onSetActiveTabIdx={(idx) => onSetActiveTabIdx(child.id, idx)}
+        onClick={(e) => {
+          e.stopPropagation();
+          onSelect(child.id);
+        }}
+        onMoveStart={(e) => beginGesture('move', child, parentId, e)}
+        onResizeStart={() => undefined}
+        onChildMoveStart={(c, pid, e) => beginGesture('move', c, pid, e)}
+        renderArrangedChild={(c, pid) => renderArrangedChild(c, pid, preview)}
+        onContainerSizes={preview ? undefined : onContainerSizes}
+      />
+    </div>
+  );
+
+  // `preview`: drawn in the phone preview, where the desktop grid
+  // coordinates do not apply, so it cannot be dragged or resized.
+  const renderWidget = (w: CustomWidget, inGrid: boolean, preview = false) => (
     <WidgetCard
       key={w.id}
       widget={w}
       inGrid={inGrid}
       selected={w.id === selectedId}
-      canEdit={canEdit}
+      canEdit={canEdit && !preview}
       gesturing={Boolean(gesture && gesture.widgetId === w.id)}
       anyGesture={gesture !== null}
       isDropTarget={w.id === dropTargetId}
@@ -2699,11 +2886,119 @@ function Canvas({
       onChildMoveStart={(child, parentId, e) =>
         beginGesture('move', child, parentId, e)
       }
+      renderArrangedChild={(c, pid) => renderArrangedChild(c, pid, preview)}
+      onContainerSizes={preview ? undefined : onContainerSizes}
       onResizeStart={(handle, e) =>
         beginGesture(`resize-${handle}` as ActiveGesture['kind'], w, null, e)
       }
     />
   );
+
+  // Alignment guides while a page-level widget is dragged or
+  // resized: its edges and centre against every other grid widget.
+  const movingTop =
+    gesture && gesture.srcParentId === null
+      ? canvasWidgets.find((w) => w.id === gesture.widgetId)
+      : undefined;
+  const guides = movingTop
+    ? alignmentGuides(toGridBox(movingTop), canvasWidgets.map(toGridBox))
+    : [];
+
+  // Phone preview placements: the runtime's own stacking (indicators
+  // two-up, everything else full width, in reading order).
+  const phonePlacements = phonePreview
+    ? mobilePlacements(
+        canvasWidgets.map((w) => ({
+          id: w.id,
+          kind: mobileKind(w),
+          col: w.layout.col,
+          row: w.layout.row,
+          colSpan: w.layout.colSpan,
+          rowSpan: w.layout.rowSpan,
+        })),
+      )
+    : [];
+
+  const viewToggle = (
+    <div
+      role="group"
+      aria-label="Canvas view"
+      className="absolute bottom-3 right-3 z-40 flex items-center gap-0.5 rounded-md border border-border bg-surface-1/95 p-0.5 shadow-card backdrop-blur-xs"
+      onClick={(e) => e.stopPropagation()}
+    >
+      {(
+        [
+          { phone: false, label: 'Desktop', Icon: Monitor },
+          { phone: true, label: 'Phone', Icon: Smartphone },
+        ] as const
+      ).map(({ phone, label, Icon }) => (
+        <button
+          key={label}
+          type="button"
+          aria-pressed={phonePreview === phone}
+          title={phone ? 'Preview the phone layout (read-only)' : 'Edit the desktop layout'}
+          onClick={() => setPhonePreview(phone)}
+          className={`inline-flex h-7 items-center gap-1 rounded px-2 text-xs font-medium ${
+            phonePreview === phone
+              ? 'bg-accent text-accent-foreground'
+              : 'text-muted hover:bg-surface-2 hover:text-ink-0'
+          }`}
+        >
+          <Icon className="h-3.5 w-3.5" />
+          {label}
+        </button>
+      ))}
+    </div>
+  );
+
+  if (phonePreview) {
+    return (
+      <div
+        ref={themeRootRef}
+        style={{ fontFamily: 'var(--app-font, var(--font-sans))' }}
+        className="relative flex h-full w-full overflow-hidden rounded-lg border border-border bg-surface-2"
+      >
+        {viewToggle}
+        <div
+          className="flex min-h-0 flex-1 justify-center overflow-auto p-6"
+          onClick={() => onSelect(null)}
+        >
+          {/* A phone-sized frame laid out like the runtime below its
+              768px breakpoint: bars and docks stacked, then the page
+              widgets two columns wide. */}
+          <div className="app-designer-phone h-fit w-[390px] shrink-0 overflow-hidden rounded-[28px] border-8 border-ink-0/80 bg-[hsl(var(--app-surface-0))] shadow-raised">
+            {stickyTops.map((w) => renderWidget(w, false, true))}
+            {leftDocks.map((w) => renderWidget(w, false, true))}
+            <div
+              className="grid gap-2 p-2"
+              style={{ gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 1fr)' }}
+            >
+              {phonePlacements.map((m) => {
+                const w = canvasWidgets.find((x) => x.id === m.id);
+                if (!w) return null;
+                return (
+                  <div
+                    key={m.id}
+                    className="app-designer-phone-slot"
+                    style={{
+                      gridColumn: m.column,
+                      gridRow: m.row,
+                      height: m.height,
+                      minHeight: m.minHeight === '0px' ? '56px' : m.minHeight,
+                    }}
+                  >
+                    {renderWidget(w, true, true)}
+                  </div>
+                );
+              })}
+            </div>
+            {rightDocks.map((w) => renderWidget(w, false, true))}
+            {stickyBottoms.map((w) => renderWidget(w, false, true))}
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div
@@ -2718,6 +3013,7 @@ function Canvas({
       style={{ fontFamily: 'var(--app-font, var(--font-sans))' }}
       className="relative flex h-full w-full overflow-hidden rounded-lg border border-border bg-[hsl(var(--app-surface-0))]"
     >
+      {viewToggle}
       <div
         ref={canvasRef}
         onDragOver={onDragOver}
@@ -2770,6 +3066,35 @@ function Canvas({
               }}
             >
               {orderedCanvas.map((w) => renderWidget(w, true))}
+              {guides.map((gd) => {
+                // A guide sits on a grid line: the start edge of the
+                // track after it, or the end edge of the last track.
+                const isX = gd.axis === 'x';
+                const last = isX ? GRID_COLS : totalRows;
+                const track = Math.min(gd.line, last);
+                const atEnd = gd.line > last;
+                const edge = isX
+                  ? atEnd
+                    ? 'border-r'
+                    : 'border-l'
+                  : atEnd
+                    ? 'border-b'
+                    : 'border-t';
+                return (
+                  <div
+                    key={`${gd.axis}:${gd.line}:${gd.center}`}
+                    aria-hidden
+                    className={`pointer-events-none ${edge} ${
+                      gd.center ? 'border-dashed' : 'border-solid'
+                    } border-accent`}
+                    style={{
+                      gridColumn: isX ? `${track} / span 1` : '1 / -1',
+                      gridRow: isX ? '1 / -1' : `${track} / span 1`,
+                      zIndex: 40,
+                    }}
+                  />
+                );
+              })}
               {orderedCanvas.length === 0 && stickyTops.length === 0 &&
                 stickyBottoms.length === 0 && leftDocks.length === 0 &&
                 rightDocks.length === 0 && (
@@ -2820,8 +3145,21 @@ function WidgetCard({
   onMoveStart,
   onResizeStart,
   onChildMoveStart,
+  inCell = false,
+  renderArrangedChild,
+  onContainerSizes,
 }: {
   widget: CustomWidget;
+  /**
+   * Drawn as a child inside a row / column / grid container's cell:
+   * fills the cell, drags to reorder or move out, and has no grid
+   * resize handles (its size is the container's to give).
+   */
+  inCell?: boolean;
+  /** Draws an arranged container's children as full previews. */
+  renderArrangedChild?: ((child: CustomWidget, parentId: string) => React.ReactNode) | undefined;
+  /** Divider drag inside a row / column container. */
+  onContainerSizes?: ((containerId: string, sizes: Record<string, number>) => void) | undefined;
   /**
    * #98: true when this card lives inside the canvas CSS grid (so it
    * carries gridColumn / gridRow + supports the full move + 8-way
@@ -2900,7 +3238,7 @@ function WidgetCard({
     // still draggable for reorder / reparent / extract.  In-grid
     // containers (inline + overlay-trigger) keep the original
     // grid-coord + body-drag behavior.
-    const partitioned = !inGrid;
+    const partitioned = !inGrid && !inCell;
     const gridStyle: React.CSSProperties = inGrid
       ? {
           gridColumn: `${widget.layout.col} / span ${widget.layout.colSpan}`,
@@ -2958,6 +3296,12 @@ function WidgetCard({
           selectedChildId={selectedChildId}
           onSelectChild={onSelectChild}
           onChildMoveStart={onChildMoveStart}
+          renderArrangedChild={renderArrangedChild}
+          onSizesChange={
+            canEdit && onContainerSizes
+              ? (sizes) => onContainerSizes(widget.id, sizes)
+              : undefined
+          }
         />
         {/* Drop-target badge.  Visible only while a palette tile
             is being dragged over this container.  Tells the user
@@ -2975,7 +3319,7 @@ function WidgetCard({
             not by grid coords, so canvas-resize would be misleading
             (changing rowSpan does nothing in the runtime).  Width /
             height for those flows through the property editor. */}
-        {selected && canEdit && !partitioned && (
+        {selected && canEdit && !partitioned && !inCell && (
           <ResizeHandles onResizeStart={onResizeStart} />
         )}
       </div>
@@ -3193,7 +3537,7 @@ function WidgetCard({
           corner for both). 8-handle resize can come if anyone
           actually misses it. Each handle stops propagation so the
           mousedown doesn't fall through to the body's move gesture. */}
-      {selected && canEdit && <ResizeHandles onResizeStart={onResizeStart} />}
+      {selected && canEdit && !inCell && <ResizeHandles onResizeStart={onResizeStart} />}
     </div>
   );
 }
@@ -6077,7 +6421,12 @@ function ContainerInDesigner({
   selectedChildId,
   onSelectChild,
   onChildMoveStart,
+  renderArrangedChild,
+  onSizesChange,
 }: {
+  /** Full preview for each child of a row / column / grid container. */
+  renderArrangedChild?: ((child: CustomWidget, parentId: string) => React.ReactNode) | undefined;
+  onSizesChange?: ((sizes: Record<string, number>) => void) | undefined;
   widget: CustomWidget;
   itemTitle: string;
   selectedChildId: string | null;
@@ -6108,8 +6457,26 @@ function ContainerInDesigner({
   );
 
   if (widget.config.kind !== 'container') return null;
+  // Row / column / grid children are panels, not toolbar buttons:
+  // draw them as the same previews the page grid shows.
+  const arranged = containerArrange(widget.config) !== 'free';
   return (
-    <Container config={widget.config} renderChild={renderChild} />
+    <Container
+      config={widget.config}
+      renderChild={
+        arranged && renderArrangedChild
+          ? (child) => renderArrangedChild(child, widget.id)
+          : renderChild
+      }
+      onSizesChange={arranged ? onSizesChange : undefined}
+      emptyHint={
+        arranged ? (
+          <div className="flex h-full w-full items-center justify-center rounded-md border border-dashed border-border p-3 text-center text-xs text-muted">
+            Drop widgets here
+          </div>
+        ) : undefined
+      }
+    />
   );
 }
 
@@ -7619,12 +7986,17 @@ function ContainerConfigEditor({
     heightPx?: number;
     triggerLabel?: string;
     triggerIcon?: 'menu' | 'layers' | 'tools' | 'filter';
+    arrange?: ContainerArrange;
+    gridColumns?: number;
+    gapPx?: number;
+    sizes?: Record<string, number>;
     widgets: CustomWidget[];
   };
   canEdit: boolean;
   onChangeConfig: (patch: Record<string, unknown>) => void;
 }) {
   const position = config.position ?? 'inline';
+  const arrange = position === 'inline' ? (config.arrange ?? 'free') : 'free';
   const isDock = position === 'dock-left' || position === 'dock-right';
   const isOverlay = position === 'overlay-trigger';
   const isSticky =
@@ -7650,6 +8022,66 @@ function ContainerConfigEditor({
           <option value="menu">Menu stack (icon with dropdown)</option>
         </select>
       </Field>
+      {position === 'inline' ? (
+        <Field
+          label="Arrange"
+          hint="Row, Column and Grid fill the container edge to edge and reflow as widgets are added, moved or resized. Free keeps each child where it was dropped (for tool buttons)."
+        >
+          <select
+            value={arrange}
+            disabled={!canEdit}
+            onChange={(e) => {
+              const next = e.target.value as ContainerArrange;
+              onChangeConfig({
+                arrange: next,
+                ...(next === 'row' || next === 'column' ? { layout: next } : {}),
+              });
+            }}
+            className="w-full rounded-md border border-border bg-surface-1 px-2 py-1 text-xs"
+          >
+            <option value="free">Free (place children anywhere)</option>
+            <option value="row">Row (side by side)</option>
+            <option value="column">Column (stacked)</option>
+            <option value="grid">Grid (equal cells)</option>
+          </select>
+        </Field>
+      ) : null}
+      {arrange === 'grid' ? (
+        <Field label="Columns" hint="Cells per row. On a phone a grid shows at most two.">
+          <NumberInput
+            value={config.gridColumns ?? 2}
+            min={1}
+            max={CONTAINER_GRID_MAX_COLUMNS}
+            disabled={!canEdit}
+            onChange={(v) => onChangeConfig({ gridColumns: v })}
+          />
+        </Field>
+      ) : null}
+      {arrange !== 'free' ? (
+        <Field label="Gap (px)" hint="Space between the widgets.">
+          <NumberInput
+            value={config.gapPx ?? CONTAINER_DEFAULT_GAP_PX}
+            min={0}
+            max={48}
+            disabled={!canEdit}
+            onChange={(v) => onChangeConfig({ gapPx: v })}
+          />
+        </Field>
+      ) : null}
+      {(arrange === 'row' || arrange === 'column') && canEdit ? (
+        <div className="flex items-center justify-between gap-2 text-2xs text-muted">
+          <span>Drag the dividers between widgets on the canvas to resize them.</span>
+          <button
+            type="button"
+            disabled={!config.sizes || Object.keys(config.sizes).length === 0}
+            onClick={() => onChangeConfig({ sizes: {} })}
+            className="shrink-0 rounded border border-border px-2 py-1 text-xs text-ink-1 hover:bg-surface-2 disabled:opacity-40"
+          >
+            Equal sizes
+          </button>
+        </div>
+      ) : null}
+      {arrange === 'free' ? (
       <Field
         label="Layout"
         hint="How children flow inside the container body."
@@ -7666,6 +8098,7 @@ function ContainerConfigEditor({
           <option value="column">Column (vertical)</option>
         </select>
       </Field>
+      ) : null}
       <Field label="Variant" hint="Visual chrome surface.">
         <select
           value={config.variant ?? (position === 'inline' ? 'flat' : 'elevated')}
@@ -9559,14 +9992,13 @@ function moveWidgetInTree(
 ): CustomWidget[] {
   const found = findWidgetWithParent(widgets, sourceId);
   if (!found) return widgets;
-  // When the source and target parent are the same, removing first
-  // would shift the indices to the LEFT for any post-source index.
-  // Account for that here so callers can pass the "visual" index
-  // without thinking about the shift.
-  const adjustedIndex =
-    found.parentId === targetParentId && targetIndex > found.index
-      ? targetIndex - 1
-      : targetIndex;
+  // `targetIndex` is the position among the target's children WITHOUT
+  // the source, which is what both callers compute (indexInContainer
+  // skips the dragged widget). It used to be shifted left once more
+  // for a same-parent move to the right, on the assumption that it
+  // counted the source; every such reorder landed one slot short of
+  // where it was dropped, and dragging to the end never reached it.
+  const adjustedIndex = targetIndex;
   const withoutSource = removeWidgetDeep(widgets, sourceId);
   let widgetToInsert = found.widget;
   if (pageLayout) {

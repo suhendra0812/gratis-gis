@@ -712,6 +712,105 @@
   }
 }
 
+/* Row / column / grid containers (themed-containers.tsx) on a phone:
+   rows stack, grids drop to two columns with canvases full width, and
+   each cell takes the height its widget needs to be read. The runtime
+   gets this below its md breakpoint; the App Builder's Phone preview
+   gets the same rules on its phone frame, whatever the window size. */
+@media (max-width: 767px) {
+  .app-runtime-canvas .gg-arrange {
+    height: auto !important;
+  }
+  .app-runtime-canvas .gg-arrange-row {
+    flex-direction: column !important;
+  }
+  /* A row of indicators only stays two-up, like indicators on the page. */
+  .app-runtime-canvas .gg-arrange-row:not(:has(> .gg-arrange-cell:not([data-arrange-kind='indicator']))) {
+    display: grid !important;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .app-runtime-canvas .gg-arrange-grid:not(.gg-arrange-grid-1) {
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+  }
+  .app-runtime-canvas .gg-arrange-grid {
+    grid-auto-rows: auto !important;
+  }
+  .app-runtime-canvas .gg-arrange-cell {
+    flex: none !important;
+    min-height: 220px;
+  }
+  .app-runtime-canvas .gg-arrange-cell[data-arrange-kind='indicator'] {
+    min-height: 104px;
+  }
+  .app-runtime-canvas .gg-arrange-cell:is([data-arrange-kind='text'], [data-arrange-kind='button'], [data-arrange-kind='divider']) {
+    min-height: 0;
+  }
+  .app-runtime-canvas .gg-arrange-cell[data-arrange-kind='chart'] {
+    min-height: 300px;
+  }
+  .app-runtime-canvas .gg-arrange-cell[data-arrange-kind='attribute-table'] {
+    min-height: 360px;
+  }
+  .app-runtime-canvas .gg-arrange-cell[data-arrange-kind='map'] {
+    min-height: min(58dvh, 480px);
+  }
+  .app-runtime-canvas .gg-arrange-grid > .gg-arrange-cell:is([data-arrange-kind='map'], [data-arrange-kind='chart'], [data-arrange-kind='attribute-table']) {
+    grid-column: 1 / -1;
+  }
+}
+.app-designer-phone .gg-arrange {
+  height: auto !important;
+}
+.app-designer-phone .gg-arrange-row {
+  flex-direction: column !important;
+}
+/* A row of indicators only stays two-up, like indicators on the page. */
+.app-designer-phone .gg-arrange-row:not(:has(> .gg-arrange-cell:not([data-arrange-kind='indicator']))) {
+  display: grid !important;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+.app-designer-phone .gg-arrange-grid:not(.gg-arrange-grid-1) {
+  grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+}
+.app-designer-phone .gg-arrange-grid {
+  grid-auto-rows: auto !important;
+}
+.app-designer-phone .gg-arrange-cell {
+  flex: none !important;
+  min-height: 220px;
+}
+.app-designer-phone .gg-arrange-cell[data-arrange-kind='indicator'] {
+  min-height: 104px;
+}
+.app-designer-phone .gg-arrange-cell:is([data-arrange-kind='text'], [data-arrange-kind='button'], [data-arrange-kind='divider']) {
+  min-height: 0;
+}
+.app-designer-phone .gg-arrange-cell[data-arrange-kind='chart'] {
+  min-height: 300px;
+}
+.app-designer-phone .gg-arrange-cell[data-arrange-kind='attribute-table'] {
+  min-height: 360px;
+}
+.app-designer-phone .gg-arrange-cell[data-arrange-kind='map'] {
+  min-height: min(58dvh, 480px);
+}
+.app-designer-phone .gg-arrange-grid > .gg-arrange-cell:is([data-arrange-kind='map'], [data-arrange-kind='chart'], [data-arrange-kind='attribute-table']) {
+  grid-column: 1 / -1;
+}
+
+/* App Builder phone preview: each slot is placed by the runtime's
+   phone stacking (mobilePlacements); the widget card inside fills it
+   and ignores its desktop grid placement (the slot is not a grid). */
+.app-designer-phone-slot {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.app-designer-phone-slot > * {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
 /* Phone layout for a custom app / dashboard. The authoring grid is
    192 columns and stays that way on a wide screen. Below the md
    breakpoint the same widgets reflow from the --m-* variables the
