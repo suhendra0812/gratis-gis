@@ -2605,6 +2605,8 @@ export const en = {
       fileFeatureCollection:
         'Top-level object must be a GeoJSON FeatureCollection.',
       fileReadFailed: 'Failed to read file.',
+      postgisProbeFailed: "Could not read the tables of {title}: {detail}",
+      postgisNoTables: "{title} has no tables with a geometry column in its schema. Add one (from QGIS, say) or check the schema and GRANT SELECT, then try again.",
     },
   },
   // The map builder's search bar: place results from the geocoder.

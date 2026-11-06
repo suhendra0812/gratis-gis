@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 'use client';
 
+import { parseApiError } from '@/lib/api-error';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ChevronRight,
@@ -852,6 +853,10 @@ export function AddLayerDialog({ open, onClose, onAdd }: Props) {
         : hydrated.type === 'wms_service'
           ? 'wms'
           : 'wfs';
+    if (protocol === 'postgis_live') {
+      await addPostgisLiveItem(hydrated);
+      return;
+    }
     if (protocol !== 'arcgis_map' && protocol !== 'arcgis_feature') {
       setError(
         t('mapAddLayer.errors.protocolNotRenderable', {
@@ -999,6 +1004,69 @@ export function AddLayerDialog({ open, onClose, onAdd }: Props) {
       });
       if (groupId) child.groupId = groupId;
       onAdd(child);
+    }
+    reset();
+    onClose();
+  }
+
+  /**
+   * A PostgreSQL + PostGIS (live) connection: one layer per geometry
+   * table, read live from the database by the canvas.
+   *
+   * The table list comes from a fresh probe, not the item's stored
+   * snapshot: that snapshot is taken when the connection is saved, so
+   * a table added afterwards (from QGIS, say) was never on it, and a
+   * connection saved before any table existed offered nothing at all.
+   * The probe also refreshes the snapshot for anyone who may edit the
+   * item. Several tables go under one group named for the connection,
+   * like a multi-layer ArcGIS service.
+   */
+  async function addPostgisLiveItem(item: Item) {
+    let tables: Array<{ name: string; title?: string; geometryKind?: string }>;
+    try {
+      const res = await fetch(`/api/portal/postgis-live/${item.id}/probe`, {
+        method: 'POST',
+      });
+      if (!res.ok) {
+        setError(
+          t('mapAddLayer.errors.postgisProbeFailed', {
+            title: item.title,
+            detail: await parseApiError(res, String(res.status)),
+          }),
+        );
+        return;
+      }
+      tables = (await res.json()) as typeof tables;
+    } catch (err) {
+      setError(
+        t('mapAddLayer.errors.postgisProbeFailed', {
+          title: item.title,
+          detail: err instanceof Error ? err.message : String(err),
+        }),
+      );
+      return;
+    }
+    if (tables.length === 0) {
+      setError(t('mapAddLayer.errors.postgisNoTables', { title: item.title }));
+      return;
+    }
+    let groupId: string | undefined;
+    if (tables.length > 1) {
+      const header = makeLayer(item.title, { kind: 'group' });
+      groupId = header.id;
+      onAdd(header);
+    }
+    for (const table of tables) {
+      const layer = makeLayer(
+        tables.length === 1 ? item.title : table.title || table.name,
+        { kind: 'postgis-live', serviceItemId: item.id, tableName: table.name },
+      );
+      const geom = (table.geometryKind ?? '').toUpperCase();
+      if (geom.includes('POLYGON')) layer.legendGeometry = 'polygon';
+      else if (geom.includes('LINE')) layer.legendGeometry = 'line';
+      else if (geom.includes('POINT')) layer.legendGeometry = 'point';
+      if (groupId) layer.groupId = groupId;
+      onAdd(layer);
     }
     reset();
     onClose();

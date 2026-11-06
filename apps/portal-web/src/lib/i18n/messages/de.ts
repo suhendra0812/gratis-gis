@@ -2466,6 +2466,8 @@ export const de: Partial<CatalogShape> = {
       fileFeatureCollection:
         'Das Objekt der obersten Ebene muss eine GeoJSON-FeatureCollection sein.',
       fileReadFailed: 'Datei konnte nicht gelesen werden.',
+      postgisProbeFailed: "Die Tabellen von {title} konnten nicht gelesen werden: {detail}",
+      postgisNoTables: "{title} hat in seinem Schema keine Tabellen mit Geometriespalte. Fügen Sie eine hinzu (etwa aus QGIS) oder prüfen Sie Schema und GRANT SELECT und versuchen Sie es erneut.",
     },
   },
   mapSearch: {
