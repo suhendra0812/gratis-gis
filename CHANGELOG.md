@@ -114,6 +114,14 @@ versioning policy is in [docs/VERSIONING.md](./docs/VERSIONING.md).
   geopoint, photo and signature answers. The popup now skips
   structured values in **All fields**, **Picked** and templates, and
   the popup field pickers no longer offer them.
+- Form responses, Viewer and Editor apps: the attribute table could
+  stay on "Loading features..." for good, and selecting a point then
+  opened its popup but left the table and the form view empty. A
+  feature load cancelled while the page set up was never started
+  again; it is now.
+- Form responses, Viewer and Editor apps: the **Select** mode menu
+  and the **Basemap** menu in the header opened as an invisible box,
+  cut off by the toolbar. Both now open below their button.
 - Field app: the compass button follows the map's bearing and resets
   it; it subscribed to a map that did not exist yet when it mounted.
 - Field app: the feature details sheet, the add and edit form and the
