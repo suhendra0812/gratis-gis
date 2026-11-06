@@ -995,6 +995,24 @@ export interface MapLayerPopup {
    * when the popup opens, never for a hover. Absent or empty: none.
    */
   related?: MapLayerPopupRelated[];
+  /**
+   * The feature's attachments (photos, signatures, files), listed
+   * under the attributes. Only data_layer sublayers carry
+   * attachments. Fetched when the popup opens, never for a hover.
+   * Absent: not shown.
+   */
+  attachments?: MapLayerPopupAttachments;
+}
+
+/** How a popup lays out a feature's attachments. */
+export type MapLayerPopupAttachmentDisplay = 'gallery' | 'list';
+
+export interface MapLayerPopupAttachments {
+  /**
+   * `gallery`: image thumbnails in a grid, other files as tiles.
+   * `list`: one row per file with its name and size.
+   */
+  display: MapLayerPopupAttachmentDisplay;
 }
 
 /**

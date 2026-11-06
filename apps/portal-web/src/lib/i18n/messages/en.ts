@@ -1284,6 +1284,15 @@ export const en = {
     fieldsDefault: "First three fields",
     maxRows: "Rows to show",
   },
+  mapPopupAttachments: {
+    heading: "Attachments",
+    none: "No attachments.",
+    failed: "Could not load attachments.",
+    show: "Show attachments",
+    gallery: "Gallery",
+    list: "List",
+    hint: "Photos, signatures and files on the feature, loaded when the popup opens.",
+  },
   mapLabelsEditor: {
     /** Labels tab controls (#162). */
     showLabels: 'Show labels',

@@ -21,6 +21,9 @@ new release banner when cutting a version tag.
 
 <!-- entries below this line are surfaced on the public landing page -->
 
+## 2026-11-06 - Photos and files in map popups
+A map popup can show a feature's photos, signatures and files, as a gallery of thumbnails or as a list. Popups for form submissions no longer show "[object Object]" for locations, photos and signatures.
+
 ## [1.1.0] - 2026-11-03
 
 ## 2026-11-03 - Install on a home NAS

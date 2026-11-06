@@ -42,6 +42,12 @@ import {
 import { ensureMapLibreWorker } from '@/lib/maplibre-runtime';
 import { t } from '@/lib/i18n';
 import { getCachedUserName } from '@/lib/user-name-cache';
+import { formatBytes } from '@/lib/format-bytes';
+import {
+  isImageAttachment,
+  parsePopupAttachments,
+  popupDisplayValue,
+} from '@/lib/popup-values';
 import { formatDateTime, formatNumber } from '@/lib/i18n/format';
 import { useLocale } from '@/lib/i18n/locale-context';
 import { DEFAULT_LOCALE, type SupportedLocale } from '@/lib/i18n/locales';
@@ -1704,17 +1710,27 @@ export const MapCanvas = forwardRef<MapCanvasHandle, Props>(function MapCanvas(
       let zoomGeometry: GeoJSON.Geometry | null =
         (hit.geometry as GeoJSON.Geometry | undefined) ?? null;
       const popupLayer = layer;
+      // Rows and files arrive after MapLibre placed the popup for its
+      // shorter self; re-setting the position re-runs its anchor
+      // choice so the taller card flips to the side that fits instead
+      // of running off the top of the map.
+      const reanchorPopup = () => {
+        const p = popupRef.current;
+        if (p) p.setLngLat(p.getLngLat());
+      };
       const showFeature = (props: Record<string, unknown>) =>
         popupBody(
           renderPopupHtml(popupLayer, props, localeRef.current),
-          popupRelatedSections(popupLayer, props, localeRef.current, () => {
-            // The rows arrive after MapLibre placed the popup for its
-            // shorter self; re-setting the position re-runs its anchor
-            // choice so the taller card flips to the side that fits
-            // instead of running off the top of the map.
-            const p = popupRef.current;
-            if (p) p.setLngLat(p.getLngLat());
-          }),
+          [
+            popupAttachmentsSection(
+              popupLayer,
+              props,
+              hit.id,
+              localeRef.current,
+              reanchorPopup,
+            ),
+            popupRelatedSections(popupLayer, props, localeRef.current, reanchorPopup),
+          ],
           popupActionBar({
             layer: popupLayer,
             properties: props,
@@ -1736,7 +1752,7 @@ export const MapCanvas = forwardRef<MapCanvasHandle, Props>(function MapCanvas(
           isMvtFeature
             ? popupBody(
                 '<div class="gg-popup-loading" style="padding:8px;color:#666;font-size:12px;">Loading…</div>',
-                null,
+                [],
                 null,
               )
             : showFeature(fallbackProps),
@@ -4301,14 +4317,14 @@ function sourceData(
  */
 function popupBody(
   html: string,
-  related: HTMLElement | null,
+  sections: Array<HTMLElement | null>,
   actionBar: HTMLElement | null,
 ): HTMLElement {
   const el = document.createElement('div');
   el.innerHTML = html;
   // Inside .gg-popup so they share the card's padding and type.
   const card = el.querySelector('.gg-popup') ?? el;
-  if (related) card.appendChild(related);
+  for (const section of sections) if (section) card.appendChild(section);
   if (actionBar) card.appendChild(actionBar);
   return el;
 }
@@ -4387,15 +4403,15 @@ function popupRelatedSections(
                     .filter((k) => !k.startsWith('_') && k !== rel.fkColumn)
                     .slice(0, 3);
             for (const k of keys) {
-              const v = row[k];
-              if (v === null || v === undefined || v === '') continue;
+              const v = popupDisplayValue(row[k]);
+              if (v === null) continue;
               const pair = document.createElement('span');
               pair.className = 'gg-popup-related-pair';
               const name = document.createElement('span');
               name.className = 'gg-popup-related-key';
               name.textContent = k;
               const value = document.createElement('span');
-              value.textContent = String(v);
+              value.textContent = v;
               pair.append(name, value);
               li.appendChild(pair);
             }
@@ -4421,6 +4437,103 @@ function popupRelatedSections(
       });
   }
   return wrap;
+}
+
+/**
+ * Attachments section (popup.attachments): the feature's photos,
+ * signatures and files, read from the sublayer's attachments
+ * endpoint when the popup opens. Gallery shows image thumbnails in a
+ * grid (other files as named tiles); list shows one row per file with
+ * its size. Each entry opens the file in a new tab. Names are set as
+ * text, and only same-origin storage URLs are linked
+ * (parsePopupAttachments).
+ */
+function popupAttachmentsSection(
+  layer: MapLayer,
+  props: Record<string, unknown>,
+  hitId: string | number | undefined,
+  locale: SupportedLocale,
+  onFilled: () => void,
+): HTMLElement | null {
+  const cfg = layer.popup.attachments;
+  if (!cfg || layer.source.kind !== 'data-layer' || !layer.source.layerKey) return null;
+  const featureId = popupFeatureId(props, hitId);
+  if (!featureId) return null;
+  const { itemId, layerKey } = layer.source;
+
+  const section = document.createElement('section');
+  section.className = 'gg-popup-attachments';
+  const heading = document.createElement('div');
+  heading.className = 'gg-popup-related-title';
+  heading.textContent = t('mapPopupAttachments.heading', undefined, locale);
+  const body = document.createElement('div');
+  body.className = 'gg-popup-related-note';
+  body.textContent = t('mapPopupRelated.loading', undefined, locale);
+  section.append(heading, body);
+
+  fetch(
+    `/api/portal/items/${itemId}/layers/${encodeURIComponent(layerKey)}/features/${encodeURIComponent(featureId)}/attachments`,
+    { cache: 'no-store' },
+  )
+    .then((res) => (res.ok ? res.json() : Promise.reject(new Error(String(res.status)))))
+    .then((json: unknown) => {
+      const files = parsePopupAttachments(json);
+      heading.textContent = `${t('mapPopupAttachments.heading', undefined, locale)} (${files.length})`;
+      if (files.length === 0) {
+        body.textContent = t('mapPopupAttachments.none', undefined, locale);
+        onFilled();
+        return;
+      }
+      const openLink = (a: HTMLAnchorElement, url: string, name: string) => {
+        a.href = url;
+        a.target = '_blank';
+        a.rel = 'noopener noreferrer';
+        a.title = name;
+      };
+      if (cfg.display === 'list') {
+        const list = document.createElement('ul');
+        list.className = 'gg-popup-attachments-list';
+        for (const f of files) {
+          const li = document.createElement('li');
+          const a = document.createElement('a');
+          openLink(a, f.url, f.fileName);
+          a.textContent = f.fileName;
+          const size = document.createElement('span');
+          size.className = 'gg-popup-attachment-size';
+          size.textContent = formatBytes(f.sizeBytes);
+          li.append(a, size);
+          list.appendChild(li);
+        }
+        body.replaceWith(list);
+      } else {
+        const grid = document.createElement('div');
+        grid.className = 'gg-popup-attachments-gallery';
+        for (const f of files) {
+          const a = document.createElement('a');
+          a.className = 'gg-popup-attachment-tile';
+          openLink(a, f.url, f.fileName);
+          if (isImageAttachment(f.mime)) {
+            a.dataset.kind = 'image';
+            const img = document.createElement('img');
+            img.src = f.url;
+            img.alt = f.fileName;
+            img.loading = 'lazy';
+            img.addEventListener('load', onFilled, { once: true });
+            a.appendChild(img);
+          } else {
+            a.textContent = f.fileName;
+          }
+          grid.appendChild(a);
+        }
+        body.replaceWith(grid);
+      }
+      onFilled();
+    })
+    .catch(() => {
+      body.textContent = t('mapPopupAttachments.failed', undefined, locale);
+      onFilled();
+    });
+  return section;
 }
 
 /** The row's stable id: `_global_id` on data-layer features. */
@@ -4586,14 +4699,16 @@ function renderPopupHtml(
         : Object.keys(props)
             .filter((k) => !k.startsWith('_'))
             .sort();
+    // Structured values (a form's geopoint, photo or signature
+    // answer) have no text form; popupDisplayValue skips them.
     const rows = keys
       .map((k) => {
-        const v = props[k];
-        if (v === null || v === undefined || v === '') return '';
+        const v = popupDisplayValue(props[k]);
+        if (v === null) return '';
         return `
           <div class="gg-popup-row">
             <dt>${escapeHtml(k)}</dt>
-            <dd>${escapeHtml(String(v))}</dd>
+            <dd>${escapeHtml(v)}</dd>
           </div>
         `;
       })
@@ -4711,8 +4826,8 @@ function renderTemplate(
   return template.replace(
     /\{\{\s*([\w.-]+)\s*(?:\|\s*([\w.-]+)(?:\s*:\s*([^}]+))?\s*)?\}\}/g,
     (_, key: string, formatter?: string, arg?: string) => {
-      const raw = props[key];
-      if (raw === undefined || raw === null) return '';
+      const raw = popupDisplayValue(props[key]);
+      if (raw === null) return '';
       const formatted = applyFormatter(raw, formatter, arg, locale);
       return escapeHtml(formatted);
     },

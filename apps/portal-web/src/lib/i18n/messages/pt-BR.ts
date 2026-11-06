@@ -1239,6 +1239,15 @@ export const ptBR: Partial<CatalogShape> = {
     fieldsDefault: "Os três primeiros campos",
     maxRows: "Linhas a exibir",
   },
+  mapPopupAttachments: {
+    heading: "Anexos",
+    none: "Nenhum anexo.",
+    failed: "Não foi possível carregar os anexos.",
+    show: "Mostrar anexos",
+    gallery: "Galeria",
+    list: "Lista",
+    hint: "Fotos, assinaturas e arquivos da feição, carregados quando o pop-up abre.",
+  },
   mapLabelsEditor: {
     showLabels: 'Mostrar rótulos',
     labelText: 'Texto do rótulo',

@@ -7,6 +7,7 @@ import {
   POPUP_RELATED_DEFAULT_ROWS,
   POPUP_RELATED_MAX_ROWS,
   type MapLayerPopup,
+  type MapLayerPopupAttachmentDisplay,
   type MapLayerPopupRelated,
   type MapLayerSource,
 } from '@gratis-gis/shared-types';
@@ -35,8 +36,17 @@ interface Props {
  * Mixed-mode popups (custom title + picked body, etc.) fall out
  * naturally from the independent title template + body mode knobs.
  */
-export function PopupEditor({ value, metadata, onChange, source }: Props) {
+export function PopupEditor({ value, metadata: rawMetadata, onChange, source }: Props) {
   const t = useT();
+  // Structured fields (a form's geopoint, photo or signature answer)
+  // have no text form, so the popup cannot show them as attributes.
+  // Leave them out of every field picker here; the photos and
+  // signatures are reachable through the Attachments section.
+  const metadata = useMemo(() => {
+    const hidden = new Set(rawMetadata.objectFields ?? []);
+    if (hidden.size === 0) return rawMetadata;
+    return { ...rawMetadata, fields: rawMetadata.fields.filter((f) => !hidden.has(f)) };
+  }, [rawMetadata]);
 
   function patch(p: Partial<MapLayerPopup>) {
     onChange({ ...value, ...p });
@@ -95,6 +105,10 @@ export function PopupEditor({ value, metadata, onChange, source }: Props) {
           ) : null}
 
           {source?.kind === 'data-layer' && source.layerKey ? (
+            <AttachmentsEditor value={value} onChange={onChange} />
+          ) : null}
+
+          {source?.kind === 'data-layer' && source.layerKey ? (
             <RelatedEditor
               value={value}
               itemId={source.itemId}
@@ -104,6 +118,60 @@ export function PopupEditor({ value, metadata, onChange, source }: Props) {
           ) : null}
         </>
       )}
+    </div>
+  );
+}
+
+/**
+ * Attachments: show the feature's photos, signatures and files under
+ * the attributes, as a thumbnail gallery or a list of file names
+ * (the two layouts ArcGIS Online offers). Off by default.
+ */
+function AttachmentsEditor({
+  value,
+  onChange,
+}: {
+  value: MapLayerPopup;
+  onChange: (next: MapLayerPopup) => void;
+}) {
+  const t = useT();
+  const cfg = value.attachments;
+  const setDisplay = (display: MapLayerPopupAttachmentDisplay) =>
+    onChange({ ...value, attachments: { display } });
+  return (
+    <div className="space-y-2 border-t border-border pt-3">
+      <label className="flex items-center gap-2 text-xs text-ink-1">
+        <input
+          type="checkbox"
+          checked={cfg !== undefined}
+          onChange={(e) => {
+            if (e.target.checked) {
+              setDisplay('gallery');
+            } else {
+              // Drop the key rather than store `undefined`.
+              const rest = { ...value };
+              delete rest.attachments;
+              onChange(rest);
+            }
+          }}
+        />
+        <span className="font-medium">{t('mapPopupAttachments.show')}</span>
+      </label>
+      <p className="text-2xs text-muted">{t('mapPopupAttachments.hint')}</p>
+      {cfg ? (
+        <div className="grid grid-cols-2 gap-2 pl-6">
+          <ModeBtn
+            active={cfg.display === 'gallery'}
+            onClick={() => setDisplay('gallery')}
+            label={t('mapPopupAttachments.gallery')}
+          />
+          <ModeBtn
+            active={cfg.display === 'list'}
+            onClick={() => setDisplay('list')}
+            label={t('mapPopupAttachments.list')}
+          />
+        </div>
+      ) : null}
     </div>
   );
 }

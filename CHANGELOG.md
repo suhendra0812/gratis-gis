@@ -8,6 +8,12 @@ versioning policy is in [docs/VERSIONING.md](./docs/VERSIONING.md).
 
 ### Added
 
+- Map popups: an attachments section for data layers (**Show
+  attachments** in the layer's Popup tab), as a thumbnail **Gallery**
+  or a **List** of file names and sizes. Files are read from the
+  feature's attachments endpoint when the popup opens; only
+  same-origin storage URLs are linked. Config lives in
+  `MapLayerPopup.attachments` (`{ display: 'gallery' | 'list' }`).
 - Map builder: a **Source** tab in a layer's settings, after
   Actions. It shows where the layer's data comes from (data layer and
   sublayer, ArcGIS service, GeoJSON URL, PostGIS table, point cloud,
@@ -68,6 +74,10 @@ versioning policy is in [docs/VERSIONING.md](./docs/VERSIONING.md).
 
 ### Fixed
 
+- Map popups: a form submissions layer showed "[object Object]" for
+  geopoint, photo and signature answers. The popup now skips
+  structured values in **All fields**, **Picked** and templates, and
+  the popup field pickers no longer offer them.
 - Field app: a related table is listed only under its own parent
   layer. Every table with a link column used to appear under every
   spatial layer of the data layer, so one asset's inspections showed
