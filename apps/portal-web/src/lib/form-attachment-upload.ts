@@ -52,6 +52,20 @@ export interface PendingAttachment {
 
 export type Attachment = UploadedAttachment | PendingAttachment;
 
+/**
+ * Local copies of files uploaded from this page, keyed by their
+ * storage URL. A form attachment's URL is the private storage route,
+ * which only answers once the submission has created the attachment
+ * row; before that it is a 404, so a preview pointing at it showed a
+ * broken image. Previews read the local copy while this page lives.
+ */
+const localPreviews = new Map<string, string>();
+
+/** The URL a preview should load for an uploaded attachment. */
+export function attachmentPreviewSrc(url: string): string {
+  return localPreviews.get(url) ?? url;
+}
+
 export function isUploaded(a: Attachment): a is UploadedAttachment {
   return typeof (a as UploadedAttachment).url === 'string';
 }
@@ -93,6 +107,9 @@ export async function uploadFormAttachment(file: File): Promise<UploadedAttachme
   });
   if (!putRes.ok) {
     throw new Error(`Upload failed: HTTP ${putRes.status}`);
+  }
+  if (typeof URL !== 'undefined' && typeof URL.createObjectURL === 'function') {
+    localPreviews.set(presign.publicUrl, URL.createObjectURL(file));
   }
   return {
     name: file.name || 'capture',
