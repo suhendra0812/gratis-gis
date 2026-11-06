@@ -16,7 +16,7 @@
 # lines do not belong under prod, and floating tags turn upstream
 # releases into unreviewed deploys. Bump this deliberately.
 
-FROM node:24.22.1-bookworm-slim AS base
+FROM node:24.22.2-bookworm-slim AS base
 ENV PNPM_HOME=/pnpm
 ENV PATH=$PNPM_HOME:$PATH
 # See apps/portal-api/Dockerfile for the rationale on this block:
@@ -209,6 +209,12 @@ ENV NODE_ENV=production
 ENV PORT=3000
 ENV HOSTNAME=0.0.0.0
 ENV NEXT_TELEMETRY_DISABLED=1
+ARG GG_VERSION=dev
+ARG GIT_SHA=
+ARG REQUIRED_COMPOSE_REV=1
+ENV GG_VERSION=$GG_VERSION \
+    GIT_SHA=$GIT_SHA \
+    REQUIRED_COMPOSE_REV=$REQUIRED_COMPOSE_REV
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
   CMD curl -fsS http://localhost:3000/ || exit 1

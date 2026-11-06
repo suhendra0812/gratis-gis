@@ -32,16 +32,6 @@ versioning policy is in [docs/VERSIONING.md](./docs/VERSIONING.md).
   another geometry. A non-spatial table layer gets a settings panel
   with just **Filter** (which records the attribute table lists) and
   **Source**; point clouds and imagery show the same source block.
-- Form location questions can be answered on a map. In the default
-  `auto` mode the GPS button now sits above a small map: tap it or
-  drag the pin to report a spot you are not standing on, or when
-  there is no fix. `map` mode shows only the map. The schema always
-  offered both modes, but the runtime drew GPS and lat/lon boxes
-  only.
-- Signature questions can be answered. A signature pad saves one PNG
-  as an attachment, uploaded with the rest of the submission's
-  attachments. A required signature is now enforced (it was skipped
-  as uncapturable).
 - Map builder: an **Edit feature** panel in the style of the ArcGIS
   Online Editor widget. It holds the feature's attributes, its shape
   (drag the vertices on the map as soon as it opens) and its related
@@ -64,14 +54,25 @@ versioning policy is in [docs/VERSIONING.md](./docs/VERSIONING.md).
   app list and add related rows through these and through in-item
   event-tracking tables alike, from one resolver
   (`relatedTableRefs`).
-- Home NAS installs run the point-cloud worker when `GRATIS_ANALYSIS`
-  is `on` (the default) and sleep it when set to `off`. Admin backups
-  are stored on a volume that survives recreating the API container.
-- Load showcase dashboards adds the public demo's storm-events
-  dashboard, West Virginia water-quality dashboard, and Elkins in
-  3D, with fresh ids per install (`sample:showcase-*`). The
-  Randolph County bridges dashboard is not included: that file is
-  the WVDOT service, which publishes no redistribution license.
+- Form location questions can be answered on a map. In the default
+  `auto` mode the GPS button now sits above a small map: tap it or
+  drag the pin to report a spot you are not standing on, or when
+  there is no fix. `map` mode shows only the map, and falls back to
+  GPS and typed coordinates if the map cannot load. The schema always
+  offered both modes, but the runtime drew GPS and lat/lon boxes
+  only. **Note:** existing geopoint questions in `auto` mode (the
+  default) now show the map as well.
+- Signature questions can be answered. A signature pad saves one PNG
+  as an attachment: uploaded right away when online, like a photo, or
+  with the submission's other attachments when it syncs (the respond
+  page's outbox and the field app's queue both upload it first, so it
+  is never stored as base64). The server accepts only a PNG data URL
+  of up to 512 KB, or a storage or http(s) URL. **Note:** a required
+  signature is now enforced (it was skipped as uncapturable), so
+  existing forms with a required signature start rejecting
+  submissions without one. The Android app skips signature questions
+  until it has a pad, so on Android a required one cannot be answered
+  yet.
 
 ### Changed
 
@@ -106,6 +107,51 @@ versioning policy is in [docs/VERSIONING.md](./docs/VERSIONING.md).
 - Form designer: in choice and matrix rows the label box is no longer
   squeezed to a sliver beside the value box. Both inputs carried
   `w-full` plus a fixed width, and `w-full` won.
+
+## [1.2.0] - 2026-11-05
+
+### Added
+
+- Dependabot patch and minor updates squash-merge after the CI and
+  Security workflows pass. A grouped update merges only when every
+  dependency in the group is patch or minor. Major updates stay open
+  for review.
+- CI checks SPDX license headers on tracked source files
+  (`pnpm check:spdx`, `scripts/check-spdx.sh`). A file needs
+  `SPDX-License-Identifier: AGPL-3.0-or-later` in its first 10
+  lines. Prisma migrations stay exempt because editing an applied
+  migration changes its checksum, and Next.js rewrites
+  `next-env.d.ts`. Source files the header sweep had missed now
+  carry the header.
+- Admin **Updates** page. It compares this install with GitHub and
+  tells an admin the backup and restart steps. It does not talk to
+  Docker and it does not update the install itself. `UPDATE_CHECK=off`
+  makes no outbound calls. Published images record `GG_VERSION`,
+  `GIT_SHA`, and `REQUIRED_COMPOSE_REV`.
+- Home NAS installs run the point-cloud worker when `GRATIS_ANALYSIS`
+  is `on` (the default) and sleep it when set to `off`. Admin backups
+  are stored on a volume that survives recreating the API container.
+- Load showcase dashboards adds the public demo's storm-events
+  dashboard, West Virginia water-quality dashboard, and Elkins in
+  3D, with fresh ids per install (`sample:showcase-*`). The
+  Randolph County bridges dashboard is not included: that file is
+  the WVDOT service, which publishes no redistribution license.
+
+### Fixed
+
+- Browser ids no longer call `crypto.randomUUID` directly. On a NAS
+  opened as `http://<lan-ip>`, that API is missing and Add layer,
+  Add group, and drawing features failed before the request left the
+  browser. They now use `clientUuid()` (`getRandomValues` fallback).
+  The Add layer dialog also surfaces the server reason or HTTP status
+  plus a request id when create fails.
+- Home NAS installs grant the portal API's Keycloak service account
+  the realm-management roles the Users page needs (`manage-users`
+  and the sign-in settings roles). Keycloak starts with health
+  checks enabled so that grant runs after the realm is up. A
+  restart applies the roles on an install that already imported
+  the realm, without deleting volumes. A fresh boot also creates
+  a data layer as the admin user.
 - Home NAS install. Keycloak mounts the generated boot volume at
   `/boot` as well as the realm-import path, so it can leave the
   waiting loop and become healthy. Silo is started as `/usr/bin/silo`
@@ -119,12 +165,27 @@ versioning policy is in [docs/VERSIONING.md](./docs/VERSIONING.md).
   `infra/docker-compose.nas.yml` is the web port on the NAS (use
   8085 when 8080 is taken). The printed address, Keycloak hostname,
   and sign-in redirects follow it. The bootstrap log says not to
-  post it publicly. Caddy 2.10 accepts one path on `handle`, so
-  the generated Caddyfile uses named matchers and both the web UI
-  and `/auth` answer. The web and Chromium services listen on port
-  3000 even though the shared env file sets `PORT` for the API.
-  CI boots this stack and checks the web UI, Keycloak through
-  Caddy, and an upload.
+  post it publicly. The admin password is printed only on first
+  boot. Caddy 2.10 accepts one path on `handle`, so the generated
+  Caddyfile uses named matchers and both the web UI and `/auth`
+  answer. The web and Chromium services listen on port 3000 even
+  though the shared env file sets `PORT` for the API. CI boots this
+  stack and checks the web UI, Keycloak through Caddy, and an
+  upload.
+- QGIS OIDC loopback redirects require an explicit port separator so
+  a malformed redirect cannot widen the allowlist.
+- Live PostGIS connections are bounded and filter clauses are
+  parameterized.
+
+### Security
+
+- Popup and attribution HTML is sanitized on save and render; the
+  NextAuth session body no longer exposes the access token to page
+  JavaScript.
+- Remaining outbound server fetches (basemap probe, pyramid worker
+  storage URLs) go through the SSRF-safe path.
+- Map-icon delete is authorization-gated; Android backup rules and
+  local-dev compose published ports are tightened.
 
 ## [1.1.0] - 2026-11-03
 
@@ -3559,6 +3620,7 @@ Everything is new in a first release. What ships, briefly:
   4.24.15, sharp, fast-uri, postcss, brace-expansion, tar, and the
   `@hono/node-server` override.
 
+[1.2.0]: https://github.com/palavido-dev/gratis-gis/releases/tag/v1.2.0
 [1.1.0]: https://github.com/palavido-dev/gratis-gis/releases/tag/v1.1.0
 [1.0.0]: https://github.com/palavido-dev/gratis-gis/releases/tag/v1.0.0
 [0.9.2]: https://github.com/palavido-dev/gratis-gis/releases/tag/v0.9.2

@@ -166,6 +166,7 @@ import { useDeviceHeading } from './use-device-heading';
 import { angleBetween } from '@/lib/device-heading';
 import { stampGpsMetadata } from './gps-metadata-stamp';
 import { FieldAttachments } from './field-attachments';
+import { uploadPendingAttachmentsInResponse } from '@/lib/form-attachment-upload';
 import { describeZoom } from '@/lib/map-scale';
 import { parseApiError } from '@/lib/api-error';
 import { useT } from '@/lib/i18n/locale-context';
@@ -5119,6 +5120,18 @@ function FeatureForm({
       if (!isOnline || queued) {
         // No signal, or edits of this record still waiting to sync:
         // the queue folds this one into them and the drain sends it.
+        await applyLocally();
+        onSaved('local');
+        return;
+      }
+      // Photos and signatures still pending ({ dataUrl }) go to storage
+      // first, so the row keeps attachment descriptors, not base64 (the
+      // form's own inputs upload when they can; this catches what they
+      // could not). A failure here keeps the record and queues it; the
+      // sync drain uploads them later.
+      try {
+        await uploadPendingAttachmentsInResponse(writeProps);
+      } catch {
         await applyLocally();
         onSaved('local');
         return;

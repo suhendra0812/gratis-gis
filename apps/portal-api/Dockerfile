@@ -16,7 +16,7 @@
 # a release with a fetch regression and broke prod writes). Bump
 # deliberately, both Dockerfiles together.
 
-FROM node:24.22.1-bookworm-slim AS base
+FROM node:24.22.2-bookworm-slim AS base
 ENV PNPM_HOME=/pnpm
 ENV PATH=$PNPM_HOME:$PATH
 # Three things in one RUN to keep the layer count tight:
@@ -349,6 +349,14 @@ USER app
 EXPOSE 4000
 ENV NODE_ENV=production
 ENV PORT=4000
+# Build identity. publish-images.yml passes git describe and the commit.
+# REQUIRED_COMPOSE_REV must match GRATIS_COMPOSE_REV in the NAS file.
+ARG GG_VERSION=dev
+ARG GIT_SHA=
+ARG REQUIRED_COMPOSE_REV=1
+ENV GG_VERSION=$GG_VERSION \
+    GIT_SHA=$GIT_SHA \
+    REQUIRED_COMPOSE_REV=$REQUIRED_COMPOSE_REV
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
   CMD curl -fsS http://localhost:4000/health || exit 1

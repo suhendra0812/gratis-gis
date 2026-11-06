@@ -94,6 +94,7 @@ export const en = {
     users: 'Users',
     landingPage: 'Landing page',
     backup: 'Backup',
+    updates: 'Updates',
     housekeeping: 'Housekeeping',
     notifications: 'Notifications',
     ai: 'AI',
@@ -103,6 +104,32 @@ export const en = {
     migrations: 'Migrations',
     feedback: 'Feedback',
     gettingStarted: 'Getting started',
+  },
+  updates: {
+    title: 'Updates',
+    intro:
+      'This page only tells you what is new. It does not change the install. Take a backup, then follow the steps for this machine.',
+    back: 'Back to portal',
+    current: 'This install',
+    latest: 'Available',
+    channel: 'Channel',
+    install: 'Install',
+    changelog: 'Changelog',
+    offline: 'Could not reach GitHub. The versions above are what this install already knows.',
+    banner: 'An update is available.',
+    createBackup: 'Create backup',
+    backupWorking: 'Starting backup...',
+    downloadBackup: 'Download backup',
+    backupPage: 'Open the backup page',
+    backupFailed: 'Could not start a backup',
+    loadFailed: 'Could not load update information',
+    nasCompose:
+      'Copy the new compose file for this channel:',
+    nasComposePaste:
+      'In TrueNAS, edit the app and paste the file, then Save. In Dockge, open the stack, paste the file, and Save. Keep GRATIS_HTTP_PORT if you changed it.',
+    nasImages:
+      'The compose file is current. In TrueNAS, Stop the app and then Start it, or use Update. In Dockge, click Update. The stack pulls the new edge or latest images.',
+    dev: 'Pull the newest checkout and restart pnpm dev.',
   },
   shell: {
     notificationsLabel: 'Notifications',
@@ -2535,6 +2562,10 @@ export const en = {
     errors: {
       newNameRequired: 'Give the new layer a name.',
       createFailed: 'The layer could not be created.',
+      addFailed: 'The layer could not be added.',
+      errorStatus: 'HTTP {status}',
+      errorStatusCode: 'HTTP {status} ({code})',
+      requestId: 'Request id: {id}',
       arcgisUrlRequired:
         'Paste an ArcGIS MapServer or FeatureServer URL.',
       arcgisProbeFailed:
@@ -4945,6 +4976,7 @@ export const en = {
     geolocationUnsupported: "Geolocation not supported on this device.",
     mapPickerAria: "Map for choosing the location",
     mapPickerHint: "Tap the map or drag the pin to set the location.",
+    mapPickerFailed: 'The map could not load. Use GPS or type the coordinates.',
     signatureAria: "Signature pad",
     signatureHint: "Sign inside the box with your finger, stylus, or mouse.",
     signatureSigned: "Signed",
