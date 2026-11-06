@@ -68,6 +68,14 @@ versioning policy is in [docs/VERSIONING.md](./docs/VERSIONING.md).
 
 ### Fixed
 
+- Form responses, Viewer and Editor apps: the attribute table could
+  stay on "Loading features..." for good, and selecting a point then
+  opened its popup but left the table and the form view empty. A
+  feature load cancelled while the page set up was never started
+  again; it is now.
+- Form responses, Viewer and Editor apps: the **Select** mode menu
+  and the **Basemap** menu in the header opened as an invisible box,
+  cut off by the toolbar. Both now open below their button.
 - Field app: a related table is listed only under its own parent
   layer. Every table with a link column used to appear under every
   spatial layer of the data layer, so one asset's inspections showed

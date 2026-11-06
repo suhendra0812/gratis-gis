@@ -277,9 +277,29 @@ export function EditorRuntime({
   const [basemapMenuOpen, setBasemapMenuOpen] = useState(false);
   const basemapMenuRef = useRef<HTMLDivElement | null>(null);
 
-  // Click-outside dismissal for both menus.
+  // The header toolbar scrolls sideways on narrow screens
+  // (overflow-x-auto), and that clips anything absolutely positioned
+  // inside it, so the select-mode and basemap menus opened as an
+  // invisible box. They render `fixed` instead, anchored to their
+  // button's on-screen position, captured when the menu opens.
+  type MenuPos = { top: number; right: number };
+  const [selectMenuPos, setSelectMenuPos] = useState<MenuPos | null>(null);
+  const [basemapMenuPos, setBasemapMenuPos] = useState<MenuPos | null>(null);
+  function menuPosBelow(el: HTMLElement | null): MenuPos | null {
+    if (!el) return null;
+    const r = el.getBoundingClientRect();
+    return { top: r.bottom + 8, right: Math.max(8, window.innerWidth - r.right) };
+  }
+
+  // Click-outside dismissal for both menus. A resize closes them
+  // too, since their fixed position no longer matches the button.
   useEffect(() => {
     if (!selectMenuOpen && !basemapMenuOpen) return;
+    function onResize() {
+      setSelectMenuOpen(false);
+      setBasemapMenuOpen(false);
+    }
+    window.addEventListener('resize', onResize);
     function onDocClick(e: MouseEvent) {
       const t = e.target as Node;
       if (
@@ -298,7 +318,10 @@ export function EditorRuntime({
       }
     }
     document.addEventListener('mousedown', onDocClick);
-    return () => document.removeEventListener('mousedown', onDocClick);
+    return () => {
+      document.removeEventListener('mousedown', onDocClick);
+      window.removeEventListener('resize', onResize);
+    };
   }, [selectMenuOpen, basemapMenuOpen]);
 
   // Pending feature waiting for attribute submission. For Add (mode
@@ -414,11 +437,26 @@ export function EditorRuntime({
       }));
       void discoverLayerMetadata(layer, controller.signal).then((md) => {
         if (controller.signal.aborted) return;
+        if (probeAbortsRef.current[layer.id] === controller) {
+          delete probeAbortsRef.current[layer.id];
+        }
         setMetadata((prev) => ({ ...prev, [layer.id]: md }));
       });
     }
     return () => {
-      for (const c of Object.values(probeAbortsRef.current)) c.abort();
+      // Abort the probes still in flight and forget their source
+      // keys, so the next run of this effect starts them again.
+      // Keeping the key made that run skip the layer, and its
+      // metadata stayed `loading: true` for good: the attribute
+      // table sat on "Loading features..." and the form view and
+      // selection had no rows to show. React's dev double-invoke
+      // hits this on every mount; in production any layer-list
+      // change did.
+      for (const [id, c] of Object.entries(probeAbortsRef.current)) {
+        c.abort();
+        delete probedSourceKeyRef.current[id];
+      }
+      probeAbortsRef.current = {};
     };
     // The joined source-key string changes when a layer is added /
     // removed / has its source swapped (including the _ts=
@@ -2220,7 +2258,12 @@ export function EditorRuntime({
             <div ref={basemapMenuRef} className="relative">
               <button
                 type="button"
-                onClick={() => setBasemapMenuOpen((v) => !v)}
+                onClick={() => {
+                  if (!basemapMenuOpen) {
+                    setBasemapMenuPos(menuPosBelow(basemapMenuRef.current));
+                  }
+                  setBasemapMenuOpen(!basemapMenuOpen);
+                }}
                 className={`inline-flex h-9 w-9 items-center justify-center rounded text-muted hover:bg-surface-2 hover:text-ink-0 ${
                   basemapMenuOpen ? 'bg-purple-100 dark:bg-purple-950 text-purple-800 dark:text-purple-300' : ''
                 }`}
@@ -2234,7 +2277,8 @@ export function EditorRuntime({
               {basemapMenuOpen ? (
                 <div
                   role="menu"
-                  className="absolute right-0 top-11 z-30 w-56 overflow-hidden rounded-md border border-border bg-surface-1 text-xs shadow-overlay"
+                  style={basemapMenuPos ?? undefined}
+                  className="fixed z-50 w-56 overflow-hidden rounded-md border border-border bg-surface-1 text-xs shadow-overlay"
                 >
                   <div className="border-b border-border bg-surface-2 px-3 py-1.5 text-2xs font-semibold uppercase tracking-wide text-muted">
                     {t('mapEditor.basemapMenuHeading')}
@@ -2372,7 +2416,12 @@ export function EditorRuntime({
                   </button>
                   <button
                     type="button"
-                    onClick={() => setSelectMenuOpen((v) => !v)}
+                    onClick={() => {
+                      if (!selectMenuOpen) {
+                        setSelectMenuPos(menuPosBelow(selectMenuRef.current));
+                      }
+                      setSelectMenuOpen(!selectMenuOpen);
+                    }}
                     className={`inline-flex h-9 w-5 items-center justify-center rounded-r text-muted hover:bg-surface-2 hover:text-ink-0 ${
                       isActive ? 'bg-purple-100 dark:bg-purple-950 text-purple-800 dark:text-purple-300' : ''
                     }`}
@@ -2386,7 +2435,8 @@ export function EditorRuntime({
                   {selectMenuOpen ? (
                     <div
                       role="menu"
-                      className="absolute right-0 top-11 z-30 w-44 overflow-hidden rounded-md border border-border bg-surface-1 text-xs shadow-overlay"
+                      style={selectMenuPos ?? undefined}
+                      className="fixed z-50 w-44 overflow-hidden rounded-md border border-border bg-surface-1 text-xs shadow-overlay"
                     >
                       <SelectModeItem
                         Icon={MousePointer2}
