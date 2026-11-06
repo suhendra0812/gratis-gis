@@ -5295,6 +5295,9 @@ function FeatureForm({
           formId={formId}
           // #249.14: the header carries the submit button.
           hideSubmitButton
+          // Defaults (a report date of "now") are for a new record; an
+          // edited one keeps what it has.
+          applyDefaultValues={modal.mode === 'add'}
         />
         {error ? (
           <p

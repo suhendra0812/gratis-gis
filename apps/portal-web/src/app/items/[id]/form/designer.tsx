@@ -3074,6 +3074,33 @@ function Properties({
         </>
       ) : null}
 
+      {question.type === 'date' ||
+      question.type === 'time' ||
+      question.type === 'datetime' ? (
+        <Field
+          label={t('formDesigner.properties.temporalDefault')}
+          hint={t('formDesigner.properties.temporalDefaultHint')}
+        >
+          <select
+            value={question.defaultValue === 'now' || question.defaultValue === 'today' ? 'now' : ''}
+            disabled={!canEdit}
+            onChange={(e) =>
+              onChange({
+                defaultValue: e.target.value === 'now' ? 'now' : undefined,
+              } as Partial<Question>)
+            }
+            className={inputCls}
+          >
+            <option value="">{t('formDesigner.properties.temporalDefaultNone')}</option>
+            <option value="now">
+              {question.type === 'date'
+                ? t('formDesigner.properties.temporalDefaultToday')
+                : t('formDesigner.properties.temporalDefaultNow')}
+            </option>
+          </select>
+        </Field>
+      ) : null}
+
       {question.type === 'hidden' ? (
         <Field
           label={t('formDesigner.properties.defaultValue')}

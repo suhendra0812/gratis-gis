@@ -497,11 +497,21 @@ interface RankingQuestion extends QuestionBase {
   maxRanked?: number;
 }
 
+/**
+ * Starting value for a date, time or datetime question, filled in when
+ * a new response opens and still editable. `now` (or `today`, the same
+ * thing for a date) is the moment the form opened, in the respondent's
+ * local time; anything else is used as is, in the input's own format.
+ * See applyDefaults.
+ */
+export type TemporalDefault = 'now' | 'today' | string;
+
 interface DateQuestion extends QuestionBase {
   type: 'date';
   /** ISO 8601 date or `today`. */
   min?: string;
   max?: string;
+  defaultValue?: TemporalDefault;
 }
 
 interface TimeQuestion extends QuestionBase {
@@ -509,6 +519,7 @@ interface TimeQuestion extends QuestionBase {
   /** HH:mm 24-hour. */
   min?: string;
   max?: string;
+  defaultValue?: TemporalDefault;
 }
 
 interface DateTimeQuestion extends QuestionBase {
@@ -516,6 +527,7 @@ interface DateTimeQuestion extends QuestionBase {
   /** ISO 8601 timestamp or `now`. */
   min?: string;
   max?: string;
+  defaultValue?: TemporalDefault;
 }
 
 /** Components a `name` question can request. The renderer hides
@@ -2325,6 +2337,52 @@ export function applyCalculations(
     }
   }
   return next;
+}
+
+/**
+ * Fill each date, time and datetime question's `defaultValue` into a
+ * NEW response, for questions it has no value for yet (`undefined`; an
+ * explicit `null` is a cleared answer and stays cleared). `now` and
+ * `today` resolve to `at` in local time, in the value format the
+ * runtime's native inputs read and write: `YYYY-MM-DD`, `HH:mm`,
+ * `YYYY-MM-DDTHH:mm`. The respondent can change the result like any
+ * other answer. Not for editing an existing record, where a missing
+ * value means it was never given. Returns the same object when
+ * nothing was filled.
+ */
+export function applyDefaults(
+  form: FormSchema,
+  response: Response,
+  at: Date = new Date(),
+): Response {
+  let next = response;
+  // Top level and non-repeat groups only: a repeat group's answers
+  // live per instance inside its array, not under the child's id.
+  const temporal: Question[] = [];
+  const collect = (qs: Question[]) => {
+    for (const q of qs) {
+      if (q.type === 'group') {
+        if (!q.repeat) collect(q.children);
+      } else temporal.push(q);
+    }
+  };
+  collect(form.questions);
+  for (const q of temporal) {
+    if (q.type !== 'date' && q.type !== 'time' && q.type !== 'datetime') continue;
+    const dv = q.defaultValue;
+    if (typeof dv !== 'string' || dv === '' || next[q.id] !== undefined) continue;
+    const value = dv === 'now' || dv === 'today' ? localTemporal(q.type, at) : dv;
+    if (next === response) next = { ...response };
+    next[q.id] = value;
+  }
+  return next;
+}
+
+function localTemporal(type: 'date' | 'time' | 'datetime', at: Date): string {
+  const p = (n: number) => String(n).padStart(2, '0');
+  const date = `${at.getFullYear()}-${p(at.getMonth() + 1)}-${p(at.getDate())}`;
+  const time = `${p(at.getHours())}:${p(at.getMinutes())}`;
+  return type === 'date' ? date : type === 'time' ? time : `${date}T${time}`;
 }
 
 /**

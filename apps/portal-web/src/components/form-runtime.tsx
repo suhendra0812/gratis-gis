@@ -19,6 +19,7 @@ import {
 } from 'lucide-react';
 import {
   applyCalculations,
+  applyDefaults,
   isReadOnly,
   isRequired,
   isVisible,
@@ -91,6 +92,11 @@ export interface FormRuntimeProps {
    *  (#249.14: prompted by Matt's "what's the difference between
    *  Save Feature and Submit?" feedback.) */
   hideSubmitButton?: boolean;
+  /** Fill date/time questions' `defaultValue` (e.g. `now`) when the
+   *  form opens. Default true for an editable form; pass false when
+   *  `initial` is an existing record being edited, where a missing
+   *  value means it was never given, not "use the default". */
+  applyDefaultValues?: boolean;
 }
 
 export function FormRuntime({
@@ -101,12 +107,17 @@ export function FormRuntime({
   readOnly = false,
   formId,
   hideSubmitButton = false,
+  applyDefaultValues = true,
 }: FormRuntimeProps) {
   const t = useT();
   const resolvedSubmitLabel = submitLabel ?? t('formRuntime.submit');
-  const [response, setResponse] = useState<Response>(() =>
-    applyCalculations(form, initial ?? {}),
-  );
+  const [response, setResponse] = useState<Response>(() => {
+    const start = initial ?? {};
+    return applyCalculations(
+      form,
+      applyDefaultValues && !readOnly ? applyDefaults(form, start) : start,
+    );
+  });
   const [pageIndex, setPageIndex] = useState(0);
   const [submitting, setSubmitting] = useState(false);
   const [errors, setErrors] = useState<ValidationError[]>([]);
