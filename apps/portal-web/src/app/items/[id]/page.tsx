@@ -601,6 +601,14 @@ export default async function ItemDetailPage(props: Props) {
             <Users className="h-4 w-4" />
             {t('itemDetail.sharingHeading', undefined, locale)}
           </h2>
+          {(item as { publicBoundaryWarning?: string }).publicBoundaryWarning ? (
+            <p
+              role="alert"
+              className="mb-4 rounded-md border border-warn/40 bg-warn/10 px-3 py-2 text-sm text-ink-1"
+            >
+              {t('itemDetail.publicBoundaryWarning', undefined, locale)}
+            </p>
+          ) : null}
           {/* #91: forms have a paired data_layer where every
               submission lands; the form's own ACL controls who can
               SUBMIT, the layer's ACL controls who can VIEW
@@ -809,8 +817,16 @@ export default async function ItemDetailPage(props: Props) {
         {canManage ? (
           <div className="flex shrink-0 items-center gap-2">
             <Link
+              href={`/items/${item.id}#sharing`}
+              className="inline-flex h-8 items-center gap-1.5 rounded-md bg-accent px-2.5 text-xs font-medium text-accent-foreground shadow-card hover:opacity-90 focus:outline-hidden focus:ring-2 focus:ring-accent/30"
+              title={t('itemDetail.shareActionHint', undefined, locale)}
+            >
+              <Users className="h-3.5 w-3.5" />
+              {t('itemDetail.shareAction', undefined, locale)}
+            </Link>
+            <Link
               href={`/items/${item.id}/edit`}
-              className="inline-flex h-8 items-center gap-1.5 rounded-md border border-border bg-surface-1 px-2.5 text-xs font-medium text-ink-1 shadow-card hover:bg-surface-2"
+              className="inline-flex h-8 items-center gap-1.5 rounded-md border border-border bg-surface-1 px-2.5 text-xs font-medium text-ink-1 shadow-card hover:bg-surface-2 focus:outline-hidden focus:ring-2 focus:ring-accent/30"
             >
               <Pencil className="h-3.5 w-3.5" />
               Edit
@@ -897,6 +913,7 @@ export default async function ItemDetailPage(props: Props) {
       {item.type === 'map' && isBuilderView ? (
         <MapEditor
           itemId={item.id}
+          updatedAt={item.updatedAt}
           itemTitle={item.title}
           initial={{ ...DEFAULT_MAP, ...((item.data ?? {}) as Partial<MapData>) }}
           canEdit={mapItemCanEdit}
@@ -1050,6 +1067,7 @@ export default async function ItemDetailPage(props: Props) {
         <section className="mb-6">
           <PickListEditor
             itemId={item.id}
+            updatedAt={item.updatedAt}
             initial={{
               ...DEFAULT_PICK_LIST,
               ...((item.data ?? {}) as Partial<PickListData>),
@@ -1087,6 +1105,7 @@ export default async function ItemDetailPage(props: Props) {
         <section className="mb-6">
           <EditorDetail
             itemId={item.id}
+            updatedAt={item.updatedAt}
             initial={{
               ...DEFAULT_EDITOR,
               ...((readEditorData(item) ?? {}) as Partial<EditorData>),
@@ -1102,6 +1121,7 @@ export default async function ItemDetailPage(props: Props) {
               admin gate every other detail editor uses. */}
           <ViewerDetail
             itemId={item.id}
+            updatedAt={item.updatedAt}
             initial={{
               ...DEFAULT_VIEWER,
               ...((readViewerData(item) ?? {}) as Partial<ViewerData>),
@@ -1112,6 +1132,7 @@ export default async function ItemDetailPage(props: Props) {
       ) : isCustomAppItem(item) && isBuilderView ? (
         <CustomAppDetail
           itemId={item.id}
+          updatedAt={item.updatedAt}
           itemTitle={item.title}
           initial={{
             ...DEFAULT_CUSTOM_APP,
@@ -1208,6 +1229,7 @@ export default async function ItemDetailPage(props: Props) {
           })()}
           <FormDesigner
             itemId={item.id}
+            updatedAt={item.updatedAt}
             initial={
               item.data && typeof item.data === 'object' && 'questions' in (item.data as object)
                 ? ((item.data as unknown) as FormSchema)
@@ -1375,6 +1397,7 @@ export default async function ItemDetailPage(props: Props) {
                 : { version: 1, source: '' }) as ScriptData
             }
             canEdit={canManage}
+            canSchedule={me.id === item.ownerId}
           />
         </section>
       ) : item.type === 'geocoding_service' ? (
@@ -1426,6 +1449,7 @@ export default async function ItemDetailPage(props: Props) {
       ) : item.type === 'theme' ? (
         <AppThemeDetail
           itemId={item.id}
+          updatedAt={item.updatedAt}
           initialBlueprint={
             (item.data && typeof item.data === 'object'
               ? item.data
@@ -1441,6 +1465,7 @@ export default async function ItemDetailPage(props: Props) {
       ) : item.type === 'print_template' && isBuilderView ? (
         <PrintTemplateDetail
           itemId={item.id}
+          updatedAt={item.updatedAt}
           initialBlueprint={
             (item.data && typeof item.data === 'object'
               ? item.data

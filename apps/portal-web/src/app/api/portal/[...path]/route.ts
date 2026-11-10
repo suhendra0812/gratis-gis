@@ -7,12 +7,17 @@
  *
  * Only verbs we currently use are wired; add more as needed.
  */
-import { getServerSession } from 'next-auth';
 import { NextRequest, NextResponse } from 'next/server';
 import { revalidatePath } from 'next/cache';
-import { authOptions, type SessionWithToken } from '@/lib/auth';
+import { resolveRouteSession, type CookieWrite } from '@/lib/session-roll';
 import { isSessionStale } from '@/lib/session-state';
 import { mintRequestId } from '@/lib/api-error';
+import {
+  hasUnsafePathSegment,
+  isCrossOriginMutation,
+  securityResponseHeaders,
+} from '@/lib/bff-guards';
+import { PAGE_CSP } from '@/lib/content-security-policy.mjs';
 
 const API_BASE = process.env.PORTAL_API_URL ?? 'http://localhost:4000';
 
@@ -153,6 +158,12 @@ function publicRewriteForAnonymousGet(suffix: string): string | null {
   if (
     /^items\/[^/]+\/layers\/[^/]+\/tile\/\d+\/\d+\/\d+\.mvt$/.test(suffix)
   ) {
+    return `public/${suffix}`;
+  }
+  // The layer's TileJSON, which the map reads for the tile zoom range
+  // (minzoom / maxzoom) of its vector source. Same public mirror and
+  // same access='public' gate as the tiles it describes.
+  if (/^items\/[^/]+\/layers\/[^/]+\/tilejson\.json$/.test(suffix)) {
     return `public/${suffix}`;
   }
   // Designer-baked thumbnail SVG. Public landing tiles + anon
@@ -324,22 +335,16 @@ function isAnonymousDrawingMutationAllowed(
   return false;
 }
 
-/**
- * True when a path segment would collapse during URL normalization:
- * empty (from '//'), a single dot, or a double dot. WHATWG URL (and
- * therefore fetch) also treats the percent-encoded spellings '%2e',
- * '%2e%2e', '.%2e', and '%2e.' as dot segments, so those count too:
- * Next decodes catch-all segments once, meaning a double-encoded
- * '%252e%252e' arrives here as the literal text '%2e%2e' and would
- * still normalize into '..' when the upstream URL is parsed.
- */
-function isDotOrEmptySegment(segment: string): boolean {
-  if (segment === '') return true;
-  const decodedDots = segment.toLowerCase().replace(/%2e/g, '.');
-  return decodedDots === '.' || decodedDots === '..';
+async function forward(req: NextRequest, pathSegments: string[]) {
+  const { response, cookies } = await forwardInner(req, pathSegments);
+  for (const c of cookies) response.cookies.set(c.name, c.value, c.options);
+  return response;
 }
 
-async function forward(req: NextRequest, pathSegments: string[]) {
+async function forwardInner(
+  req: NextRequest,
+  pathSegments: string[],
+): Promise<{ response: NextResponse; cookies: CookieWrite[] }> {
   // Per-hop timing log behind the BFF_TIMING flag. Lets us split a
   // slow page load into "cookie + getServerSession" vs "upstream
   // fetch to portal-api" vs "body shaping". With ~24 items in the
@@ -348,7 +353,11 @@ async function forward(req: NextRequest, pathSegments: string[]) {
   const trace = process.env.BFF_TIMING === '1';
   const t0 = trace ? Date.now() : 0;
 
-  const session = (await getServerSession(authOptions)) as SessionWithToken | null;
+  // Not getServerSession: it runs the jwt callback (token refresh,
+  // idle activity stamp) but cannot write the result back in a route
+  // handler. resolveRouteSession returns the cookie writes, which
+  // forward() puts on whatever response it returns.
+  const { session, cookies: sessionCookies } = await resolveRouteSession(req);
   const tSession = trace ? Date.now() : 0;
 
   const suffix = pathSegments.join('/');
@@ -364,8 +373,28 @@ async function forward(req: NextRequest, pathSegments: string[]) {
   // segments introduced by an embedded decoded '/' are checked too.
   // No legitimate client sends dot or empty segments, so a flat 400
   // is safe for authenticated callers as well.
-  if (suffix.split('/').some(isDotOrEmptySegment)) {
-    return NextResponse.json({ message: 'Bad request' }, { status: 400 });
+  // Backslashes, `?`, `#` and control characters are refused for the
+  // same reason: WHATWG URL reinterprets each of them (see
+  // isUnsafePathSegment).
+  if (hasUnsafePathSegment(suffix)) {
+    return {
+      response: NextResponse.json({ message: 'Bad request' }, { status: 400 }),
+      cookies: sessionCookies,
+    };
+  }
+
+  // The session cookie becomes a bearer below, so a state-changing
+  // request must come from this origin. SameSite=Lax alone lets any
+  // same-site page (another app on the NAS IP, a sibling subdomain)
+  // POST a plain form here.
+  if (isCrossOriginMutation(req.method, req.headers)) {
+    return {
+      response: NextResponse.json(
+        { message: 'Cross-origin request refused' },
+        { status: 403 },
+      ),
+      cookies: sessionCookies,
+    };
   }
 
   // #195: a session whose Keycloak refresh has failed still carries
@@ -417,12 +446,15 @@ async function forward(req: NextRequest, pathSegments: string[]) {
     // sign-in decayed"; the session-expired banner keys off the
     // session object itself, but API consumers (QGIS plugin, tests)
     // get an honest machine-readable reason too.
-    return NextResponse.json(
+    return {
+      response: NextResponse.json(
       sessionStale
         ? { message: 'Unauthorized', code: 'session-expired' }
         : { message: 'Unauthorized' },
       { status: 401 },
-    );
+    ),
+      cookies: sessionCookies,
+    };
   }
 
   const effectiveSuffix = publicRewrite ?? suffix;
@@ -522,14 +554,17 @@ async function forward(req: NextRequest, pathSegments: string[]) {
     console.error(
       `[bff] ${requestId} ${req.method} /api/${suffix} failed: ${reason}`,
     );
-    return NextResponse.json(
+    return {
+      response: NextResponse.json(
       {
         message: 'The portal API could not be reached.',
         statusCode: 502,
         requestId,
       },
       { status: 502, headers: { 'x-request-id': requestId } },
-    );
+      ),
+      cookies: sessionCookies,
+    };
   }
   const tUpstream = trace ? Date.now() : 0;
   // Stream-pass the response body so the browser receives bytes the
@@ -601,6 +636,16 @@ async function forward(req: NextRequest, pathSegments: string[]) {
   // mirrored, so a 206 arrives as a 206; without Content-Range
   // the client cannot place the slice, and without ETag /
   // Accept-Ranges the reader disables range mode entirely.
+  // Protective headers portal-api sets per response (the proxies'
+  // sandbox CSP, thumbnail.svg's script-free CSP, nosniff). Dropping
+  // them would put a proxied document under the page CSP, which
+  // allows inline script.
+  for (const [name, value] of securityResponseHeaders(
+    upstream.headers,
+    PAGE_CSP,
+  )) {
+    outHeaders.set(name, value);
+  }
   const contentRange = upstream.headers.get('content-range');
   if (contentRange) outHeaders.set('content-range', contentRange);
   const acceptRanges = upstream.headers.get('accept-ranges');
@@ -627,10 +672,13 @@ async function forward(req: NextRequest, pathSegments: string[]) {
     outHeaders.append('set-cookie', c);
   }
 
-  return new NextResponse(upstream.body, {
-    status: upstream.status,
-    headers: outHeaders,
-  });
+  return {
+    response: new NextResponse(upstream.body, {
+      status: upstream.status,
+      headers: outHeaders,
+    }),
+    cookies: sessionCookies,
+  };
 }
 
 // Next 15 changed Route Handler params from a sync object to a

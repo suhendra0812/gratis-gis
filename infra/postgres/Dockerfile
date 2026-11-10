@@ -19,8 +19,11 @@
 #
 # PG18 (#306) was attempted on the tip and aborted on the demo host
 # (2026-10-27): the official 18 image refuses a flat PG17 volume under
-# /var/lib/postgresql. Stay on 17-3.5 until dump/restore is run, then
-# flip the image and the compose mount together. See docs/UPGRADING.md.
+# /var/lib/postgresql. Stay on 17-3.5. The deliberate upgrade (image,
+# mount, and dump/restore) is docs/upgrades/postgres-18.md, linked from
+# docs/UPGRADING.md. Do not flip this tag on its own.
+# infra/postgres/check-major.sh refuses a data directory whose
+# PG_VERSION does not match this image. It does not change the tag.
 FROM postgis/postgis:17-3.5
 
 # This image is bullseye based and bullseye reached end of life, which
@@ -84,7 +87,7 @@ RUN chmod 755 /docker-entrypoint-initdb.d/20-init-keycloak-db.sh
 # the API; the stamp keeps REQUIRED_COMPOSE_REV in one place to bump.
 ARG GG_VERSION=dev
 ARG GIT_SHA=
-ARG REQUIRED_COMPOSE_REV=1
+ARG REQUIRED_COMPOSE_REV=3
 ENV GG_VERSION=$GG_VERSION \
     GIT_SHA=$GIT_SHA \
     REQUIRED_COMPOSE_REV=$REQUIRED_COMPOSE_REV

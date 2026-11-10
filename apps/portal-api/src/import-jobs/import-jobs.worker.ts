@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
-import type { ImportJob, Prisma } from '@prisma/client';
+import type { ImportJob } from '@prisma/client';
 
 import { ImportJobsService } from './import-jobs.service.js';
 import { IngestService } from '../ingest/ingest.service.js';
@@ -10,6 +10,7 @@ import {
   DataLayerTablesService,
   type DataLayerLayerShape,
 } from '../data-layer/tables.service.js';
+import { stampV3LayerSource } from '../data-layer/stamp-layer-source.js';
 import { PrismaService } from '../prisma/prisma.service.js';
 import type { AuthUser } from '../auth/auth-sync.service.js';
 import { CopyWriter } from '../engine/copy-writer.js';
@@ -242,6 +243,9 @@ export class ImportJobsWorker implements OnModuleInit {
       };
 
       let totalInserted = 0;
+      // Append rows dropped at commit because their GlobalID already
+      // had a live feature (or appeared twice in this file).
+      let skippedDuplicates = 0;
       let lastDriver = '';
       let lastLayerName = '';
       let lastSourceSrs: string | null = null;
@@ -253,12 +257,9 @@ export class ImportJobsWorker implements OnModuleInit {
       // Open one COPY transaction for the whole import. PostgreSQL's
       // COPY FROM STDIN is the bulk-load wire protocol -- 5-10x
       // faster than batched multi-row INSERTs because the server
-      // skips per-row SQL parsing and parameter binding. We run
-      // SET LOCAL synchronous_commit=off inside the transaction so
-      // a re-runnable bulk import doesn't pay an fsync per batch
-      // commit. The writer is closed cleanly on success and
-      // aborted on any throw or cancel so a partial run never
-      // stays half-written.
+      // skips per-row SQL parsing and parameter binding. The writer
+      // is closed cleanly on success and aborted on any throw or
+      // cancel so a partial run never stays half-written.
       //
       // Replace mode: the truncate DELETE runs on the writer's own
       // connection inside this same transaction, before COPY mode
@@ -274,6 +275,8 @@ export class ImportJobsWorker implements OnModuleInit {
       }
       const writer = new CopyWriter(databaseUrl);
       let copyClosed = false;
+      const scope = dataLayerScope(job.itemId, job.layerId);
+      let removedEntityIds: string[] = [];
       let meta: Awaited<
         ReturnType<IngestService['streamLayerFromPath']>
       >;
@@ -288,49 +291,66 @@ export class ImportJobsWorker implements OnModuleInit {
       try {
         await writer.begin();
         if (job.mode === 'replace') {
-          await writer.deleteScope(dataLayerScope(job.itemId, job.layerId));
+          removedEntityIds = await writer.liveEntityIds(scope);
+          await writer.deleteScope(scope);
         }
         writer.beginCopy();
-        meta = await this.ingest.streamLayerFromPath(
-          staged.filePath,
-          job.sourceLayerName,
-          async (batch, progress) => {
-            if (cancelled) return;
-            if (await this.jobs.isCancelled(job.id)) {
-              cancelled = true;
-              return;
-            }
-            const filtered = batch.map((b) => ({
-              geometry: b.geometry,
-              properties: filterProps(b.properties),
-            }));
-            const { inserted } =
-              await this.dataLayerFeatures.bulkInsertFeatures(
-                job.itemId,
-                job.layerId,
-                filtered,
-                author,
-                writer,
-                schema,
+        try {
+          meta = await this.ingest.streamLayerFromPath(
+            staged.filePath,
+            job.sourceLayerName,
+            async (batch, progress) => {
+              if (cancelled) throw new ImportCancelled();
+              if (await this.jobs.isCancelled(job.id)) {
+                cancelled = true;
+                // Stop the reader. Returning would let GDAL read and
+                // reproject every remaining feature before the abort,
+                // holding the single import worker (and the open COPY
+                // transaction) for the whole file.
+                throw new ImportCancelled();
+              }
+              const filtered = batch.map((b) => ({
+                geometry: b.geometry,
+                properties: filterProps(b.properties),
+              }));
+              const { inserted } =
+                await this.dataLayerFeatures.bulkInsertFeatures(
+                  job.itemId,
+                  job.layerId,
+                  filtered,
+                  author,
+                  writer,
+                  schema,
+                );
+              totalInserted += inserted;
+              await this.jobs.updateProgress(
+                job.id,
+                progress.processed,
+                totalInserted,
               );
-            totalInserted += inserted;
-            await this.jobs.updateProgress(
-              job.id,
-              progress.processed,
-              totalInserted,
-            );
-          },
-          // Same rule as the synchronous ingest endpoint: the target
-          // layer decides whether these rows have geometry, not the
-          // file. Both paths have to agree or a related-records
-          // import silently succeeds on one and inserts nothing on
-          // the other.
-          { isTable: layer.geometryType == null },
-        );
-        // Important: streamLayerFromPath returns NORMALLY when we
-        // cancel mid-stream (the onBatch callback noops once the
-        // cancelled flag is set, but the GDAL feature pump runs to
-        // completion). If we just unconditionally call writer.end()
+            },
+            // Same rule as the synchronous ingest endpoint: the target
+            // layer decides whether these rows have geometry, not the
+            // file. Both paths have to agree or a related-records
+            // import silently succeeds on one and inserts nothing on
+            // the other.
+            { isTable: layer.geometryType == null },
+          );
+        } catch (err) {
+          // A reader may wrap the sentinel in its own error type, so
+          // the flag decides, not the error class.
+          if (!cancelled) throw err;
+          meta = {
+            fields: [],
+            driver: '',
+            layerName: job.sourceLayerName ?? '',
+            sourceSrs: null,
+            total: 0,
+          };
+        }
+        // Important: on cancel the stream stops early (above) and we
+        // land here with `cancelled` set. If we just unconditionally
+        // call writer.end()
         // here, the COPY transaction COMMITS every row that already
         // streamed before the cancel -- which was the bug behind
         // 1.3M ghost rows in observation after multiple cancelled
@@ -342,7 +362,30 @@ export class ImportJobsWorker implements OnModuleInit {
           await writer.abort();
           copyClosed = true;
         } else {
-          await writer.end();
+          // Seal, then drop duplicate appends, then stamp, then commit.
+          // The stamp only counts rows this transaction still holds, so
+          // a load whose rows were all duplicates leaves the cursor
+          // alone. Abort before commit leaves it unchanged too.
+          await writer.sealCopy();
+          if (job.mode === 'append') {
+            // Only rows this transaction inserted. Committed history
+            // is not deleted. See CopyWriter.dropDuplicateAppendCreates.
+            // Takes the item row lock before its bucket locks, the
+            // same order API edits use.
+            skippedDuplicates = await writer.dropDuplicateAppendCreates(
+              dataLayerScope(job.itemId, job.layerId),
+              job.itemId,
+            );
+            totalInserted = Math.max(0, totalInserted - skippedDuplicates);
+          }
+          await this.dataLayerFeatures.commitCopiedLayer(writer, {
+            itemId: job.itemId,
+            layerId: job.layerId,
+            removedEntityIds,
+            authorSub: job.createdBy,
+            replace: job.mode === 'replace',
+          });
+          await writer.commit();
           copyClosed = true;
           copyCommitted = true;
         }
@@ -378,13 +421,18 @@ export class ImportJobsWorker implements OnModuleInit {
 
       // Stamp source provenance on the layer (the detail page
       // surfaces "Imported from X.gdb.zip on Y by Z").
-      await this.stampV3LayerSource(job.itemId, job.layerId, {
+      await stampV3LayerSource(this.prisma, job.itemId, job.layerId, {
         fileName: job.sourceFileName,
         format: driverToFormat(lastDriver),
         sizeBytes: staged.sizeBytes,
         importedAt: new Date().toISOString(),
         importedBy: job.createdBy,
-        note: `driver: ${lastDriver}`,
+        note:
+          skippedDuplicates > 0
+            ? `driver: ${lastDriver}; skipped ${skippedDuplicates} ${
+                skippedDuplicates === 1 ? 'row' : 'rows'
+              } whose GlobalID already exists`
+            : `driver: ${lastDriver}`,
         sourceSrs: lastSourceSrs,
       });
 
@@ -421,6 +469,11 @@ export class ImportJobsWorker implements OnModuleInit {
         );
       }
 
+      if (skippedDuplicates > 0) {
+        this.log.log(
+          `Job ${job.id}: skipped ${skippedDuplicates} append rows whose GlobalID already exists.`,
+        );
+      }
       await this.jobs.markSucceeded(job.id, totalInserted);
       // Reference lastLayerName so TypeScript doesn't flag it as
       // unused. We may want to surface it in the wire response in
@@ -446,43 +499,6 @@ export class ImportJobsWorker implements OnModuleInit {
         await this.jobs.zeroInsertedForFailed(job.id);
       }
     }
-  }
-
-  /**
-   * Same shape the ingest controller's stampV3LayerSource writes.
-   * Duplicated here to avoid pulling the controller's private
-   * helper into the public surface; a future cleanup pass could
-   * extract this into a shared LayerSourceStamper.
-   */
-  private async stampV3LayerSource(
-    itemId: string,
-    layerId: string,
-    source: {
-      fileName: string;
-      format: string;
-      sizeBytes: number;
-      importedAt: string;
-      importedBy: string;
-      note?: string;
-      sourceSrs?: string | null;
-    },
-  ): Promise<void> {
-    const row = await this.prisma.item.findUnique({
-      where: { id: itemId },
-      select: { data: true },
-    });
-    const data = row?.data as
-      | { version?: number; layers?: Array<Record<string, unknown>> }
-      | null;
-    if (!data || data.version !== 3 || !Array.isArray(data.layers)) return;
-    const nextLayers = data.layers.map((l) =>
-      (l as { id?: string }).id === layerId ? { ...l, source } : l,
-    );
-    const nextData = { ...(data as object), layers: nextLayers };
-    await this.prisma.item.update({
-      where: { id: itemId },
-      data: { data: nextData as unknown as Prisma.InputJsonValue },
-    });
   }
 }
 
@@ -517,4 +533,12 @@ function driverToFormat(
   if (d.includes('xlsx') || d.includes('excel')) return 'xlsx';
   if (d.includes('csv')) return 'csv';
   return 'api';
+}
+
+/** Thrown from onBatch to stop a cancelled import's reader. */
+class ImportCancelled extends Error {
+  constructor() {
+    super('Import cancelled.');
+    this.name = 'ImportCancelled';
+  }
 }

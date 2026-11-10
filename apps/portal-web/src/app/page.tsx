@@ -3,6 +3,7 @@ import { getServerSession } from 'next-auth';
 import type { ItemType } from '@gratis-gis/shared-types';
 import { authOptions } from '@/lib/auth';
 import { getPortalUrl } from '@/lib/portal-url';
+import { serializeJsonLd } from '@/lib/json-ld';
 import { isSessionStale } from '@/lib/session-state';
 import { loadWhatsNewEntries } from '@/lib/whats-new';
 import { PublicLanding } from './public-landing';
@@ -30,7 +31,7 @@ function landingJsonLd() {
     applicationSubCategory: 'Geographic Information System',
     operatingSystem: 'Web, Linux server',
     license: 'https://www.gnu.org/licenses/agpl-3.0.html',
-    softwareVersion: '1.2.0',
+    softwareVersion: '1.3.0',
     offers: {
       '@type': 'Offer',
       price: '0',
@@ -95,7 +96,7 @@ export default async function HomePage(
         type="application/ld+json"
         // eslint-disable-next-line react/no-danger
         dangerouslySetInnerHTML={{
-          __html: JSON.stringify(landingJsonLd()),
+          __html: serializeJsonLd(landingJsonLd()),
         }}
       />
       <PublicLanding

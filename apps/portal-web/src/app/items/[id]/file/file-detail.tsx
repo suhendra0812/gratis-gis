@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-import { formatDate } from '@/lib/i18n/format';
-import { DEFAULT_LOCALE } from '@/lib/i18n/locales';
+import { RelativeTime } from '@/components/relative-time';
 import Link from 'next/link';
 import { Download, FileText, ImageIcon, FileType2 } from 'lucide-react';
 import type { FileData } from '@gratis-gis/shared-types';
 import { CopyUrlButton } from './copy-url-button';
+import { formatBytes } from '@/lib/format-bytes';
 
 /**
  * File item detail body (#296). Two parts:
@@ -31,10 +31,10 @@ export function FileDetail({ data, canDownload }: { data: FileData; canDownload:
             {data.fileName || '(unnamed file)'}
           </div>
           <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-xs text-muted">
-            <span>{humanFileSize(data.sizeBytes)}</span>
+            <span>{formatBytes(data.sizeBytes)}</span>
             <span className="font-mono">{data.mimeType}</span>
             {data.uploadedAt ? (
-              <span>uploaded {formatRelative(data.uploadedAt)}</span>
+              <span>uploaded <RelativeTime value={data.uploadedAt} /></span>
             ) : null}
           </div>
         </div>
@@ -130,28 +130,3 @@ function pickPreviewKind(mime: string): PreviewKind {
   return 'other';
 }
 
-function humanFileSize(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-  return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
-}
-
-function formatRelative(iso: string): string {
-  try {
-    const d = new Date(iso);
-    if (Number.isNaN(d.getTime())) return iso;
-    const ms = Date.now() - d.getTime();
-    const sec = Math.round(ms / 1000);
-    if (sec < 60) return 'just now';
-    const min = Math.round(sec / 60);
-    if (min < 60) return `${min}m ago`;
-    const hr = Math.round(min / 60);
-    if (hr < 24) return `${hr}h ago`;
-    const day = Math.round(hr / 24);
-    if (day < 30) return `${day}d ago`;
-    return formatDate(d, DEFAULT_LOCALE);
-  } catch {
-    return iso;
-  }
-}

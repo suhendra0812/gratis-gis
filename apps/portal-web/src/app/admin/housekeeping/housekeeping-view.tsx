@@ -28,6 +28,7 @@ import { getItemTypeAccent, getItemTypeIcon } from '@/lib/item-type-icon';
 import { ReassignOwnerDialog } from '@/components/reassign-owner-dialog';
 import { useFormat } from '@/lib/i18n/format';
 import { useT } from '@/lib/i18n/locale-context';
+import { formatBytes } from '@/lib/format-bytes';
 
 /**
  * Wire shapes returned by /admin/housekeeping endpoints. Kept
@@ -76,7 +77,7 @@ export interface HousekeepingBundle {
   }>;
   /** Storage telemetry (#161). Rendered as a single card at the top
    *  of the page so the operator can answer "are we running low" at
-   *  a glance. */
+   *  a glance. Null for admins outside the operator organization. */
   storage: {
     postgres: {
       databaseName: string;
@@ -98,7 +99,7 @@ export interface HousekeepingBundle {
       totalBytes: number;
       freeBytes: number;
     } | null;
-  };
+  } | null;
   /** Top 50 data_layer scopes by approximate observation footprint
    *  (#115 P10 follow-up). After the engine pivot the per-table
    *  list is dominated by `observation_p202xxxxx` partitions that
@@ -669,7 +670,7 @@ export function HousekeepingView({ bundle }: Props) {
           per-store readouts (Postgres + MinIO). The disk gauge is
           the "are we running low" signal at a glance; the readouts
           tell the operator which store dominates. */}
-      <StorageCard storage={storage} />
+      {storage ? <StorageCard storage={storage} /> : null}
 
       {/* Soon-to-expire shares (#86). Mixes already-expired
           (red) and within-window (amber) rows so the admin can
@@ -1362,7 +1363,7 @@ function StaleUsersTable({
 function StorageCard({
   storage,
 }: {
-  storage: HousekeepingBundle['storage'];
+  storage: NonNullable<HousekeepingBundle['storage']>;
 }) {
   const fmt = useFormat();
   const t = useT();
@@ -1602,7 +1603,7 @@ function ExpiringSharesTable({
                 {r.isExpired
                   ? t('adminHousekeeping.expired')
                   : t('adminHousekeeping.expiryIn')}{' '}
-                {formatRelativeShort(r.expiresAt)}
+                {fmt.relativeTime(r.expiresAt)}
               </span>
             </td>
             <td className="px-4 py-2 text-right">
@@ -1691,7 +1692,7 @@ function ExpiringUsersTable({
                 {r.isExpired
                   ? t('adminHousekeeping.pastDue')
                   : t('adminHousekeeping.expiryIn')}{' '}
-                {formatRelativeShort(r.autoDisableAt)}
+                {fmt.relativeTime(r.autoDisableAt)}
               </span>
             </td>
             <td className="px-4 py-2 text-muted">
@@ -1738,28 +1739,3 @@ function ExpiringUsersTable({
   );
 }
 
-/**
- * Compact "in 3d", "in 12h", "23m" relative time. Used by the
- * expiry chips: a full date is on the title attribute for hover.
- */
-function formatRelativeShort(iso: string): string {
-  const t = Date.parse(iso);
-  if (!Number.isFinite(t)) return iso;
-  const diffMs = t - Date.now();
-  const abs = Math.abs(diffMs);
-  const minutes = Math.floor(abs / 60_000);
-  if (minutes < 60) return `${minutes}m`;
-  const hours = Math.floor(minutes / 60);
-  if (hours < 48) return `${hours}h`;
-  const days = Math.floor(hours / 24);
-  if (days < 60) return `${days}d`;
-  const months = Math.floor(days / 30);
-  return `${months}mo`;
-}
-
-function formatBytes(n: number): string {
-  if (n < 1024) return `${n} B`;
-  if (n < 1024 * 1024) return `${(n / 1024).toFixed(0)} KB`;
-  if (n < 1024 * 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)} MB`;
-  return `${(n / 1024 / 1024 / 1024).toFixed(2)} GB`;
-}

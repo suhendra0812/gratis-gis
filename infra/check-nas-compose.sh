@@ -120,10 +120,16 @@ assert vals["GRATIS_COMPOSE_REV"] == "1"
 assert "GG_VERSION" not in vals
 assert vals["MINIO_PUBLIC_BASE"] == "http://192.168.4.15:8900"
 assert vals["STORAGE_ALLOWED_ORIGINS"] == vals["PUBLIC_URL"]
+assert vals["PORTAL_BASE_URL"] == vals["PUBLIC_URL"]
 assert len(vals["INITIAL_USER_PASSWORD"]) >= 16
 assert vals["INITIAL_USER_PASSWORD"] not in {"admin", "password", "gratisgis"}
 assert len(base64.b64decode(vals["CREDENTIAL_ENCRYPTION_KEY"], validate=True)) == 32
 assert "GENERATE" not in (boot / "env").read_text()
+chromium_env = mod.read_env(boot / "env.chromium")
+assert chromium_env == {"CHROMIUM_TOKEN": vals["CHROMIUM_TOKEN"]}, chromium_env
+pointcloud_env = mod.read_env(boot / "env.pointcloud")
+assert set(pointcloud_env) == {"ANALYSIS_TIERS", "DATABASE_URL", "MINIO_ENDPOINT", "MINIO_ACCESS_KEY", "MINIO_SECRET_KEY", "MINIO_BUCKET"}, pointcloud_env
+assert "INITIAL_USER_PASSWORD" not in (boot / "env.pointcloud").read_text()
 
 realm = json.loads((boot / "realm-gratis-gis.json").read_text())
 web = next(client for client in realm["clients"] if client["clientId"] == "portal-web")
@@ -201,6 +207,7 @@ assert vals["KC_HOSTNAME"] == "http://192.168.4.15:8085"
 assert vals["MINIO_PUBLIC_BASE"] == "http://192.168.4.15:8901"
 assert vals["MINIO_API_CORS_ALLOW_ORIGIN"] == vals["PUBLIC_URL"]
 assert vals["STORAGE_ALLOWED_ORIGINS"] == vals["PUBLIC_URL"]
+assert vals["PORTAL_BASE_URL"] == vals["PUBLIC_URL"]
 realm = json.loads((boot / "realm-gratis-gis.json").read_text())
 web = next(client for client in realm["clients"] if client["clientId"] == "portal-web")
 assert web["redirectUris"] == ["http://192.168.4.15:8085/*"]
@@ -309,6 +316,11 @@ for dockerfile in dockerfiles:
     marker = f"ARG REQUIRED_COMPOSE_REV={compose_rev}"
     if marker not in text:
         raise SystemExit(f"{dockerfile} does not declare {marker}")
+# A build arg in a workflow would override the Dockerfile default this
+# check just read, and published images would report a stale rev.
+for workflow in sorted((root / ".github/workflows").glob("*.y*ml")):
+    if re.search(r"REQUIRED_COMPOSE_REV\s*=", workflow.read_text(encoding="utf-8")):
+        raise SystemExit(f"{workflow} sets REQUIRED_COMPOSE_REV; let the Dockerfile default apply")
 for name, svc in cfg["services"].items():
     if not svc.get("healthcheck"):
         raise SystemExit(f"{name} has no healthcheck")
@@ -341,6 +353,39 @@ if "/boot" not in wt or "/scratch" not in wt:
 api_targets = targets(cfg["services"]["portal-api"])
 if "/app/backups" not in api_targets:
     raise SystemExit(f"portal-api volumes {api_targets}")
+
+
+def env_of(svc):
+    found = svc.get("environment") or {}
+    if isinstance(found, list):
+        found = dict(item.split("=", 1) for item in found)
+    return found
+
+
+def volume_source(svc, target):
+    for vol in svc.get("volumes") or []:
+        if isinstance(vol, dict) and vol.get("target") == target:
+            return vol.get("source")
+        if isinstance(vol, str) and vol.split(":")[1:2] == [target]:
+            return vol.split(":")[0]
+    return None
+
+
+# portal-api stages uploads and portal-worker imports them. They must
+# point STAGING_DIR at one path backed by the same named volume, or
+# every queued import fails with "Source file expired".
+staging = {}
+for name in ("portal-api", "portal-worker"):
+    svc = cfg["services"][name]
+    path = env_of(svc).get("STAGING_DIR")
+    if not path:
+        raise SystemExit(f"{name} has no STAGING_DIR")
+    source = volume_source(svc, path)
+    if not source:
+        raise SystemExit(f"{name} does not mount a volume at STAGING_DIR {path}")
+    staging[name] = (path, source)
+if staging["portal-api"] != staging["portal-worker"]:
+    raise SystemExit(f"portal-api and portal-worker staging differ: {staging}")
 limit = worker.get("mem_limit")
 # Compose reports the byte cap. 2560m is 2560 * 1024 * 1024.
 if str(limit) not in {"2560m", "2684354560", "2560M"}:
@@ -357,8 +402,28 @@ if not web.startswith("ghcr.io/palavido-dev/gratis-gis/portal-web:"):
     raise SystemExit(web)
 if not pg.startswith("ghcr.io/palavido-dev/gratis-gis/postgres:"):
     raise SystemExit(pg)
-if cfg["services"]["bootstrap"]["image"] != "python:3.12-alpine":
-    raise SystemExit("bootstrap image changed")
+if not cfg["services"]["bootstrap"]["image"].startswith("python:3.12-alpine@sha256:"):
+    raise SystemExit("bootstrap image must stay python:3.12-alpine pinned by digest")
+if "@sha256:" not in cfg["services"]["chromium"]["image"]:
+    raise SystemExit("chromium image must be pinned by digest")
+
+
+def command_text(svc):
+    cmd = svc.get("command") or ""
+    return "\n".join(str(part) for part in cmd) if isinstance(cmd, list) else str(cmd)
+
+
+# Services that handle untrusted input source only their own env file.
+for name, env_file in (("chromium", "/boot/env.chromium"), ("pointcloud-worker", "/boot/env.pointcloud")):
+    text = command_text(cfg["services"][name])
+    if env_file not in text or re.search(r"\. /boot/env\s*$", text, re.M):
+        raise SystemExit(f"{name} must source {env_file}, not /boot/env")
+for name in ("portal-api", "portal-worker", "portal-web", "pointcloud-worker"):
+    svc = cfg["services"][name]
+    if "ALL" not in (svc.get("cap_drop") or []):
+        raise SystemExit(f"{name} must drop all capabilities")
+    if "no-new-privileges:true" not in (svc.get("security_opt") or []):
+        raise SystemExit(f"{name} must set no-new-privileges")
 print("compose config ok")
 print("services", len(cfg["services"]))
 PY

@@ -100,6 +100,7 @@ import {
   type CachedFeature,
   type QueueRecord,
 } from '@/lib/offline-store';
+import { buildOfflineRecoveryZip } from '@/lib/offline-export';
 import { formatBytes } from '@/lib/format-bytes';
 import { formatOfflineMessage } from '@/lib/offline-message';
 import { holdReload } from '@/lib/sw-update-guard';
@@ -170,8 +171,8 @@ import { uploadPendingAttachmentsInResponse } from '@/lib/form-attachment-upload
 import { describeZoom } from '@/lib/map-scale';
 import { parseApiError } from '@/lib/api-error';
 import { useT } from '@/lib/i18n/locale-context';
-import { formatDate, useFormat } from '@/lib/i18n/format';
-import { DEFAULT_LOCALE } from '@/lib/i18n/locales';
+import { useFormat } from '@/lib/i18n/format';
+import { RelativeTime } from '@/components/relative-time';
 import type { Translator } from '@/lib/i18n';
 
 /**
@@ -469,8 +470,13 @@ async function deleteFieldFeature(args: {
   isOnline: boolean;
   currentUserId: string;
   failedLabel: string;
+  /** The server observation the user was looking at, when known.
+   *  Sent so a delete of a feature someone changed since is refused
+   *  with a 409 instead of removing their edit (docs/sync-protocol.md). */
+  baseObservationId?: string | undefined;
 }): Promise<'server' | 'local'> {
   const { dataCollectionId, layer, featureId, isOnline, currentUserId } = args;
+  const base = args.baseObservationId || undefined;
   const dropCached = () =>
     deleteFeatures(dataCollectionId, layer.dataLayerId, layer.layerKey, [
       featureId,
@@ -486,6 +492,7 @@ async function deleteFieldFeature(args: {
       properties: null,
       schemaHash: await hashLayerSchema(layer.fields),
       ownerUserId: currentUserId,
+      ...(base ? { baseObservationId: base } : {}),
     });
     await dropCached();
     return 'local';
@@ -504,7 +511,15 @@ async function deleteFieldFeature(args: {
       `/api/portal/items/${layer.dataLayerId}/layers/${encodeURIComponent(
         layer.layerKey,
       )}/features/${encodeURIComponent(featureId)}`,
-      { method: 'DELETE' },
+      {
+        method: 'DELETE',
+        ...(base
+          ? {
+              headers: { 'content-type': 'application/json' },
+              body: JSON.stringify({ baseObservationId: base }),
+            }
+          : {}),
+      },
     );
   } catch {
     // Network failure mid-request: keep the intent in the queue so the
@@ -1274,6 +1289,30 @@ export function FieldRuntime({
     },
     [dataCollectionId, currentUserId, mapData.layers],
   );
+
+  async function saveUnsyncedCopy(): Promise<void> {
+    const records = await listQueue(dataCollectionId, currentUserId);
+    const blobs = await listPendingBlobs(dataCollectionId, currentUserId);
+    const { filename, bytes } = await buildOfflineRecoveryZip({
+      dataCollectionId,
+      deploymentTitle: title,
+      userId: currentUserId,
+      exportedAt: new Date().toISOString(),
+      records,
+      blobs,
+    });
+    const copy = new ArrayBuffer(bytes.byteLength);
+    new Uint8Array(copy).set(bytes);
+    const file = new Blob([copy], { type: 'application/zip' });
+    const url = URL.createObjectURL(file);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = filename;
+    link.click();
+    // Revoking in the same tick can cancel the download on mobile
+    // Safari, and this menu is mostly used on phones. Free it later.
+    window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
+  }
 
   // Auto-sync when isOnline flips from false -> true. Captured via a
   // ref so we don't fire on the initial mount when isOnline starts
@@ -2622,6 +2661,9 @@ export function FieldRuntime({
             collection chrome out of the way of the canvas. */}
         <FieldMoreMenu
           mapTitle={mapTitle}
+          onSaveCopy={() => {
+            void saveUnsyncedCopy();
+          }}
           isOnline={isOnline}
           cachedAt={cachedDeployment?.cachedAt ?? null}
           persistentState={persistentState}
@@ -4110,10 +4152,13 @@ function LayerVisibilityPanel({
             ? panelT('fieldOffline.refreshOfflineCache')
             : panelT('fieldOffline.downloadForOffline')}
         </button>
+        <p className="mt-1.5 text-2xs text-ink-1">
+          {panelT('fieldOffline.deviceOnlyWarning')}
+        </p>
         {cachedDeployment ? (
           <p className="mt-1 text-2xs text-muted">
             {panelT('fieldOffline.cachedSummary', {
-              when: formatRelativeTime(cachedDeployment.cachedAt),
+              when: fmt.relativeTime(cachedDeployment.cachedAt),
               size: formatBytes(cachedDeployment.estimatedSize),
             })}
           </p>
@@ -4645,6 +4690,10 @@ function FormModal({
         isOnline,
         currentUserId,
         failedLabel: t('featureEdit.deleteFailed'),
+        baseObservationId:
+          typeof active.properties._observation_id === 'string'
+            ? active.properties._observation_id
+            : undefined,
       });
       if (where === 'local') onLocalWriteApplied();
       if (related) {
@@ -5031,6 +5080,15 @@ function FeatureForm({
     // (Slice 5 doesn't act on it yet, but capturing it now means an
     // upgraded portal can reconcile without a queue migration).
     const schemaHash = await hashLayerSchema(modal.layer.fields);
+    // The server observation this edit was made against. Sent as
+    // `baseObservationId` so a stale edit gets a 409 instead of
+    // overwriting someone else's newer one (docs/sync-protocol.md).
+    const baseObservationId =
+      modal.mode === 'edit' &&
+      typeof modal.properties._observation_id === 'string' &&
+      modal.properties._observation_id !== ''
+        ? modal.properties._observation_id
+        : undefined;
 
     // What to write. An add sends the whole record. An edit sends
     // only what changed (see changedValues), plus the shape if it was
@@ -5074,6 +5132,7 @@ function FeatureForm({
         // Who captured it, so only this account's session ever sends
         // it. The server stamps submitted_by from the caller.
         ownerUserId: currentUserId,
+        ...(baseObservationId ? { baseObservationId } : {}),
       });
       // The fold keeps the original capture time, so the cached
       // feature's timestamps come from the surviving row.
@@ -5095,6 +5154,9 @@ function FeatureForm({
             ...before,
             ...writeProps,
             _global_id: featureId,
+            // Keep the server token the edit was made against, so a
+            // second edit before sync still carries the right base.
+            ...(baseObservationId ? { _observation_id: baseObservationId } : {}),
             _created_by: before._created_by ?? currentUserId,
             _edited_by: currentUserId,
             _created_at: before._created_at ?? queuedAt,
@@ -5170,6 +5232,7 @@ function FeatureForm({
                     ? { properties: writeProps }
                     : {}),
                   ...(writeGeometry ? { geometry: writeGeometry } : {}),
+                  ...(baseObservationId ? { baseObservationId } : {}),
                 }),
               });
       } catch {
@@ -6234,6 +6297,7 @@ function FieldMoreMenu({
   gpsAccuracyM,
   onDownload,
   onRemoveCache,
+  onSaveCopy,
 }: {
   mapTitle: string;
   isOnline: boolean;
@@ -6252,6 +6316,7 @@ function FieldMoreMenu({
   gpsAccuracyM: number | null;
   onDownload: () => void;
   onRemoveCache: () => void;
+  onSaveCopy: () => void;
 }) {
   const t = useT();
   const [open, setOpen] = useState(false);
@@ -6343,7 +6408,7 @@ function FieldMoreMenu({
                   {t('fieldRuntime.lastCached')}
                 </span>
                 <span className="text-ink-1">
-                  {formatRelativeTime(cachedAt)}
+                  <RelativeTime value={cachedAt} />
                 </span>
               </li>
             ) : null}
@@ -6463,6 +6528,20 @@ function FieldMoreMenu({
                     ? t('fieldOffline.refreshOfflineCache')
                     : t('fieldOffline.downloadForOffline')}
               </span>
+            </button>
+            <p className="px-2 pt-1 text-2xs text-ink-1">
+              {t('fieldOffline.deviceOnlyWarning')}
+            </p>
+            <button
+              type="button"
+              onClick={() => {
+                setOpen(false);
+                onSaveCopy();
+              }}
+              disabled={queueCount === 0}
+              className="flex w-full items-center gap-2 rounded px-2 py-2 text-left text-sm text-ink-0 hover:bg-surface-2 disabled:opacity-50"
+            >
+              <span>{t('fieldOffline.saveUnsyncedCopy')}</span>
             </button>
             {/* Remove from device. Only meaningful when something is
                 cached, and we want a hard confirm step because the
@@ -7109,27 +7188,6 @@ function groupFeatureResultsByLayer(
     out[i]!.results.push(r);
   }
   return out;
-}
-
-/**
- * Render an ISO timestamp as a relative-friendly string ("2 hours
- * ago", "yesterday", "3 days ago"). Used in the cached-deployment
- * line so the user knows how stale their offline data is at a
- * glance. Falls through to a date string past 30 days.
- */
-function formatRelativeTime(iso: string): string {
-  const then = new Date(iso).getTime();
-  if (!Number.isFinite(then)) return iso;
-  const diffMs = Date.now() - then;
-  const min = Math.floor(diffMs / 60_000);
-  if (min < 1) return 'just now';
-  if (min < 60) return `${min}m ago`;
-  const hr = Math.floor(min / 60);
-  if (hr < 24) return `${hr}h ago`;
-  const day = Math.floor(hr / 24);
-  if (day === 1) return 'yesterday';
-  if (day < 30) return `${day}d ago`;
-  return formatDate(iso, DEFAULT_LOCALE);
 }
 
 /**

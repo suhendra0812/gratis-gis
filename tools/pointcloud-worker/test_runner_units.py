@@ -227,6 +227,218 @@ def test_compute_zonal_stats_arrays():
     assert 0 not in out
 
 
+def test_finish_job_keeps_the_lease():
+    class Cursor:
+        def __init__(self):
+            self.sql = ""
+            self.args = None
+
+        def execute(self, sql, args):
+            self.sql = sql
+            self.args = args
+            self.rowcount = 1
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+    class Conn:
+        def __init__(self):
+            self.cur = Cursor()
+            self.commits = 0
+
+        def cursor(self):
+            return self.cur
+
+        def commit(self):
+            self.commits += 1
+
+    conn = Conn()
+    token = "11111111-1111-1111-1111-111111111111"
+    assert runner.finish_job(conn, "job-1", None, token) is True
+    assert "state IN ('running', 'cancel_requested')" in conn.cur.sql
+    assert "claim_token = %s::uuid" in conn.cur.sql
+    assert "IS NULL" not in conn.cur.sql
+    assert conn.cur.args == ("job-1", token)
+    assert conn.commits == 1
+    refused = Conn()
+    assert runner.finish_job(refused, "job-2", "boom", None) is False
+    assert refused.cur.args is None
+    runner.remember_lease("job-3", token)
+    beat = Conn()
+    try:
+        runner.set_progress(beat, "job-3", 10)
+    except Exception:
+        pass
+    assert "claim_token = %s::uuid" in beat.cur.sql
+
+
+def test_merge_item_data_checks_the_lease_in_the_write():
+    class Cursor:
+        def __init__(self):
+            self.sql = ""
+            self.rowcount = 0
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+        def execute(self, sql, _args=None):
+            self.sql += "\n" + sql
+            if "UPDATE item" in sql:
+                self.rowcount = 0
+
+    class Conn:
+        def __init__(self):
+            self.cur = Cursor()
+            self.commits = 0
+            self.rolled = 0
+
+        def cursor(self):
+            return self.cur
+
+        def commit(self):
+            self.commits += 1
+
+        def rollback(self):
+            self.rolled += 1
+
+    token = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+    runner.remember_lease("job-pub", token)
+    runner._current_job_id = "job-pub"
+    conn = Conn()
+    try:
+        raised = False
+        try:
+            runner.merge_item_data(conn, "item-1", {"processingState": "ready"})
+        except runner.JobLost:
+            raised = True
+        assert raised
+        assert "FOR UPDATE" in conn.cur.sql
+        assert "UPDATE item" in conn.cur.sql
+        assert "EXISTS (SELECT 1 FROM held)" in conn.cur.sql
+        assert conn.rolled == 1
+        assert conn.commits == 0
+    finally:
+        runner._current_job_id = None
+
+
+class _JobDb:
+    """Just enough of analysis_job + item for the settle order: the
+    item merge only lands while the job is still live, as in SQL."""
+
+    def __init__(self):
+        self.state = "running"
+        self.item_patches = []
+        self.commits = 0
+        self.rolled = 0
+
+    def cursor(self):
+        db = self
+
+        class Cursor:
+            rowcount = 0
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_exc):
+                return False
+
+            def execute(self, sql, args=None):
+                self.rowcount = 0
+                if "UPDATE item" in sql:
+                    if db.state in ("running", "cancel_requested"):
+                        db.item_patches.append(json.loads(args[2]))
+                        self.rowcount = 1
+                elif "UPDATE analysis_job" in sql and db.state in (
+                    "running",
+                    "cancel_requested",
+                ):
+                    if "'cancelled'" in sql:
+                        db.state = "cancelled"
+                    elif "'failed'" in sql:
+                        db.state = "failed"
+                    self.rowcount = 1
+
+        return Cursor()
+
+    def commit(self):
+        self.commits += 1
+
+    def rollback(self):
+        self.rolled += 1
+
+
+def _settle_with(fn, *args):
+    token = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+    job = {
+        "id": "job-husk",
+        "kind": "hillshade",
+        "target_item_id": "item-husk",
+        "claim_token": token,
+    }
+    runner.remember_lease("job-husk", token)
+    runner._current_job_id = "job-husk"
+    db = _JobDb()
+    try:
+        fn(db, job, *args)
+    finally:
+        runner._current_job_id = None
+    return db
+
+
+def test_failed_job_stamps_its_husk_item():
+    db = _settle_with(runner.settle_failed, "bad input")
+    assert db.state == "failed"
+    assert db.item_patches == [
+        {"processingState": "failed", "processingError": "bad input"}
+    ]
+
+
+def test_cancelled_job_stamps_its_husk_item():
+    db = _settle_with(runner.settle_cancelled)
+    assert db.state == "cancelled"
+    assert len(db.item_patches) == 1
+    assert db.item_patches[0]["processingState"] == "failed"
+    assert "cancelled" in db.item_patches[0]["processingError"]
+
+
+def test_source_keys_are_pinned_to_the_layer_prefix():
+    tl = runner.TILE_LAYER_KEY_PREFIX
+    assert (
+        runner.pinned_source_key({"cogStorageKey": tl + "a/cog.tif"}, tl, "cogStorageKey")
+        == tl + "a/cog.tif"
+    )
+    # Falls through to the next field when the first is empty.
+    assert (
+        runner.pinned_source_key(
+            {"cogStorageKey": "", "storageKey": tl + "b.tif"},
+            tl,
+            "cogStorageKey",
+            "storageKey",
+        )
+        == tl + "b.tif"
+    )
+    assert runner.pinned_source_key({}, tl, "cogStorageKey") is None
+    for bad in (
+        "feedback-screenshot/x.png",
+        "item-point-cloud/y.copc.laz",
+        tl + "../feedback-screenshot/x.png",
+        tl,
+    ):
+        raised = False
+        try:
+            runner.pinned_source_key({"cogStorageKey": bad}, tl, "cogStorageKey")
+        except RuntimeError:
+            raised = True
+        assert raised, bad
+
+
 if __name__ == "__main__":
     test_is_cancel_requested()
     test_add_feet_field()
@@ -238,4 +450,9 @@ if __name__ == "__main__":
     test_plan_grid_chunks_elkins_shape()
     test_pdal_bounds_str()
     test_compute_zonal_stats_arrays()
+    test_finish_job_keeps_the_lease()
+    test_merge_item_data_checks_the_lease_in_the_write()
+    test_failed_job_stamps_its_husk_item()
+    test_cancelled_job_stamps_its_husk_item()
+    test_source_keys_are_pinned_to_the_layer_prefix()
     print("test_runner_units: all assertions passed")

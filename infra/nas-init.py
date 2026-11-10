@@ -5,8 +5,10 @@
 Runs inside the bootstrap container (python:3.12-alpine). On an empty
 volume it generates secrets, a Keycloak realm, and a Caddyfile, then
 prints the address. The admin password is printed only when the
-secrets are first created, and it is not written to a file. A second
-start keeps the same secrets and does not print the password again.
+secrets are first created. Until the admin changes it at first
+sign-in, it is also stored in the boot volume (the env file and the
+realm import), which the stack's own containers mount. A second start
+keeps the same secrets and does not print the password again.
 
 No default passwords. Secrets are random per install.
 """
@@ -252,6 +254,27 @@ def write_env(path: Path, values: dict[str, str]) -> None:
     path.chmod(0o644)
 
 
+# Services that handle untrusted input get only the variables they read.
+# chromium renders user-authored map styles; pointcloud-worker parses
+# uploaded point clouds and rasters with PDAL and GDAL.
+SERVICE_ENV_KEYS = {
+    "env.chromium": ("CHROMIUM_TOKEN",),
+    "env.pointcloud": (
+        "ANALYSIS_TIERS",
+        "DATABASE_URL",
+        "MINIO_ENDPOINT",
+        "MINIO_ACCESS_KEY",
+        "MINIO_SECRET_KEY",
+        "MINIO_BUCKET",
+    ),
+}
+
+
+def write_service_envs(boot: Path, values: dict[str, str]) -> None:
+    for name, keys in SERVICE_ENV_KEYS.items():
+        write_env(boot / name, {key: values.get(key, "") for key in keys})
+
+
 def read_env(path: Path) -> dict[str, str]:
     values: dict[str, str] = {}
     for raw in path.read_text(encoding="utf-8").splitlines():
@@ -297,10 +320,65 @@ ADMIN_CLIENT_ROLES = (
 )
 
 
+def sign_in_origins(values: dict[str, str]) -> list[str]:
+    """The one browser origin that may complete sign-in.
+
+    Keycloak 26 only treats a trailing * as a path wildcard, so a
+    redirect pattern cannot mean "any Tailscale hostname". The
+    operator sets GRATIS_BASE_URL to the address they open, including
+    a MagicDNS name, and a restart updates Keycloak in place.
+    """
+    public = values.get("PUBLIC_URL", "").strip().rstrip("/")
+    return [public] if public else []
+
+
+def apply_sign_in_client(client: dict, origins: list[str]) -> dict:
+    """Point the portal-web client at the current sign-in origins."""
+    updated = dict(client)
+    updated["redirectUris"] = [f"{origin}/*" for origin in origins]
+    updated["webOrigins"] = list(origins)
+    attrs = dict(updated.get("attributes") or {})
+    attrs["post.logout.redirect.uris"] = "##".join(f"{origin}/*" for origin in origins)
+    attrs["pkce.code.challenge.method"] = attrs.get("pkce.code.challenge.method") or "S256"
+    updated["attributes"] = attrs
+    return updated
+
+
+def apply_sign_in_realm(realm: dict, auth_url: str, origins: list[str]) -> dict:
+    """Keep the realm frontend URL and SSL mode aligned with sign-in.
+
+    One origin pins frontendUrl, which is what makes Keycloak send the
+    browser to that address. Several origins leave frontendUrl unset so
+    Keycloak follows the host the reverse proxy forwarded, and only
+    those exact origins are registered as redirects.
+    """
+    updated = dict(realm)
+    updated["sslRequired"] = (
+        "external" if origins and all(origin.startswith("https://") for origin in origins) else "none"
+    )
+    attrs = dict(updated.get("attributes") or {})
+    if len(origins) == 1:
+        attrs["frontendUrl"] = auth_url
+    else:
+        attrs.pop("frontendUrl", None)
+    updated["attributes"] = attrs
+    return updated
+
+
+def caddy_auth_hosts(origins: list[str]) -> list[str]:
+    hosts: list[str] = []
+    for origin in origins:
+        host = urllib.parse.urlparse(origin).hostname
+        if host and host not in hosts:
+            hosts.append(host)
+    return hosts
+
+
 def build_realm(values: dict[str, str]) -> dict:
     public = values["PUBLIC_URL"]
     auth = values["KEYCLOAK_URL"]
-    https = public.startswith("https://")
+    origins = sign_in_origins(values) or [public]
+    https = all(origin.startswith("https://") for origin in origins)
     return {
         "realm": "gratis-gis",
         "enabled": True,
@@ -315,7 +393,7 @@ def build_realm(values: dict[str, str]) -> dict:
         "offlineSessionIdleTimeout": 2592000,
         "bruteForceProtected": True,
         "failureFactor": 8,
-        "attributes": {"frontendUrl": auth},
+        "attributes": {"frontendUrl": auth} if len(origins) == 1 else {},
         "clients": [
             {
                 "clientId": "portal-web",
@@ -324,11 +402,13 @@ def build_realm(values: dict[str, str]) -> dict:
                 "publicClient": True,
                 "standardFlowEnabled": True,
                 "directAccessGrantsEnabled": False,
-                "redirectUris": [f"{public}/*"],
-                "webOrigins": [public],
+                "redirectUris": [f"{origin}/*" for origin in origins],
+                "webOrigins": list(origins),
                 "attributes": {
                     "pkce.code.challenge.method": "S256",
-                    "post.logout.redirect.uris": f"{public}/*",
+                    "post.logout.redirect.uris": "##".join(
+                        f"{origin}/*" for origin in origins
+                    ),
                 },
                 "protocolMappers": org_mappers(),
             },
@@ -428,9 +508,10 @@ LAN_SECURITY_HEADERS = """\theader {
 """
 
 
-def caddy_lan(port: str, tls: str) -> str:
+def caddy_lan(port: str, tls: str, hosts: list[str] | None = None) -> str:
     tls_line = "\ttls internal\n" if tls == "internal" else ""
     site = f":{port}"
+    host_line = " ".join(hosts or [])
     return f"""{{
 	auto_https off
 	admin off
@@ -452,17 +533,36 @@ def caddy_lan(port: str, tls: str) -> str:
 	handle @blocked {{
 		respond 404
 	}}
+	# Keycloak answers only for the configured sign-in host. Another
+	# host (a Tailscale name that is not GRATIS_BASE_URL yet) must
+	# not be redirected to the LAN address stored at first boot.
+	@auth_other_host {{
+		path /auth /auth/*
+		not host {host_line if host_line else "localhost"}
+	}}
+	handle @auth_other_host {{
+		respond "Sign-in is not configured for this address. Set GRATIS_BASE_URL to the address you open, then restart. Keep the volumes." 403
+	}}
 	handle /auth/* {{
 		reverse_proxy keycloak:8080
 	}}
 
+	# portal-api's /metrics is scraped on the docker network only.
+	@metrics path /metrics /metrics/*
+	handle @metrics {{
+		respond 404
+	}}
 	handle /api/auth/* {{
 		reverse_proxy portal-web:3000
 	}}
 	handle /api/portal/* {{
 		reverse_proxy portal-web:3000
 	}}
-	handle /api/geocode/* {{
+	# /api/geocode?q= is the address search. A trailing-slash wildcard
+	# does not match that path, and /api/* would send it to portal-api
+	# ("Cannot GET /api/geocode").
+	@geocode path /api/geocode /api/geocode/*
+	handle @geocode {{
 		reverse_proxy portal-web:3000
 	}}
 	handle /api/locale {{
@@ -493,13 +593,22 @@ def caddy_public(portal: str, auth: str, storage: str, email: str) -> str:
 	request_body {{
 		max_size 1GB
 	}}
+	# portal-api's /metrics is scraped on the docker network only.
+	@metrics path /metrics /metrics/*
+	handle @metrics {{
+		respond 404
+	}}
 	handle /api/auth/* {{
 		reverse_proxy portal-web:3000
 	}}
 	handle /api/portal/* {{
 		reverse_proxy portal-web:3000
 	}}
-	handle /api/geocode/* {{
+	# /api/geocode?q= is the address search. A trailing-slash wildcard
+	# does not match that path, and /api/* would send it to portal-api
+	# ("Cannot GET /api/geocode").
+	@geocode path /api/geocode /api/geocode/*
+	handle @geocode {{
 		reverse_proxy portal-web:3000
 	}}
 	handle /api/locale {{
@@ -695,6 +804,9 @@ def assemble(urls: dict[str, str], secret: dict[str, str]) -> dict[str, str]:
         "CHROMIUM_TOKEN": token,
         "CHROMIUM_WS_ENDPOINTS": f"ws://chromium:3000?token={token}",
         "PORTAL_API_URL": "http://portal-api:4000",
+        # Links in notification and feedback email. The code default
+        # is http://localhost:3000.
+        "PORTAL_BASE_URL": public,
         "NEXT_PUBLIC_API_URL": public,
         "NODE_ENV": "production",
         "PORT": "4000",
@@ -826,6 +938,95 @@ def grant_service_account_roles(internal: str, auth: dict[str, str]) -> None:
     print("Keycloak admin service account can list and manage users.", flush=True)
 
 
+def ensure_default_offline_access(internal: str, auth: dict[str, str]) -> None:
+    """Make offline_access part of the realm's default role.
+
+    The realm names `viewer` as its default role, and viewer does not
+    carry offline_access. Every user created after the import then
+    failed field-app and QGIS sign-in with "Offline tokens not allowed
+    for the user or client". A composite on the default role covers
+    every user who holds it. Runs on every start and is safe to repeat.
+    """
+    base = f"{internal}/admin/realms/gratis-gis"
+    status, raw = _request(base, "GET", None, auth)
+    if status != 200:
+        print(f"WARN: could not read the gratis-gis realm (HTTP {status}).")
+        return
+    default_role = (json.loads(raw).get("defaultRole") or {}).get("id")
+    if not default_role:
+        print("WARN: the gratis-gis realm has no default role.")
+        return
+    status, raw = _request(f"{base}/roles-by-id/{default_role}/composites/realm", "GET", None, auth)
+    if status != 200:
+        print(f"WARN: could not read the default role (HTTP {status}).")
+        return
+    if any(role.get("name") == "offline_access" for role in json.loads(raw)):
+        return
+    status, raw = _request(f"{base}/roles/offline_access", "GET", None, auth)
+    if status != 200:
+        print(f"WARN: the offline_access role is missing (HTTP {status}).")
+        return
+    role = json.loads(raw)
+    status, _ = _request(
+        f"{base}/roles-by-id/{default_role}/composites",
+        "POST",
+        json.dumps([{"id": role["id"], "name": role["name"]}]).encode(),
+        {**auth, "Content-Type": "application/json"},
+    )
+    if status not in (200, 204):
+        print(f"WARN: could not add offline_access to the default role (HTTP {status}).")
+        return
+    print("New users can sign in to the field app and QGIS (offline_access).", flush=True)
+
+
+def sync_sign_in_address(internal: str, auth: dict[str, str], values: dict[str, str]) -> None:
+    """Rewrite the imported realm when the public URL changes.
+
+    `--import-realm` does not update a realm that already exists, so a
+    later GRATIS_BASE_URL used to leave Keycloak sending browsers to
+    the first LAN address unless the volumes were deleted.
+    """
+    origins = sign_in_origins(values)
+    if not origins:
+        return
+    headers = {**auth, "Content-Type": "application/json"}
+    status, raw = _request(f"{internal}/admin/realms/gratis-gis", "GET", None, auth)
+    if status != 200:
+        print(f"WARN: could not read the gratis-gis realm (HTTP {status}).")
+        return
+    realm = apply_sign_in_realm(json.loads(raw), values["KEYCLOAK_URL"], origins)
+    status, _ = _request(
+        f"{internal}/admin/realms/gratis-gis",
+        "PUT",
+        json.dumps(realm).encode(),
+        headers,
+    )
+    if status not in (200, 204):
+        print(f"WARN: could not update the realm sign-in address (HTTP {status}).")
+        return
+    status, raw = _request(
+        f"{internal}/admin/realms/gratis-gis/clients?clientId=portal-web",
+        "GET",
+        None,
+        auth,
+    )
+    clients = json.loads(raw) if status == 200 else []
+    if not clients:
+        print(f"WARN: portal-web client is missing (HTTP {status}).")
+        return
+    client = apply_sign_in_client(clients[0], origins)
+    status, _ = _request(
+        f"{internal}/admin/realms/gratis-gis/clients/{client['id']}",
+        "PUT",
+        json.dumps(client).encode(),
+        headers,
+    )
+    if status not in (200, 204):
+        print(f"WARN: could not update portal-web redirect URIs (HTTP {status}).")
+        return
+    print(f"Keycloak sign-in address is {origins[0]}.", flush=True)
+
+
 def patch_keycloak(values: dict[str, str]) -> None:
     internal = values["KEYCLOAK_INTERNAL_URL"].rstrip("/")
     # KC_HTTP_RELATIVE_PATH is /auth. Keycloak 26 serves health on the
@@ -868,6 +1069,8 @@ def patch_keycloak(values: dict[str, str]) -> None:
     token = json.loads(raw).get("access_token") or ""
     auth = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
     grant_service_account_roles(internal, auth)
+    ensure_default_offline_access(internal, auth)
+    sync_sign_in_address(internal, auth, values)
     status, raw = _request(f"{internal}/admin/realms/gratis-gis/users/profile", "GET", None, auth)
     if status != 200:
         print(f"WARN: could not read the user-profile schema (HTTP {status}).")
@@ -926,19 +1129,25 @@ def banner(values: dict[str, str], *, reveal_password: bool) -> str:
         password = (
             f"Password:           {values['INITIAL_USER_PASSWORD']}\n"
             "Keycloak will ask you to change this password.\n"
-            "This password is printed only on the first start. It is not\n"
-            "written to a file. Copy it now, then change it before you\n"
-            "share this log. Do not post it publicly.\n"
+            "This password is printed only on the first start. Copy it\n"
+            "now and change it at first sign-in, before you share this\n"
+            "log. Do not post it publicly.\n"
         )
     else:
         password = (
             "The first-start admin password is not printed again.\n"
-            "Sign in with the password you chose, or delete this app's\n"
-            "volumes to generate a new one.\n"
+            "Sign in with the password you chose. If you forgot it, reset\n"
+            "that user from the host. The steps are in docs/truenas.md\n"
+            "and infra/reset-portal-password.sh. Do not delete this app's\n"
+            "volumes to get a new password. That erases the database and\n"
+            "the uploaded files.\n"
         )
     return (
         "\n========== GratisGIS ==========\n"
         f"Open this address:  {values['PUBLIC_URL']}\n"
+        "Sign-in uses this address. Another name, such as a Tailscale\n"
+        "hostname, needs GRATIS_BASE_URL set to that name. Restart\n"
+        "and keep the volumes. Keycloak is updated in place.\n"
         "User:               admin\n"
         f"{password}"
         "Uploads use:        "
@@ -963,7 +1172,7 @@ def address_help(port: str) -> str:
         "top of the file and use that same port in GRATIS_BASE_URL.\n"
         "\n"
         "The first-start admin password is printed once, only when\n"
-        "startup succeeds on an empty volume. It is not written to a file.\n"
+        "startup succeeds on an empty volume.\n"
         "Do not post it publicly.\n"
         "===============================\n"
     )
@@ -1010,6 +1219,7 @@ def main() -> None:
         return
     values = assemble(urls, secret)
     write_env(env_path, values)
+    write_service_envs(boot, values)
     realm = build_realm(values)
     realm_path = boot / "realm-gratis-gis.json"
     realm_path.write_text(json.dumps(realm, indent=2) + "\n", encoding="utf-8")
@@ -1022,7 +1232,11 @@ def main() -> None:
     else:
         # Caddy always listens on 8080 inside the container. The
         # published host port is GRATIS_HTTP_PORT (mapped to 8080).
-        caddy = caddy_lan("8080", values.get("GRATIS_TLS") or "")
+        caddy = caddy_lan(
+            "8080",
+            values.get("GRATIS_TLS") or "",
+            caddy_auth_hosts(sign_in_origins(values)),
+        )
     caddy_path = boot / "Caddyfile"
     caddy_path.write_text(caddy, encoding="utf-8")
     caddy_path.chmod(0o644)
@@ -1030,10 +1244,9 @@ def main() -> None:
     text = banner(values, reveal_password=first_boot)
     if previous and previous.get("PUBLIC_URL") not in (None, values["PUBLIC_URL"]):
         text += (
-            "WARN: the address changed after the first start.\n"
-            "WARN: If you already signed in, delete this app's volumes\n"
-            "WARN: and start again so Keycloak learns the new address.\n"
-            "WARN: If Keycloak never became healthy, keep the volumes.\n"
+            "WARN: the sign-in address changed after the first start.\n"
+            "WARN: Keycloak is updated in place. Keep the volumes.\n"
+            "WARN: Open the new address and sign in again.\n"
         )
     # Older installs wrote the admin password to LOGIN.txt on this
     # volume, which every container can read. Remove it. The password

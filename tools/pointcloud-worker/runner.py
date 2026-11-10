@@ -424,34 +424,95 @@ def run_with_disk_watchdog(
             raise RuntimeError(f"{cmd[0]} failed: {err}")
 
 
+class JobLost(Exception):
+    """This process no longer holds the analysis row's claim token."""
+
+
+# job id -> claim token for the worker process that claimed it.
+_leases: dict[str, str] = {}
+# Set around a handler so item writes can refuse a stale owner.
+_current_job_id: str | None = None
+
+
+def remember_lease(job_id: str, token: str) -> None:
+    _leases[str(job_id)] = token
+
+
+def forget_lease(job_id: str) -> None:
+    _leases.pop(str(job_id), None)
+
+
+def lease_for(job_id: str) -> str | None:
+    return _leases.get(str(job_id))
+
+
+def present_lease(cur, token: str) -> None:
+    """Show the token to the lease trigger in this transaction."""
+    cur.execute(
+        "SELECT set_config('gratis.claim_token', %s, true)",
+        (token,),
+    )
+
+
+def owns_job(conn, job_id: str, token: str | None = None) -> bool:
+    token = token if token is not None else lease_for(job_id)
+    if not token:
+        return False
+    with conn.cursor() as cur:
+        present_lease(cur, token)
+        cur.execute(
+            """
+            SELECT 1 FROM analysis_job
+            WHERE id = %s
+              AND claim_token = %s::uuid
+              AND state IN ('running', 'cancel_requested')
+            """,
+            (job_id, token),
+        )
+        return cur.fetchone() is not None
+
+
+def require_lease(conn, job_id: str) -> str:
+    token = lease_for(job_id)
+    if not token or not owns_job(conn, job_id, token):
+        raise JobLost()
+    return token
+
+
 def set_progress(conn, job_id: str, pct: int | None) -> None:
     """Progress write, liveness beat, and cancel check in ONE round
-    trip. heartbeat_at is how the API-side reclaim sweep tells a
-    slow-but-alive worker from a dead one, so every progress write
-    doubles as a beat; pct=None beats without touching progress
-    (long tool runs that have nothing new to report). RETURNING
-    state piggybacks the cancel check on the same UPDATE, so
-    honoring cancel costs no extra query: when the API flipped the
-    row to cancel_requested, raise JobCancelled and let the call
-    stack unwind (the subprocess wait loops kill their child on the
-    way out)."""
+    trip. The write matches this worker's claim token and a state
+    this worker still owns. A reclaimed row, or a row a newer claim
+    is running, updates zero rows and raises JobLost so this process
+    does not publish a result for the new owner.
+    """
+    token = lease_for(job_id)
+    if not token:
+        raise JobLost()
     with conn.cursor() as cur:
+        present_lease(cur, token)
         if pct is None:
             cur.execute(
                 "UPDATE analysis_job SET heartbeat_at = now() "
-                "WHERE id = %s RETURNING state",
-                (job_id,),
+                "WHERE id = %s AND claim_token = %s::uuid "
+                "AND state IN ('running', 'cancel_requested') "
+                "RETURNING state",
+                (job_id, token),
             )
         else:
             cur.execute(
                 "UPDATE analysis_job "
                 "SET progress = %s, heartbeat_at = now() "
-                "WHERE id = %s RETURNING state",
-                (pct, job_id),
+                "WHERE id = %s AND claim_token = %s::uuid "
+                "AND state IN ('running', 'cancel_requested') "
+                "RETURNING state",
+                (pct, job_id, token),
             )
         row = cur.fetchone()
     conn.commit()
-    if row is not None and is_cancel_requested(row[0]):
+    if row is None:
+        raise JobLost()
+    if is_cancel_requested(row[0]):
         raise JobCancelled()
 
 
@@ -491,18 +552,28 @@ class TransferBeat:
             try:
                 if self.conn is None or self.conn.closed:
                     self.conn = db_connect()
+                token = lease_for(self.job_id)
+                if not token:
+                    self.cancelled = True
+                    raise JobLost()
                 with self.conn.cursor() as cur:
+                    present_lease(cur, token)
                     cur.execute(
                         "UPDATE analysis_job SET heartbeat_at = now() "
-                        "WHERE id = %s RETURNING state",
-                        (self.job_id,),
+                        "WHERE id = %s AND claim_token = %s::uuid "
+                        "AND state IN ('running', 'cancel_requested') "
+                        "RETURNING state",
+                        (self.job_id, token),
                     )
                     row = cur.fetchone()
                 self.conn.commit()
-                if row is not None and is_cancel_requested(row[0]):
+                if row is None:
+                    self.cancelled = True
+                    raise JobLost()
+                if is_cancel_requested(row[0]):
                     self.cancelled = True
                     raise JobCancelled()
-            except JobCancelled:
+            except (JobCancelled, JobLost):
                 raise
             except Exception:
                 # Liveness is best effort here; a beat that cannot
@@ -634,45 +705,66 @@ def claim_job(conn):
         # heartbeat_at starts at claim time so the reclaim window
         # opens from the moment this worker owns the row, not from
         # its first progress write.
+        token = str(uuid.uuid4())
         cur.execute(
             """
             UPDATE analysis_job
             SET state = 'running', started_at = now(),
-                heartbeat_at = now(), progress = 1
+                heartbeat_at = now(), progress = 1,
+                claim_token = %s
             WHERE id = %s
             """,
-            (job["id"],),
+            (token, job["id"]),
         )
+        job["claim_token"] = token
+        remember_lease(str(job["id"]), token)
     conn.commit()
     return job
 
 
-def mark_cancelled(conn, job_id: str) -> None:
-    """Terminal stamp for a user cancel. Guarded on the states this
-    worker legitimately owns so a concurrent reclaim sweep (which
-    may already have settled the row) is never overwritten."""
+def mark_cancelled(conn, job_id: str, claim_token: str | None = None) -> None:
+    """Terminal stamp for a user cancel. Only the claim that still
+    owns the row may write it, so a newer running owner is left alone."""
+    token = claim_token or lease_for(job_id)
+    if not token:
+        return
     with conn.cursor() as cur:
+        present_lease(cur, token)
         cur.execute(
             """
             UPDATE analysis_job
             SET state = 'cancelled', finished_at = now()
-            WHERE id = %s AND state IN ('running', 'cancel_requested')
+            WHERE id = %s
+              AND claim_token = %s::uuid
+              AND state IN ('running', 'cancel_requested')
             """,
-            (job_id,),
+            (job_id, token),
         )
     conn.commit()
 
 
-def finish_job(conn, job_id: str, error: str | None) -> None:
+def finish_job(conn, job_id: str, error: str | None, claim_token: str | None = None) -> bool:
+    """Terminal stamp for the worker that owns the row.
+
+    The token must match exactly. A NULL argument or a NULL column
+    does not match, so a stale owner cannot finish a row that was
+    reclaimed and claimed again. Returns whether a row changed.
+    """
+    token = claim_token or lease_for(job_id)
+    if not token:
+        return False
     with conn.cursor() as cur:
+        present_lease(cur, token)
         if error is None:
             cur.execute(
                 """
                 UPDATE analysis_job
                 SET state = 'done', progress = 100, finished_at = now()
                 WHERE id = %s
+                  AND claim_token = %s::uuid
+                  AND state IN ('running', 'cancel_requested')
                 """,
-                (job_id,),
+                (job_id, token),
             )
         else:
             cur.execute(
@@ -680,10 +772,14 @@ def finish_job(conn, job_id: str, error: str | None) -> None:
                 UPDATE analysis_job
                 SET state = 'failed', error = %s, finished_at = now()
                 WHERE id = %s
+                  AND claim_token = %s::uuid
+                  AND state IN ('running', 'cancel_requested')
                 """,
-                (error[:2000], job_id),
+                (error[:2000], job_id, token),
             )
+        changed = cur.rowcount
     conn.commit()
+    return changed == 1
 
 
 def item_data(conn, item_id: str) -> dict:
@@ -705,15 +801,46 @@ def merge_item_data(conn, item_id: str, patch: dict) -> None:
     # the worker computed (or snapshotted at job start) silently
     # erases those concurrent changes. The jsonb || merge only
     # touches the keys the worker owns, so everything else survives.
+    #
+    # The claim check and the item write are one statement. A prior
+    # SELECT then a later UPDATE lets a reclaim land in between and
+    # the stale worker still publish. FOR UPDATE on the job row makes
+    # the reclaim wait, then the EXISTS sees the token that committed.
+    job_id = _current_job_id
+    token = lease_for(job_id) if job_id is not None else None
+    if job_id is not None and not token:
+        raise JobLost()
     with conn.cursor() as cur:
-        cur.execute(
-            """
-            UPDATE item
-            SET data_json = data_json || %s::jsonb, updated_at = now()
-            WHERE id = %s
-            """,
-            (json.dumps(patch), item_id),
-        )
+        if job_id is not None:
+            present_lease(cur, token)
+            cur.execute(
+                """
+                WITH held AS (
+                  SELECT id FROM analysis_job
+                  WHERE id = %s
+                    AND claim_token = %s::uuid
+                    AND state IN ('running', 'cancel_requested')
+                  FOR UPDATE
+                )
+                UPDATE item
+                SET data_json = data_json || %s::jsonb, updated_at = now()
+                WHERE id = %s
+                  AND EXISTS (SELECT 1 FROM held)
+                """,
+                (job_id, token, json.dumps(patch), item_id),
+            )
+            if cur.rowcount != 1:
+                conn.rollback()
+                raise JobLost()
+        else:
+            cur.execute(
+                """
+                UPDATE item
+                SET data_json = data_json || %s::jsonb, updated_at = now()
+                WHERE id = %s
+                """,
+                (json.dumps(patch), item_id),
+            )
     conn.commit()
 
 
@@ -733,6 +860,40 @@ RASTER_TARGET_KINDS = {
     # #186: point_cloud stub with the same dedicated-target husk stamp.
     "colorize",
 }
+
+
+TILE_LAYER_KEY_PREFIX = "item-tile-layer/"
+POINT_CLOUD_KEY_PREFIX = "item-point-cloud/"
+
+
+def pinned_source_key(data: dict, prefix: str, *fields: str) -> str | None:
+    """The first non-empty key among `fields`, refused unless it sits
+    under `prefix`.
+
+    Source item data is owner-writable through the generic items PATCH,
+    and this worker downloads with service credentials that can read
+    the whole bucket. Without the pin an owner could point a source at
+    another org's raster, an analysis artifact, or a feedback
+    screenshot, run an analysis over it, and get the derived result
+    written into an item they own. The serve path pins the same way.
+    Returns None when no field is set, so callers keep their own
+    "has no file" message.
+    """
+    for field in fields:
+        key = data.get(field)
+        if not key:
+            continue
+        if (
+            not isinstance(key, str)
+            or not key.startswith(prefix)
+            or any(seg in ("", ".", "..") for seg in key[len(prefix):].split("/"))
+        ):
+            raise RuntimeError(
+                "This layer's file is not stored where this kind of layer "
+                "keeps its files, so it was not read."
+            )
+        return key
+    return None
 
 
 def stamp_target_failed(conn, job, error: str) -> None:
@@ -760,6 +921,34 @@ def stamp_target_failed(conn, job, error: str) -> None:
         )
     except Exception:
         conn.rollback()
+
+
+def settle_cancelled(conn, job) -> None:
+    """Stamp the husk item, then mark the job cancelled.
+
+    In that order: merge_item_data only writes while the job row is
+    still running or cancel_requested under this claim. Marking the job
+    first made every stamp lose its lease and silently roll back, so a
+    cancelled raster job left its pre-created item with no state and
+    no explanation.
+    """
+    stamp_target_failed(
+        conn,
+        job,
+        "This analysis was cancelled before it finished.",
+    )
+    mark_cancelled(conn, job["id"], job.get("claim_token"))
+
+
+def settle_failed(conn, job, error: str) -> None:
+    """Stamp the husk item, then mark the job failed. Order as above.
+
+    Raster jobs pre-create their target tile_layer item; without the
+    stamp a failure leaves that item as a blank husk with no state and
+    no explanation.
+    """
+    stamp_target_failed(conn, job, error)
+    finish_job(conn, job["id"], error, job.get("claim_token"))
 
 
 def wgs84_bbox(tif: Path) -> list[float] | None:
@@ -1041,7 +1230,7 @@ def do_hillshade(conn, s3, job) -> None:
         raise RuntimeError("Resolution must be between 0.25 and 50 meters.")
 
     source = item_data(conn, job["source_item_id"])
-    storage_key = source.get("storageKey")
+    storage_key = pinned_source_key(source, POINT_CLOUD_KEY_PREFIX, "storageKey")
     if not storage_key:
         raise RuntimeError("Source point cloud has no uploaded file.")
 
@@ -1176,7 +1365,7 @@ def do_elevation(conn, s3, job) -> None:
         raise RuntimeError("Resolution must be between 0.25 and 50 meters.")
 
     source = item_data(conn, job["source_item_id"])
-    storage_key = source.get("storageKey")
+    storage_key = pinned_source_key(source, POINT_CLOUD_KEY_PREFIX, "storageKey")
     if not storage_key:
         raise RuntimeError("Source point cloud has no uploaded file.")
 
@@ -1315,7 +1504,9 @@ def do_viewshed(conn, s3, job) -> None:
         )
 
     source = item_data(conn, job["source_item_id"])
-    storage_key = source.get("cogStorageKey") or source.get("storageKey")
+    storage_key = pinned_source_key(
+        source, TILE_LAYER_KEY_PREFIX, "cogStorageKey", "storageKey"
+    )
     if not storage_key:
         raise RuntimeError("The elevation layer has no file.")
 
@@ -1558,7 +1749,9 @@ def do_contours(conn, s3, job):
         )
 
     source = item_data(conn, job["source_item_id"])
-    storage_key = source.get("cogStorageKey") or source.get("storageKey")
+    storage_key = pinned_source_key(
+        source, TILE_LAYER_KEY_PREFIX, "cogStorageKey", "storageKey"
+    )
     if not storage_key:
         raise RuntimeError("The elevation layer has no file.")
 
@@ -1646,15 +1839,22 @@ def do_contours(conn, s3, job):
         # Conditional on 'running' so a cancel that lands between
         # our last beat and this handoff wins: without the guard the
         # flip would overwrite cancel_requested and the import would
-        # run a job the user already stopped.
+        # run a job the user already stopped. The token is cleared
+        # here because the API bridge owns the row from 'ingest' on
+        # and does not present one.
         with conn.cursor() as cur:
+            token = job.get("claim_token")
+            if token:
+                present_lease(cur, token)
             cur.execute(
                 """
                 UPDATE analysis_job
-                SET state = 'ingest', params = %s, progress = 80
+                SET state = 'ingest', params = %s, progress = 80,
+                    claim_token = NULL
                 WHERE id = %s AND state = 'running'
+                  AND claim_token = %s::uuid
                 """,
-                (json.dumps(new_params), job["id"]),
+                (json.dumps(new_params), job["id"], token),
             )
             flipped = cur.rowcount
         conn.commit()
@@ -1733,7 +1933,9 @@ def do_zonal_stats(conn, s3, job):
         raise RuntimeError("The zone features were not staged for this job.")
 
     source = item_data(conn, job["source_item_id"])
-    storage_key = source.get("cogStorageKey") or source.get("storageKey")
+    storage_key = pinned_source_key(
+        source, TILE_LAYER_KEY_PREFIX, "cogStorageKey", "storageKey"
+    )
     if not storage_key:
         raise RuntimeError("The raster layer has no file.")
 
@@ -1877,13 +2079,18 @@ def do_zonal_stats(conn, s3, job):
         new_params["artifactKey"] = key
         new_params["featureCount"] = len(out_features)
         with conn.cursor() as cur:
+            token = job.get("claim_token")
+            if token:
+                present_lease(cur, token)
             cur.execute(
                 """
                 UPDATE analysis_job
-                SET state = 'ingest', params = %s, progress = 80
+                SET state = 'ingest', params = %s, progress = 80,
+                    claim_token = NULL
                 WHERE id = %s AND state = 'running'
+                  AND claim_token = %s::uuid
                 """,
-                (json.dumps(new_params), job["id"]),
+                (json.dumps(new_params), job["id"], token),
             )
             flipped = cur.rowcount
         conn.commit()
@@ -1911,7 +2118,9 @@ def do_steepness(conn, s3, job) -> None:
     cog->pmtiles pyramid path. Nodata stays transparent.
     """
     source = item_data(conn, job["source_item_id"])
-    storage_key = source.get("cogStorageKey") or source.get("storageKey")
+    storage_key = pinned_source_key(
+        source, TILE_LAYER_KEY_PREFIX, "cogStorageKey", "storageKey"
+    )
     if not storage_key:
         raise RuntimeError("The elevation layer has no file.")
 
@@ -2052,7 +2261,7 @@ def do_heightmap(conn, s3, job) -> None:
         raise RuntimeError("Resolution must be between 0.25 and 50 meters.")
 
     source = item_data(conn, job["source_item_id"])
-    storage_key = source.get("storageKey")
+    storage_key = pinned_source_key(source, POINT_CLOUD_KEY_PREFIX, "storageKey")
     if not storage_key:
         raise RuntimeError("Source point cloud has no uploaded file.")
 
@@ -2253,7 +2462,7 @@ def do_sam_embed(conn, s3, job) -> None:
         raise RuntimeError("Zoom in further to use the outline tool.")
 
     source = item_data(conn, job["source_item_id"])
-    key = source.get("cogStorageKey")
+    key = pinned_source_key(source, TILE_LAYER_KEY_PREFIX, "cogStorageKey")
     if not key:
         raise RuntimeError("This imagery layer has no image file.")
 
@@ -2440,7 +2649,7 @@ def do_colorize(conn, s3, job) -> None:
         raise RuntimeError("Colorize job is missing its target item.")
 
     source = item_data(conn, job["source_item_id"])
-    storage_key = source.get("storageKey")
+    storage_key = pinned_source_key(source, POINT_CLOUD_KEY_PREFIX, "storageKey")
     if not storage_key:
         raise RuntimeError("Source point cloud has no uploaded file.")
 
@@ -2450,7 +2659,9 @@ def do_colorize(conn, s3, job) -> None:
             "Elevation layers have no color to paint with. "
             "Pick an aerial or satellite imagery layer."
         )
-    raster_key = raster.get("cogStorageKey") or raster.get("storageKey")
+    raster_key = pinned_source_key(
+        raster, TILE_LAYER_KEY_PREFIX, "cogStorageKey", "storageKey"
+    )
     if not raster_key:
         raise RuntimeError("The imagery layer has no image file yet.")
 
@@ -3314,6 +3525,8 @@ def main() -> None:
                 time.sleep(POLL_SECONDS)
                 continue
             kind = job["kind"]
+            global _current_job_id
+            _current_job_id = str(job["id"])
             log(f"job {job['id']}: {kind}")
             handler = HANDLERS.get(kind)
             if handler is None:
@@ -3321,6 +3534,7 @@ def main() -> None:
                     conn,
                     job["id"],
                     f"This worker does not understand job kind '{kind}'.",
+                    job.get("claim_token"),
                 )
                 continue
             try:
@@ -3331,8 +3545,11 @@ def main() -> None:
                     # API-side bridge). Do not mark it done.
                     log(f"job {job['id']}: handed off")
                 else:
-                    finish_job(conn, job["id"], None)
+                    finish_job(conn, job["id"], None, job.get("claim_token"))
                     log(f"job {job['id']}: done")
+            except JobLost:
+                conn.rollback()
+                log(f"job {job['id']}: lost the claim; not publishing a result")
             except JobCancelled:
                 # Before the generic handler on purpose (it IS an
                 # Exception): a user cancel is a clean stop, not a
@@ -3345,20 +3562,14 @@ def main() -> None:
                 # handler, same as its failure path).
                 conn.rollback()
                 log(f"job {job['id']}: cancelled by user")
-                mark_cancelled(conn, job["id"])
-                stamp_target_failed(
-                    conn,
-                    job,
-                    "This analysis was cancelled before it finished.",
-                )
+                settle_cancelled(conn, job)
             except Exception as err:
                 conn.rollback()
                 log(f"job {job['id']}: FAILED\n{traceback.format_exc()}")
-                finish_job(conn, job["id"], str(err))
-                # Raster jobs pre-create their target tile_layer item;
-                # without this stamp a failure leaves that item as a
-                # blank husk with no state and no explanation.
-                stamp_target_failed(conn, job, str(err))
+                settle_failed(conn, job, str(err))
+            finally:
+                _current_job_id = None
+                forget_lease(str(job["id"]))
         except psycopg2.Error:
             log("db connection lost; reconnecting")
             time.sleep(5)

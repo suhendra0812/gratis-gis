@@ -120,6 +120,192 @@ jobs:
       - name: Check SPDX headers
         run: bash scripts/check-spdx.sh --self-test
 
+  dependabot-automerge-gate:
+    name: Dependabot auto-merge gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # The auto-merge workflow does not check out the pull request, so
+    # this job is what actually runs the gate functions. It extracts
+    # them from the workflow file and feeds fixture JSON. It does not
+    # call the merge API.
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Gate logic
+        run: bash scripts/dependabot-automerge-gate.test.sh
+
+  pointcloud-units:
+    name: Point-cloud worker unit tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # boto3 and psycopg2 are stubbed by the test file. numpy is not:
+    # compute_zonal_stats_arrays imports it, and that test runs before
+    # the lease assertions. PDAL and GDAL are not required here.
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install unit-test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3-venv
+          python3 -m venv /tmp/pc-units
+          /tmp/pc-units/bin/pip install -r tools/pointcloud-worker/requirements-unit.txt
+
+      - name: runner unit tests
+        run: /tmp/pc-units/bin/python tools/pointcloud-worker/test_runner_units.py
+
+  observation-guards:
+    name: Append idempotency and analysis lease
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    services:
+      postgres:
+        image: postgis/postgis:17-3.5
+        env:
+          POSTGRES_USER: gratisgis
+          POSTGRES_PASSWORD: reviewonly
+          POSTGRES_DB: gratisgis
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U gratisgis -d gratisgis"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install a Postgres client
+        run: sudo apt-get update && sudo apt-get install -y postgresql-client
+
+      - name: Guard SQL
+        env:
+          PGHOST: localhost
+          PGUSER: gratisgis
+          PGDATABASE: gratisgis
+          PGPASSWORD: reviewonly
+        run: |
+          bash infra/observation-append-guard.pg.test.sh
+          bash infra/analysis-lease-guard.pg.test.sh
+
+  recovery-scripts:
+    name: Backup and password recovery scripts
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # Bash, Python and Node only. The scripts are exercised with a fake
+    # docker on PATH. Nothing here contacts a registry or a volume.
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Recovery helpers
+        run: |
+          python3 -m unittest infra/test_nas_init.py
+          bash infra/script-net-firewall.test.sh
+          python3 -m unittest infra/test_prod_config.py
+          bash scripts/backup-help.test.sh
+          bash scripts/reset-portal-password.test.sh
+          bash scripts/restore-maintenance.test.sh
+          bash scripts/script-net-firewall.test.sh
+
+      # These had no caller in any workflow, so they could not fail.
+      - name: Infra script tests
+        run: |
+          bash infra/recovery/recovery.test.sh
+          sh infra/postgres/check-major.spec.sh
+          bash scripts/check-prisma-drift.test.sh
+          python3 -m unittest infra/test_dev_compose_bind.py
+          node infra/origin-preflight.test.mjs
+          node infra/field-bundle/read-recovery.test.mjs
+          bash infra/publish-gate.test.sh
+
+  recovery-integration:
+    name: Keycloak reset and maintenance gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Schema gate on Postgres
+        run: |
+          docker run -d --name gg-pg-ci \
+            -e POSTGRES_PASSWORD=reviewonly \
+            -e POSTGRES_USER=gratisgis \
+            -e POSTGRES_DB=gratisgis \
+            postgis/postgis:17-3.5
+          # The image runs its init scripts on a temporary server that
+          # listens on the socket only, then restarts. pg_isready on the
+          # socket can catch that temporary server, and a test command
+          # then dies with it (exit 137). Wait for the init to finish and
+          # for the real server on TCP.
+          for _ in $(seq 1 60); do
+            if docker logs gg-pg-ci 2>&1 | grep -q 'PostgreSQL init process complete' \
+              && docker exec gg-pg-ci pg_isready -h 127.0.0.1 -U gratisgis; then
+              break
+            fi
+            sleep 2
+          done
+          docker exec gg-pg-ci pg_isready -h 127.0.0.1 -U gratisgis
+          PG_DOCKER=gg-pg-ci bash infra/restore-maintenance.pg.test.sh
+          docker rm -f gg-pg-ci
+
+      - name: Isolated Keycloak password reset
+        run: bash infra/reset-portal-password.kc.test.sh
+
+  # Playwright on every pull request. prod-smoke only runs against the
+  # demo once a day, so nothing exercised a browser before merge. This
+  # runs portal-web under `next dev` with the UX fixture on, no API
+  # behind it, and the journeys in e2e/tests/ux-journeys.spec.ts.
+  ux-journeys:
+    name: Playwright UX journeys
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+
+      - name: Set up Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Build portal-web's workspace dependencies
+        run: pnpm --filter "@gratis-gis/portal-web^..." run build
+
+      - name: Install Playwright chromium
+        run: pnpm -C e2e exec playwright install --with-deps chromium
+
+      - name: Start portal-web with the UX fixture
+        env:
+          GRATIS_UX_FIXTURE: "1"
+          NEXTAUTH_URL: http://localhost:3000
+          NEXTAUTH_SECRET: ci-only-not-a-secret
+        run: |
+          (cd apps/portal-web && nohup pnpm dev > "$RUNNER_TEMP/next-dev.log" 2>&1 &)
+          for _ in $(seq 1 90); do
+            if curl -fsS -o /dev/null --max-time 60 http://localhost:3000/dev/ux-fixture; then
+              exit 0
+            fi
+            sleep 2
+          done
+          tail -n 80 "$RUNNER_TEMP/next-dev.log"
+          exit 1
+
+      - name: Run the journeys
+        run: pnpm -C e2e exec playwright test tests/ux-journeys.spec.ts
+
+      - name: Upload traces on failure
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ux-journeys-report
+          path: e2e/test-results/
+          retention-days: 7
+
   dev-smoke:
     name: Fresh-clone pnpm dev
     runs-on: ubuntu-latest
@@ -147,7 +333,11 @@ jobs:
     # dies with 0A000 "extension pg_partman is not available" without
     # it. verify gets away with the stock image only because it never
     # applies the migration chain. The real image is built from
-    # infra/postgres, so this job uses that, below.
+    # infra/postgres, so this job uses that, below. Keep this image.
+    # The syncVersion spec's monthly partitions are a substitute for
+    # machines without pg_partman, not proof this migration ran.
+    # Asserting the partition invariant after migrate is still a
+    # separate queued job.
 
     env:
       # Straight from .env.example, so the quickstart's own
@@ -185,6 +375,7 @@ jobs:
         # Same compose file and same service definition, one service.
         # That gets the pg_partman image, the pg_partman_bgw preload
         # and init-db.sql, which is what the migration chain needs.
+        # Do not point this step at stock postgis/postgis.
         run: docker compose -f infra/docker-compose.yml up -d --wait postgres
 
       - name: Migrate and generate the client
@@ -210,6 +401,22 @@ jobs:
         run: |
           pnpm --filter @gratis-gis/portal-api db:migrate:deploy
           pnpm --filter @gratis-gis/portal-api db:generate
+          # Real pg_partman on the project image. The Jest spec's
+          # monthly partitions are a substitute and do not prove this.
+          bash infra/assert-partition-invariant.sh
+
+      - name: Prisma schema matches the migrations
+        # Migrations are hand-lifted from `prisma migrate diff`, so a
+        # schema that drifts from them invites a migration that renames
+        # foreign keys, drops defaults or drops foreign keys. The shadow
+        # database lives on the same pg_partman image the migrations
+        # need. Known differences are listed in
+        # apps/portal-api/prisma/drift-baseline.sql.
+        run: |
+          docker compose -f infra/docker-compose.yml exec -T postgres \
+            createdb -U gratisgis gratisgis_shadow
+          SHADOW_DATABASE_URL=postgresql://gratisgis:devpassword@localhost:5432/gratisgis_shadow \
+            bash scripts/check-prisma-drift.sh
 
       # db:seed is the quickstart's next line and is deliberately
       # skipped. It loads demo data; it is not needed for the servers
@@ -396,6 +603,13 @@ jobs:
 
       - name: Validate NAS compose
         run: ./infra/check-nas-compose.sh
+
+      # Every variable the apps read must reach them through Compose,
+      # or be listed in infra/env-passthrough.allow with a reason.
+      - name: Env passthrough
+        run: |
+          python3 infra/check-env-passthrough.py --self-test
+          python3 infra/check-env-passthrough.py
 
   # Boots the pasted file against the published edge images. Catches
   # a Keycloak mount that never becomes healthy and a Silo process

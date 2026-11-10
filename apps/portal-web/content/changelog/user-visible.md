@@ -29,6 +29,28 @@ A date or time question in a form can start with the current date and time alrea
 
 ## 2026-11-06 - Edit and delete features in the field app
 In the field app, tap a feature to zoom to, edit, copy or delete it. Drag its shape on the map, place a point by hand or by GPS, and add, edit or delete its related records without leaving the form. It all works offline and syncs later. The compass can turn the map with the way you face.
+## [1.3.0] - 2026-11-09
+
+## 2026-11-09 - KML and KMZ keep all their fields
+Imported KML and KMZ files now keep every attribute stored on each placemark, not only Name and Description. Numbers and yes/no values keep their types.
+
+## 2026-11-09 - Large imports finish
+Big shapefiles and geodatabases no longer stop partway through. Files with date columns import with their dates instead of failing every row.
+
+## 2026-11-09 - Layers with many tables save
+A layer with dozens of related tables now saves. Before, a large schema was refused as too big.
+
+## 2026-11-09 - Vector tiles: TileJSON, labels and per-layer settings
+Each layer publishes a TileJSON document, carries a label layer, and has its own tile settings for fields, zoom range, cache age and feature cap. Tiles are also cached on disk, so a restart no longer starts cold.
+
+## 2026-11-08 - Address search works on a home NAS; GPS still needs HTTPS
+Finding an address works on the plain HTTP address. The browser was asking a path the proxy did not send to the portal. My location is GPS: browsers block it on http://192.168.x.x. The button explains that and points at Tailscale HTTPS. It does not turn GPS on for plain HTTP.
+
+## 2026-11-08 - Tailscale sign-in stays on the name you configure
+Signing in from a Tailscale name no longer sends the browser to the LAN address. Set GRATIS_BASE_URL to that name and restart. Keep the volumes. Until you do, the sign-in page shows the line to add instead of leaving the name you opened.
+
+## 2026-11-08 - Shapefile, KMZ, GeoPackage, and GeoJSON load into a data layer
+A zipped shapefile, KMZ, GeoPackage, or GeoJSON added to a data layer now keeps its features, not just an empty schema. Dashboards can use that layer after the import finishes. Updating the portal images is enough. You do not reset volumes.
 
 ## 2026-11-06 - Pick a location on a map, and sign forms
 Location questions in forms now show a small map: tap it or drag the pin to report a spot you are not standing on. Signature questions show a pad to sign with a finger, stylus, or mouse; the signature is saved as an image with the response.

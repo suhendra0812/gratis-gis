@@ -22,6 +22,7 @@ import { ItemsService } from '../items/items.service.js';
 import { SharingService } from '../items/sharing.service.js';
 import { PrismaService } from '../prisma/prisma.service.js';
 import type { AuthUser } from '../auth/auth-sync.service.js';
+import { scheduledRunBlockedReason } from './script-provenance.js';
 
 /**
  * Queue and history for `script` item runs (#221).
@@ -153,7 +154,9 @@ export class ScriptsService {
    * somebody, and the owner is the person who took responsibility for
    * the item. Notably this is NOT whoever last edited the schedule,
    * which would let an editor quietly arrange for code to run with the
-   * owner's permissions on a timer.
+   * owner's permissions on a timer. The same goes for the code: a run
+   * is refused when the source was last changed by someone other than
+   * the owner (see script-provenance.ts).
    *
    * Returns the run id, or null when nothing was queued.
    */
@@ -170,12 +173,13 @@ export class ScriptsService {
       return null;
     }
 
-    // The owner must still be a live user. An owner who has been
-    // deactivated should not keep executing code every night, and
+    // The owner must still be a live, enabled user. An owner who has
+    // been disabled or deleted should not keep executing code every
+    // night (the schedule resumes if the account is enabled again), and
     // failing closed here is the difference between a stale schedule
     // and a standing grant that outlives the account.
     const owner = await this.prisma.user.findFirst({
-      where: { id: item.ownerId, deletedAt: null },
+      where: { id: item.ownerId, deletedAt: null, disabledAt: null },
       select: { id: true },
     });
     if (!owner) {
@@ -183,6 +187,15 @@ export class ScriptsService {
         item,
         'The person who owns this script no longer has an active account, so the scheduled run did not start.',
       );
+      return null;
+    }
+
+    // The owner's key runs only the owner's code. Without this an
+    // editor could rewrite the source and have it run on the next tick
+    // with the owner's authority.
+    const blocked = scheduledRunBlockedReason(item);
+    if (blocked) {
+      await this.recordSkip(item, blocked);
       return null;
     }
 
@@ -279,23 +292,41 @@ export class ScriptsService {
     if (!row) throw new NotFoundException('Run not found.');
     await this.assertRunnable(user, row.scriptId);
 
-    if (row.state === 'queued') {
-      await this.prisma.scriptRun.update({
+    // Every write is conditional on the state it was decided from. The
+    // claimer moves rows on its own schedule, so an unconditional write
+    // here could relabel a run that just finished as cancel_requested
+    // (which the stale sweep later turns into "cancelled", hiding a
+    // successful run), or mark a just-claimed run cancelled while it
+    // executes to completion. When the row moved under us, re-read and
+    // decide again; two passes cover queued -> running -> finished.
+    let state = row.state;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      if (state === 'queued') {
+        const res = await this.prisma.scriptRun.updateMany({
+          where: { id: row.id, state: 'queued' },
+          data: { state: 'cancelled', finishedAt: new Date() },
+        });
+        if (res.count === 1) return { state: 'cancelled' };
+      } else if (state === 'running') {
+        const res = await this.prisma.scriptRun.updateMany({
+          where: { id: row.id, state: 'running' },
+          data: { state: 'cancel_requested' },
+        });
+        if (res.count === 1) return { state: 'cancel_requested' };
+      } else {
+        // Already finished or already cancelling. Not an error: the
+        // button and the run's own completion race constantly, and a
+        // 400 here would be noise.
+        return { state };
+      }
+      const fresh = await this.prisma.scriptRun.findUnique({
         where: { id: row.id },
-        data: { state: 'cancelled', finishedAt: new Date() },
+        select: { state: true },
       });
-      return { state: 'cancelled' };
+      if (!fresh) throw new NotFoundException('Run not found.');
+      state = fresh.state;
     }
-    if (row.state === 'running') {
-      await this.prisma.scriptRun.update({
-        where: { id: row.id },
-        data: { state: 'cancel_requested' },
-      });
-      return { state: 'cancel_requested' };
-    }
-    // Already finished. Not an error: the button and the run's own
-    // completion race constantly, and a 400 here would be noise.
-    return { state: row.state };
+    return { state };
   }
 }
 

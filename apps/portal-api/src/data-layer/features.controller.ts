@@ -64,7 +64,11 @@ import type { GeoJsonGeometry } from '@gratis-gis/engine';
 import { CurrentUser } from '../auth/current-user.decorator.js';
 import type { AuthUser } from '../auth/auth-sync.service.js';
 import { ItemsService } from '../items/items.service.js';
-import { SharingService } from '../items/sharing.service.js';
+import {
+  SharingService,
+  featureScopeFilter,
+  type FeatureScope,
+} from '../items/sharing.service.js';
 import { EditorPolicyService } from '../items/editor-policy.service.js';
 import { PrismaService } from '../prisma/prisma.service.js';
 import {
@@ -78,10 +82,22 @@ import {
   csvHeaderRow,
   type CsvExportOptions,
 } from './csv-export.js';
-import { parseDeltaLimit, parseSinceParam } from './layer-delta.js';
-import { parsePagingParams } from './feature-paging.js';
+import { parseDeltaAfterParam, parseDeltaLimit, parseSinceParam } from './layer-delta.js';
+import { parsePagingParams, unpagedFeatureReadAllowed } from './feature-paging.js';
 import { writeGeoParquetExport } from './geoparquet-export.js';
 import { DuckDbUnavailableError } from '../ingest/parquet-reader.js';
+import { linkedDataCollection } from './data-collection-link.js';
+import {
+  buildTileJson,
+  declaredTileFields,
+  layerAttribution,
+  parseIncludeParam,
+  planTile,
+  readTileSettings,
+  storedLayerBounds,
+  tileCacheControl,
+  tileJsonBase,
+} from './tile-settings.js';
 
 class AppendFeatureDto {
   @IsOptional() @IsString() globalId?: string;
@@ -307,10 +323,19 @@ export class DataLayerFeaturesController {
       res.json(await this.v3.listFeatures(itemId, layerId, fullOpts));
       return;
     }
+    if (!unpagedFeatureReadAllowed()) {
+      throw new BadRequestException(
+        'Unpaged feature reads are disabled on this install. Pass limit and cursor, or download the csv or geoparquet export. Nothing was truncated.',
+      );
+    }
     // Whole-collection read. Stream it rather than buffering up to
     // 100k features and serialising them in one synchronous pass,
     // which could OOM a replica (anonymously, on the public mirror).
     // Same opts the CSV export already streams over.
+    res.setHeader(
+      'X-Gratis-Export',
+      `/api/items/${itemId}/layers/${layerId}/csv`,
+    );
     const iterOpts: Parameters<typeof this.v3.iterateFeatures>[2] = {
       ...opts,
     };
@@ -538,6 +563,7 @@ export class DataLayerFeaturesController {
     @Query('clip') clip?: string,
     @Query('where') whereRaw?: string,
     @Query('via') viaRaw?: string,
+    @Query('include') includeRaw?: string,
   ) {
     const { geoLimit, rowScope, isTable, layer } = await this.assertV3Layer(
       user,
@@ -567,6 +593,9 @@ export class DataLayerFeaturesController {
       fields?: Array<{ name: string; type?: string }>;
       where?: MapLayerFilter;
       via?: EngineVia;
+      maxFeaturesPerTile?: number;
+      zoomRange?: { min: number; max: number };
+      labelPoints?: boolean;
     } = {};
     if (isTable) opts.isTable = true;
     if (geoLimit) opts.geoLimit = geoLimit;
@@ -618,17 +647,24 @@ export class DataLayerFeaturesController {
     // at render time. Without this every {{field}} evaluates to
     // null. Filter to non-system field names; identifier safety is
     // enforced again in the engine.
-    if (layer && Array.isArray(layer.fields)) {
-      opts.fields = layer.fields
-        .filter(
-          (f): f is { name: string; type?: string } =>
-            typeof f.name === 'string' && f.name.length > 0,
-        )
-        .map((f) => ({
-          name: f.name,
-          ...(typeof f.type === 'string' ? { type: f.type } : {}),
-        }));
+    //
+    // The layer's tile settings then narrow that list (keeping the
+    // fields this map says it reads, via `include`), cap the feature
+    // count and bound the zoom range. See data-layer/tile-settings.ts.
+    const tileSettings = readTileSettings(layer.tiles);
+    const plan = planTile({
+      declared: declaredTileFields(layer.fields),
+      settings: tileSettings,
+      include: parseIncludeParam(includeRaw),
+      geometryType: layer.geometryType,
+    });
+    if (Array.isArray(layer.fields)) opts.fields = plan.fields;
+    if (plan.maxFeaturesPerTile !== undefined) {
+      opts.maxFeaturesPerTile = plan.maxFeaturesPerTile;
     }
+    if (plan.zoomRange) opts.zoomRange = plan.zoomRange;
+    if (plan.labelPoints) opts.labelPoints = true;
+    const cacheControl = tileCacheControl(tileSettings, 'private');
     let mvt: Buffer;
     let etag: string;
     try {
@@ -651,7 +687,7 @@ export class DataLayerFeaturesController {
     // its cached buffer with no transfer.
     if (matchesIfNoneMatch(req.headers['if-none-match'], etag)) {
       res.setHeader('ETag', etag);
-      res.setHeader('Cache-Control', 'private, max-age=60');
+      res.setHeader('Cache-Control', cacheControl);
       res.status(304).end();
       return;
     }
@@ -664,8 +700,66 @@ export class DataLayerFeaturesController {
     // so we don't want stale tiles for long: a minute is the right
     // balance for an authoring tool. The ETag above lets the
     // browser revalidate cheaply when the TTL elapses.
-    res.setHeader('Cache-Control', 'private, max-age=60');
+    //
+    // The layer's tile settings may change the max-age, never the
+    // `private`: these bytes depend on the viewer's share geo limit and
+    // row scope, so no shared cache may keep them.
+    res.setHeader('Cache-Control', cacheControl);
     res.end(mvt);
+  }
+
+  /**
+   * TileJSON 3.0.0 for this layer's vector tiles.
+   *
+   * Endpoint shape: GET /items/:id/layers/:layerId/tilejson.json
+   *
+   * Same gate as the tile route it describes (assertV3Layer in 'read'
+   * mode), so a viewer who cannot fetch a tile cannot read its field
+   * list or extent either. The tile URL is built from PORTAL_BASE_URL,
+   * never from the request's Host, and points at the API route, which
+   * takes a bearer token (desktop GIS and scripts; the browser map does
+   * not need TileJSON). `bounds` is the stored layer extent, and is
+   * left out when a geo limit or row scope narrows what this viewer
+   * sees, because the whole layer's extent is then more than the
+   * viewer may know.
+   */
+  @Get('tilejson.json')
+  async tileJson(
+    @Res() res: Response,
+    @CurrentUser() user: AuthUser,
+    @Param('id') itemId: string,
+    @Param('layerId') layerId: string,
+  ) {
+    const { geoLimit, rowScope, isTable, layer, item } =
+      await this.assertV3Layer(user, itemId, layerId, 'read');
+    if (isTable) {
+      throw new NotFoundException('A table sublayer has no tiles.');
+    }
+    const settings = readTileSettings(layer.tiles);
+    const plan = planTile({
+      declared: declaredTileFields(layer.fields),
+      settings,
+      geometryType: layer.geometryType,
+    });
+    const layers = (item.data as { layers?: unknown[] } | null)?.layers ?? [];
+    const label = typeof layer.label === 'string' ? layer.label : layer.id;
+    const narrowed = Boolean(geoLimit) || rowScope === 'own';
+    const doc = buildTileJson({
+      name: layers.length > 1 ? `${item.title} / ${label}` : item.title,
+      description: item.description,
+      tileUrl:
+        `${tileJsonBase()}/api/items/${encodeURIComponent(itemId)}` +
+        `/layers/${encodeURIComponent(layerId)}/tile/{z}/{x}/{y}.mvt`,
+      settings,
+      fields: plan.fields,
+      bounds: narrowed
+        ? null
+        : storedLayerBounds(layer.bbox, (item as { bbox?: unknown }).bbox),
+      attribution: layerAttribution(layer, item.data),
+      labelPoints: plan.labelPoints === true,
+    });
+    res.setHeader('Cache-Control', 'private, no-cache');
+    res.json(doc);
   }
 
   /**
@@ -1115,11 +1209,14 @@ export class DataLayerFeaturesController {
    *
    * `GET .../delta?since=N` returns every observation stamped with
    * syncVersion > N under the caller's share geo limit and row scope,
-   * including delete tombstones. The response `syncVersion` is the
-   * layer's current counter; store it and pass it as `since` next time.
-   * Cap with `limit` (default 1000, max 10000); `truncated: true` means
-   * call again with the same since until clear (or advance since to
-   * the last change's syncVersion once clients want page-by-version).
+   * including delete tombstones, ordered by (syncVersion, tx_time, id).
+   * Cap with `limit` (default 1000, max 10000). When `truncated` is
+   * true the response carries `nextSince` and `nextAfter`; call again
+   * with `since=nextSince&after=nextAfter` until `truncated` is false,
+   * then store the response `syncVersion` as the next `since`. Do not
+   * advance `since` to the last change's syncVersion without `after`:
+   * one write batch shares one syncVersion and can span pages.
+   * Protocol: docs/sync-protocol.md.
    */
   @Get('delta')
   async delta(
@@ -1128,9 +1225,11 @@ export class DataLayerFeaturesController {
     @Param('layerId') layerId: string,
     @Query('since') sinceParam?: string,
     @Query('limit') limitParam?: string,
+    @Query('after') afterParam?: string,
   ) {
     const since = parseSinceParam(sinceParam);
     const limit = parseDeltaLimit(limitParam);
+    const after = parseDeltaAfterParam(afterParam);
     const { geoLimit, rowScope, isTable } = await this.assertV3Layer(
       user,
       itemId,
@@ -1139,6 +1238,7 @@ export class DataLayerFeaturesController {
     );
     return this.v3.listDelta(itemId, layerId, since, {
       limit,
+      ...(after !== undefined ? { after } : {}),
       ...(geoLimit ? { geoLimit: geoLimit as GeoJsonGeometry } : {}),
       ...(rowScope === 'own'
         ? { ownRowsOnly: true, userId: user.id }
@@ -1692,11 +1792,14 @@ export class DataLayerFeaturesController {
     creator: AuthUser;
   }): Promise<void> {
     try {
-      const dc = await this.prisma.item.findUnique({
-        where: { id: args.dataCollectionId },
-        select: { id: true, title: true, ownerId: true, type: true },
-      });
-      if (!dc || dc.type !== 'data_collection') return;
+      const dc = await linkedDataCollection(
+        this.prisma,
+        this.items,
+        args.creator,
+        args.dataCollectionId,
+        args.dataLayerId,
+      );
+      if (!dc) return;
       const dataLayer = await this.prisma.item.findUnique({
         where: { id: args.dataLayerId },
         select: { title: true },
@@ -1759,7 +1862,7 @@ export class DataLayerFeaturesController {
     @Param('layerId') layerId: string,
     @Body() body: CalculateFieldDto,
   ) {
-    const { rowScope, isTable } = await this.assertV3Layer(
+    const { scope, isTable } = await this.assertV3Layer(
       user,
       itemId,
       layerId,
@@ -1775,7 +1878,7 @@ export class DataLayerFeaturesController {
       ...(body.selectedIds ? { selectedIds: body.selectedIds } : {}),
       dryRun: body.dryRun === true,
       user,
-      ownRowsOnly: rowScope === 'own',
+      shareScope: featureScopeFilter(scope),
       isTable,
     });
   }
@@ -1790,7 +1893,7 @@ export class DataLayerFeaturesController {
     @Headers('x-editor-id') editorId?: string,
   ) {
     assertFeatureIdShape(featureId);
-    const { rowScope, isTable, geoLimit } = await this.assertV3Layer(
+    const { scope, isTable, geoLimit } = await this.assertV3Layer(
       user,
       itemId,
       layerId,
@@ -1825,7 +1928,7 @@ export class DataLayerFeaturesController {
     if (body.geometry !== undefined) patch.geometry = body.geometry;
     if (body.properties !== undefined) patch.properties = body.properties;
     return this.v3.updateFeature(itemId, layerId, featureId, patch, user, {
-      ownRowsOnly: rowScope === 'own',
+      shareScope: featureScopeFilter(scope),
       isTable,
       ...(body.baseObservationId !== undefined
         ? { baseObservationId: body.baseObservationId }
@@ -1848,7 +1951,7 @@ export class DataLayerFeaturesController {
     @Headers('x-editor-id') editorId?: string,
   ) {
     assertFeatureIdShape(featureId);
-    const { rowScope } = await this.assertV3Layer(
+    const { scope, isTable } = await this.assertV3Layer(
       user,
       itemId,
       layerId,
@@ -1866,7 +1969,8 @@ export class DataLayerFeaturesController {
     if (body?.checkOnly === true) {
       // Dry run returns a JSON body (200); a real delete stays 204.
       return this.v3.deleteFeature(itemId, layerId, featureId, user, {
-        ownRowsOnly: rowScope === 'own',
+        shareScope: featureScopeFilter(scope),
+        isTable,
         checkOnly: true,
         ...(body.baseObservationId !== undefined
           ? { baseObservationId: body.baseObservationId }
@@ -1874,7 +1978,8 @@ export class DataLayerFeaturesController {
       });
     }
     await this.v3.deleteFeature(itemId, layerId, featureId, user, {
-      ownRowsOnly: rowScope === 'own',
+      shareScope: featureScopeFilter(scope),
+      isTable,
       ...(body?.baseObservationId !== undefined
         ? { baseObservationId: body.baseObservationId }
         : {}),
@@ -1976,6 +2081,9 @@ export class DataLayerFeaturesController {
   ): Promise<{
     geoLimit: unknown | null;
     rowScope: 'all' | 'own';
+    /** The resolved scope; `featureScopeFilter(scope)` is the
+     *  engine filter for it. */
+    scope: FeatureScope;
     /**
      * True when the resolved layer was provisioned without a `geom`
      * column (geometryType=null, the related-event-tracking pattern
@@ -1994,8 +2102,14 @@ export class DataLayerFeaturesController {
      */
     layer: {
       id: string;
-      fields?: Array<{ name: string }>;
+      label?: string;
+      geometryType?: string | null;
+      fields?: Array<{ name: string; type?: string }>;
       parentFkColumn?: string;
+      /** Raw stored tile settings; read with readTileSettings. */
+      tiles?: unknown;
+      bbox?: unknown;
+      attribution?: unknown;
     };
     /**
      * The asserted item row, shares included, exactly as the
@@ -2016,8 +2130,12 @@ export class DataLayerFeaturesController {
         parentLayerId?: string;
         editingPolicy?: 'all-rows' | 'own-rows-only';
         geometryType?: string | null;
-        fields?: Array<{ name: string }>;
+        label?: string;
+        fields?: Array<{ name: string; type?: string }>;
         parentFkColumn?: string;
+        tiles?: unknown;
+        bbox?: unknown;
+        attribution?: unknown;
       }>;
     } | null;
     if (data?.version !== 3) {
@@ -2048,7 +2166,6 @@ export class DataLayerFeaturesController {
     // here (no restriction) inside SharingService.
     const withShares = item as typeof item & { shares?: ItemShare[] };
     const shares = withShares.shares ?? [];
-    const geoLimit = await this.sharing.geoLimitFor(user, item, shares);
     // Row-scope applies to BOTH reads and writes (#40). On reads it
     // narrows the SELECT; on writes it gates the per-row update /
     // delete to features the caller created. Owner / admin / public
@@ -2057,14 +2174,14 @@ export class DataLayerFeaturesController {
     // when set to 'own-rows-only'. #83: when the request is a write
     // (mode='write'), pull the share's editRowScope override; reads
     // use rowScope as before. Same composition rules either way.
-    const layerPolicy = layer.editingPolicy ?? 'all-rows';
-    const rowScope = this.sharing.effectiveRowScope(
-      user,
-      item,
-      shares,
-      layerPolicy,
-      mode === 'write' ? 'edit' : 'read',
-    );
+    // Both clips come from the one resolver every feature path uses.
+    // On a write only edit-granting shares count, and the org and
+    // public tiers (read-only grants) never widen the write scope.
+    const scope = await this.sharing.featureScopeFor(user, item, shares, {
+      action: mode === 'write' ? 'edit' : 'read',
+      layerPolicy: layer.editingPolicy ?? 'all-rows',
+    });
+    const { geoLimit, rowScope } = scope;
     // Match tables.service's convention: null geometryType means
     // a table sublayer (no geom column was provisioned). undefined
     // shouldn't happen in well-formed v3 data but if it does we err
@@ -2073,7 +2190,7 @@ export class DataLayerFeaturesController {
     // missing its geometryType field would silently lose geometry
     // otherwise.
     const isTable = layer.geometryType === null;
-    return { geoLimit, rowScope, isTable, layer, item };
+    return { geoLimit, rowScope, scope, isTable, layer, item };
   }
 }
 
