@@ -21,9 +21,19 @@ import { Public } from '../auth/public.decorator.js';
 import type { AuthUser } from '../auth/auth-sync.service.js';
 import { PrismaService } from '../prisma/prisma.service.js';
 import { ItemsService } from '../items/items.service.js';
-import { SharingService } from '../items/sharing.service.js';
+import {
+  SharingService,
+  featureScopeFilter,
+  isScopeLimited,
+  type FeatureScopeFilter,
+} from '../items/sharing.service.js';
+import { DataLayerEngine } from '../engine/data-layer.js';
+import { visibleFeatureIds } from '../data-layer/attachments-access.js';
+import { publicTierGeoLimit } from '../public/public-geo-limit.js';
+import type { GeoJsonGeometry } from '@gratis-gis/engine';
 import type { AssetKind } from './storage.service.js';
 import { StorageService } from './storage.service.js';
+import { recordUploadGrant } from './key-ownership.js';
 
 // Kinds the browser may request a presigned PUT for. `map-icon` is
 // deliberately absent (its upload path sanitizes server-side and
@@ -85,15 +95,33 @@ export class StorageController {
     private readonly prisma: PrismaService,
     private readonly items: ItemsService,
     private readonly sharing: SharingService,
+    private readonly engine: DataLayerEngine,
   ) {}
+
+  private async assertAttachmentFeatureVisible(
+    att: { itemId: string; layerId: string; featureId: string },
+    access: { shareScope: FeatureScopeFilter; isTable: boolean },
+  ): Promise<void> {
+    const visible = await visibleFeatureIds(
+      this.engine,
+      att.itemId,
+      att.layerId,
+      [att.featureId],
+      access,
+    );
+    if (!visible.has(att.featureId)) {
+      throw new NotFoundException('Attachment not found');
+    }
+  }
 
   @Post('presign-upload')
   async presignUpload(
-    @CurrentUser() _user: AuthUser,
+    @CurrentUser() user: AuthUser,
     @Body() dto: PresignUploadDto,
   ) {
+    let signed;
     try {
-      return await this.storage.presignUpload(
+      signed = await this.storage.presignUpload(
         dto.kind,
         dto.contentType,
         dto.sizeBytes,
@@ -102,6 +130,10 @@ export class StorageController {
       const msg = err instanceof Error ? err.message : 'Unable to sign upload';
       throw new BadRequestException(msg);
     }
+    // Record who was issued the key. Attach paths accept a key only
+    // from the user it was issued to (storage/key-ownership.ts).
+    await recordUploadGrant(this.prisma, dto.kind, signed.key, user.id);
+    return signed;
   }
 
   /**
@@ -156,12 +188,17 @@ export class StorageController {
     // Sharing check + filename for content-disposition.
     let filename = key;
     if (kind === 'feature-attachment') {
+      // Oldest row decides the ACL. Attach paths refuse a copied key
+      // now, but rows from before that check can share one, and the
+      // copy is always the newer row.
       const att = await this.prisma.featureAttachment.findFirst({
         where: { storageKey },
+        orderBy: { createdAt: 'asc' },
         select: {
           fileName: true,
           itemId: true,
           layerId: true,
+          featureId: true,
         },
       });
       if (!att) throw new NotFoundException('Attachment not found');
@@ -178,13 +215,39 @@ export class StorageController {
         if (!this.sharing.canDownload(user, item, shares)) {
           throw new ForbiddenException('Cannot download this attachment');
         }
+        // A direct key link must not reach further than the layer
+        // attachment routes: the feature has to be inside the
+        // caller's own-rows and geo limit.
+        const layer = attachmentLayer(item.data, att.layerId);
+        const scope = await this.sharing.featureScopeFor(user, item, shares, {
+          action: 'read',
+          layerPolicy: layer?.editingPolicy ?? 'all-rows',
+        });
+        if (isScopeLimited(scope)) {
+          await this.assertAttachmentFeatureVisible(att, {
+            shareScope: featureScopeFilter(scope),
+            isTable: layer?.geometryType === null,
+          });
+        }
       } else {
         const parent = await this.prisma.item.findFirst({
           where: { id: att.itemId, access: 'public', deletedAt: null },
-          select: { id: true },
+          select: { id: true, data: true, publicGeoBoundaryId: true },
         });
         if (!parent) {
           throw new ForbiddenException('Cannot download this attachment');
+        }
+        // The public tier boundary clips anonymous readers too.
+        const clip = await publicTierGeoLimit(
+          this.prisma,
+          parent.publicGeoBoundaryId,
+        );
+        if (clip !== undefined) {
+          const layer = attachmentLayer(parent.data, att.layerId);
+          await this.assertAttachmentFeatureVisible(att, {
+            shareScope: { geoLimit: clip as GeoJsonGeometry },
+            isTable: layer?.geometryType === null,
+          });
         }
       }
     } else if (
@@ -206,6 +269,8 @@ export class StorageController {
           ],
           deletedAt: null,
         },
+        // Oldest row decides, as for attachments above.
+        orderBy: { createdAt: 'asc' },
         select: { id: true, type: true, data: true, access: true },
       });
       if (!item) throw new NotFoundException('File not found');
@@ -271,4 +336,21 @@ export class StorageController {
     res.on('close', () => upstream.body.destroy());
     upstream.body.pipe(res);
   }
+}
+
+/** The v3 layer an attachment hangs off, for its policy and type. */
+function attachmentLayer(
+  data: unknown,
+  layerId: string,
+):
+  | { editingPolicy?: 'all-rows' | 'own-rows-only'; geometryType?: string | null }
+  | undefined {
+  const layers = (data as {
+    layers?: Array<{
+      id: string;
+      editingPolicy?: 'all-rows' | 'own-rows-only';
+      geometryType?: string | null;
+    }>;
+  } | null)?.layers;
+  return layers?.find((l) => l.id === layerId);
 }

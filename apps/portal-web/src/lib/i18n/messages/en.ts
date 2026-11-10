@@ -21,6 +21,8 @@
  */
 export const en = {
   common: {
+    itemChangedElsewhere:
+      'Someone else saved this item after you opened it, so your save was not applied. Your changes are still on screen. Reload to see the latest version, then make your changes again.',
     save: 'Save',
     cancel: 'Cancel',
     delete: 'Delete',
@@ -30,6 +32,8 @@ export const en = {
     backToItems: 'Back to items',
     settings: 'Settings',
     language: 'Language',
+    geolocationInsecure:
+      'The browser will not share your GPS location on this plain HTTP address. Address search does not use GPS. To use My location, open the portal with HTTPS. On a home NAS that is Tailscale Serve with your MagicDNS name. localhost is also allowed.',
   },
   /** Shared BuilderShell chrome (#162 / R13-i18n-builder-viewer-editor-titles). */
   builderShell: {
@@ -99,11 +103,17 @@ export const en = {
     notifications: 'Notifications',
     ai: 'AI',
     build: 'Build',
+    buildHint: 'Describe a layer, map, form, or app',
     security: 'Sign-in',
     fieldQueues: 'Field queues',
     migrations: 'Migrations',
     feedback: 'Feedback',
     gettingStarted: 'Getting started',
+    audit: 'Audit',
+    permissions: 'Permissions',
+    diagnostics: 'Diagnostics',
+    jobs: 'Jobs',
+    operations: 'Operations',
   },
   updates: {
     title: 'Updates',
@@ -138,8 +148,9 @@ export const en = {
     closeNavigation: 'Close navigation',
   },
   search: {
-    placeholder: 'Search items...',
+    placeholder: 'Search items only',
     label: 'Search items',
+    scopeHint: 'Searches item titles, descriptions, and tags. People and groups are not included.',
   },
   help: {
     buttonTitle: 'Help (press ? anywhere)',
@@ -198,6 +209,9 @@ export const en = {
     createButton: 'Create item',
     backButton: 'Back',
     changeType: 'Change type',
+    taskIntro: 'Start with an upload, a map, or a form. Every other item type is under More, and a link that names a type still opens it.',
+    moreTypes: 'More item types',
+    fewerTypes: 'Fewer item types',
     detailsEyebrow: 'New {type}',
     detailsEyebrowFallback: 'item',
     viewerBlocked:
@@ -307,7 +321,7 @@ export const en = {
     custom: {
       label: 'Web app',
       desc:
-        'Drag-drop layout of map + tool widgets, sidebar, header, foldable groups. Pick a starter template (Sidebar Explorer, Showcase Map, Editor, Viewer, etc.) on the next screen, or start blank and build the layout from scratch.',
+        'A web app made of a map and widgets. A dashboard is a starter template for this type, not a separate item. Pick a template on the next screen, or start blank.',
     },
     theme: {
       label: 'Theme',
@@ -322,7 +336,7 @@ export const en = {
     tool: {
       label: 'Tool',
       desc:
-        'A reusable named action - "open this dashboard" or "go to this URL" - that you bind to a Button on a Custom Web App. One tool can be reused across many apps, so updating the destination once propagates everywhere.',
+        'A reusable named action, such as opening a web app or a URL, that you bind to a button. One tool can be reused across many apps.',
     },
     derived_layer: {
       label: 'Derived layer',
@@ -456,7 +470,7 @@ export const en = {
       'Add a spatial layer above first to link this table to.',
     importPanelTitle: 'Import from file',
     importSchemaHint:
-      'All layers in the file will attach automatically. Schema lands on Create item; load feature rows per layer afterwards from the detail page.',
+      'Every layer in the file is added. Creating the item, or saving the schema, loads the features. A dashboard can use the layer after that import finishes.',
     pickListOptionsTitle: '{label} options',
     fieldTypeText: 'Text',
     fieldTypeNumber: 'Number',
@@ -487,6 +501,31 @@ export const en = {
     invalidGeoJson: 'File is not a valid GeoJSON FeatureCollection.',
     parseFileFailed: 'Failed to parse file.',
     probeFailed: 'Probe failed.',
+  },
+  /** Per-layer vector tile settings in the layer builder. */
+  tileSettings: {
+    heading: 'Vector tiles',
+    intro:
+      'How this layer is cut into map tiles. Leave a box empty to keep the default.',
+    fieldsHeading: 'Fields in tiles',
+    allFields: 'All fields (default)',
+    someFields: 'Only these fields',
+    noFields: 'This layer has no fields yet.',
+    fieldsNote:
+      'Fields a map uses for its style, labels, filter or hover popup are always added back, so maps keep drawing. Other unchecked fields are left out of the tiles, so app widgets that filter the map by them in the browser will not see them. This only makes tiles smaller. It does not hide data: every field is still readable through the layer\'s features, popups and exports.',
+    minZoom: 'Min zoom',
+    maxZoom: 'Max zoom',
+    maxFeatures: 'Max features per tile',
+    cacheMaxAge: 'Browser cache (seconds)',
+    default: 'default',
+    zoomHint:
+      'Max zoom is the deepest zoom tiles are built for; maps zoomed in further keep showing those tiles, enlarged. Below min zoom the layer is not drawn. Zoom from {min} to {max}.',
+    maxFeaturesHint: 'The feature cap can only be lowered, up to {max}.',
+    cacheHint:
+      'Cache from 0 to {max} seconds. Tiles of a layer that is not public are always cached privately, in the viewer\'s browser only.',
+    labelPoints: 'Label each line and polygon once',
+    labelPointsHint:
+      'Adds one label point per line or polygon to the tiles, so a feature that crosses tile edges is not labelled once per tile. Maps then label from that point (except labels placed along lines).',
   },
   // Derived layer recipe builder (#162).
   derivedLayerBuilder: {
@@ -932,7 +971,7 @@ export const en = {
     editableLayersCount:
       '{count, plural, one {# editable layer} other {# editable layers}}',
     toolAdd: 'Add',
-    toolMagic: 'Magic outline-solid',
+    toolMagic: 'Magic outline',
     toolSnap: 'Snap',
     toolUndo: 'Undo',
     toolRedo: 'Redo',
@@ -960,11 +999,11 @@ export const en = {
     deleteThisFeature: 'Delete this feature',
     layerFallback: 'Layer',
     magicNeedsImagery:
-      'Add an imagery layer to this map to outline-solid from it.',
+      'Add an imagery layer to this map to outline from it.',
     outlining: 'Outlining...',
-    magicProblem: 'The outline-solid tool hit a problem. Try again.',
+    magicProblem: 'The outline tool hit a problem. Try again.',
     magicNeedsPolygon:
-      'The outline-solid tool needs an editable polygon layer as a target. Open the editor config to add one.',
+      'The outline tool needs an editable polygon layer as a target. Open the editor config to add one.',
     noEditableTargetsAdd:
       'No editable target layers configured. Open the editor config to add one.',
     noEditableTargetsEdit:
@@ -1448,29 +1487,6 @@ export const en = {
   presence: {
     youSuffix: ' (you)',
   },
-  comments: {
-    title: 'Comments',
-    showResolved: 'Show resolved',
-    startThread: 'Start a new thread...',
-    post: 'Post',
-    reply: 'Reply...',
-    resolve: 'Resolve',
-    reopen: 'Reopen',
-    threadCount:
-      '{count, plural, one {# thread} other {# threads}}',
-    noOpen:
-      'No open threads. Toggle "Show resolved" to see closed ones.',
-    noComments: 'No comments yet. Start the conversation below.',
-    signInPrompt: 'Sign in to comment on this map.',
-  },
-  markup: {
-    title: 'Markup',
-    add: 'Add markup',
-    empty:
-      'No markup yet. Add a set, then drop pins to mark up the map.',
-    dropPin: 'Drop pin at center',
-    signInPrompt: 'Sign in to add markup to this map.',
-  },
   print: {
     chooserTitle: 'Print this map',
     startSection: 'Start a new layout',
@@ -1717,6 +1733,20 @@ export const en = {
     copyLink: 'Copy link',
     copied: 'Copied',
     openOnPhone: 'Open on a phone',
+    eyebrow: 'Content',
+    intro: 'Deployments you can open in the field, with offline cache and sync state for this device.',
+    newDeployment: 'New deployment',
+    sessionExpiredTitle: 'Your session expired',
+    sessionExpiredBody: 'Sign in again to load your field deployments. This is not an empty catalog. Features already saved on this device stay here and sync after you sign in.',
+    emptyTitle: 'No field deployments yet',
+    emptyBody: 'A field deployment points at a map and the form workers fill out when they add features.',
+    createDeployment: 'Create a deployment',
+    loadFailedTitle: 'Field deployments could not be loaded',
+    loadFailedBody: 'The catalog did not answer. This is not an empty list. Try again in a moment.',
+  },
+  buildPage: {
+    title: 'Build from a description',
+    intro: 'Describe a layer, a map, a form, or an app. A dashboard is a web-app template, not this page. Nothing is created until you choose Build it.',
   },
   // Offline queue rows the server refused for a reason a retry cannot
   // change. Shown from the field runtime header chip.
@@ -1957,6 +1987,9 @@ export const en = {
     removeWillLoseOthers:
       '{count, plural, one {# of them belongs to another account.} other {# of them belong to another account.}}',
     downloadForOffline: 'Download for offline',
+    deviceOnlyWarning:
+      "Edits and photos stay on this device until they sync. They are not on the server and they are not in a portal backup. Discarding one, or clearing this browser's data, deletes it. Save a copy if you need the photos and the shapes before they sync.",
+    saveUnsyncedCopy: 'Save a copy of unsynced work',
     refreshOfflineCache: 'Refresh offline cache',
     confirmRefresh: 'Confirm refresh',
     refreshUnsyncedWarn:
@@ -2131,6 +2164,10 @@ export const en = {
     // Item page chrome (#162 / R14-i18n-item-page-chrome).
     backToItems: 'Back to items',
     sharingHeading: 'Sharing',
+    publicBoundaryWarning:
+      'The public geographic boundary is missing or has no geometry. Public readers see no features until you choose a boundary that still exists.',
+    shareAction: 'Share',
+    shareActionHint: 'Open sharing and access. Dependencies are listed on that tab before you publish.',
     openForm: 'Open',
     openFormTitle: 'Open the form to submit a response',
     responses: 'Responses',
@@ -2299,7 +2336,9 @@ export const en = {
   v3Editor: {
     structureTitle: 'Layer structure',
     structureIntro:
-      'Edit layers, fields, domains and constraints here. Saving takes effect immediately; importing and browsing rows lives on the Data tab.',
+      'Edit layers, fields, domains and constraints here. Saving stores the schema and starts a file import you just added. Browsing rows stays on the Data tab.',
+    pendingImportNote:
+      'Save schema to load the features from the file you added. Until that finishes, the layer has no rows.',
     dataTitle: 'Layer data',
     dataIntro: 'Browse the rows in each layer, add more data, or download it.',
   },
@@ -2374,17 +2413,6 @@ export const en = {
     noFeaturesInExtent: 'No features in this map extent.',
     noFeatures: 'No features to show.',
     sortAndCalculate: 'Click to sort, right-click to Calculate Field',
-  },
-  // Sending a portal item to a map, from its detail page and from the
-  // map builder's auto add.
-  addToMap: {
-    newMap: 'New map',
-    existingMap: 'An existing map',
-    loadingMaps: 'Loading maps...',
-    noMaps: 'No maps yet',
-    layerGone: '{item} no longer has a layer "{layerKey}".',
-    tableNoShapes:
-      '{layer} is a table with no shapes, so there is nothing to draw.',
     export: 'Export',
     exportAllRows: 'All rows ({count})',
     exportSelectedRows: 'Selected rows ({count})',
@@ -2467,6 +2495,17 @@ export const en = {
     savingCell: 'Saving...',
     readOnlyHere:
       'This table is read-only here. Rows can be edited on layers you have permission to change.',
+  },
+  // Sending a portal item to a map, from its detail page and from the
+  // map builder's auto add.
+  addToMap: {
+    newMap: 'New map',
+    existingMap: 'An existing map',
+    loadingMaps: 'Loading maps...',
+    noMaps: 'No maps yet',
+    layerGone: '{item} no longer has a layer "{layerKey}".',
+    tableNoShapes:
+      '{layer} is a table with no shapes, so there is nothing to draw.',
   },
   // Map editor: Add Layer dialog (portal / file / URL / ArcGIS / New).
   mapAddLayer: {
@@ -3621,22 +3660,19 @@ export const en = {
     ctaDiscussions: 'Discussions',
     ctaHint:
       "Send feedback goes to the maintainer's inbox; no account required. Discussions is the GitHub place for longer threads.",
-    testingTitle:
-      'This is a public test instance. Resets to a curated golden state every day at 04:00 UTC.',
-    testingBodyBefore: 'Sign in with',
-    testingBodyOr: 'or',
-    testingBodyAfter:
-      '. Items, users, and edits you create vanish at the next reset. Found a problem? Use the Feedback button in the corner of any page. No account needed.',
-    testingSampleLead: 'New here? Open the',
-    testingSampleName: 'Sample: Randolph County',
-    testingSampleTail:
-      'folder after signing in: a complete demo workspace with styled layers, a map, a form with responses, a field survey, and public apps, all built on one small West Virginia county.',
+    testingNotice: 'Public demo. It resets every day at 04:00 UTC.',
+    testingSignInLink: 'Test accounts are on the sign-in page.',
   },
   /** /signin redirect chrome (#162). */
   auth: {
     redirecting: 'Redirecting to sign in...',
     redirectFallback: 'If nothing happens,',
     continueToKeycloak: 'continue to Keycloak',
+    wrongHostTitle: 'Sign-in uses a different address',
+    wrongHostBody:
+      'You opened {opened}. Sign-in is configured for {canonical}, so continuing would send the browser there. Set this in the compose file, then restart:',
+    wrongHostRestart:
+      'Keep the existing volumes. The next start updates Keycloak. For Tailscale HTTPS, use the MagicDNS name with https:// and Tailscale Serve. A tailnet IP keeps http:// and the port.',
   },
   /** Admin → Sign-in (#162). */
   adminSecurity: {
@@ -3726,6 +3762,83 @@ export const en = {
     docsDesc:
       'The built-in guide covers roles, backups, branding, and housekeeping. Ten minutes now saves surprises later.',
     docsAction: 'Open the guide',
+    secondAdminTitle: 'Add a second admin',
+    secondAdminDesc:
+      '{count, plural, one {# enabled admin} other {# enabled admins}}. A second admin can recover the organization if the first one cannot sign in. The portal keeps working with a single admin, and this item cannot be checked off by hand.',
+    secondAdminAction: 'Open users',
+  },
+
+  adminAudit: {
+    title: 'Audit',
+    intro:
+      'Privileged changes in this organization: users, roles, sharing, ownership, backup, and admin settings. This is not the history of map features. Passwords and message bodies are not stored.',
+    refresh: 'Load events',
+    loading: 'Loading…',
+    loadFailed: 'Could not load the audit.',
+    empty: 'No admin events yet. Load the list, or make a privileged change and load it again.',
+    more: 'Older events',
+    when: 'When',
+    action: 'Action',
+    actor: 'Actor',
+    target: 'Target',
+    outcome: 'Outcome',
+  },
+  adminPermissions: {
+    title: 'Permissions',
+    intro:
+      'This is the current sharing snapshot: each item’s public, organization, group, and user access, the owner, and principals that no longer exist. It is not a history of past changes.',
+    refresh: 'Load snapshot',
+    loading: 'Loading…',
+    loadFailed: 'Could not load permissions.',
+    download: 'Download CSV',
+    generated: 'Snapshot taken {at}.',
+    empty: 'No items in this organization.',
+    item: 'Item',
+    access: 'Access',
+    owner: 'Owner',
+    share: 'Share',
+    missingOwner: 'Missing owner',
+    missingPrincipal: 'missing principal',
+    tierOnly: 'Access tier only',
+  },
+  adminDiagnostics: {
+    title: 'Diagnostics',
+    intro:
+      'Create a support bundle on purpose. It includes versions, whether the database answered, maintenance, and counts of import, analysis, and backup jobs. Secrets and names are removed. Nothing here runs a shell command.',
+    create: 'Create bundle',
+    working: 'Creating…',
+    failed: 'Could not create the bundle.',
+    download: 'Download JSON',
+  },
+  opsJobs: {
+    title: 'Jobs',
+    intro: 'Imports and analyses in this organization. Cancel and retry appear only when that state supports them. A retry checks the original item and requester, and keeps their permissions. Backups stay on the Backup page.',
+    refresh: 'Load jobs',
+    loading: 'Loading…',
+    loadFailed: 'Could not load jobs.',
+    actionFailed: 'That action was not accepted.',
+    empty: 'No jobs yet.',
+    kind: 'Kind',
+    source: 'Source',
+    status: 'Status',
+    error: 'Error',
+    cancel: 'Cancel',
+    retry: 'Retry',
+  },
+  opsPage: {
+    title: 'Operations',
+    intro: 'Readiness is for signed-in admins. Public health stays a database check. A failed restore stays on until a restore finishes.',
+    readiness: 'Readiness',
+    check: 'Check services',
+    maintenance: 'Maintenance',
+    maintenanceHint: 'Turning maintenance on makes the portal return 503 except for health and this control. A failed restore stays on until a restore finishes. It cannot be cleared by acknowledging it.',
+    maintenanceOn: 'Turn maintenance on',
+    maintenanceOff: 'Turn maintenance off',
+    failed: 'The request failed.',
+    operatorOnly: 'Readiness and maintenance cover the whole install, so only admins of the operator organization can use them.',
+  },
+  opsBackup: {
+    failureBanner: 'A backup did not finish. Read the failed run below. A notice is sent once for that run when notifications are enabled.',
   },
 
   /** Settings → API keys (#162). */
@@ -4071,6 +4184,8 @@ export const en = {
     preview: 'Preview',
     defaultsFootnote:
       'Off here mutes the type platform-wide for users who haven\'t explicitly opted in. Per-user opt-ins still win. Customize rewrites the email body for your org; saved templates substitute mustache-style placeholders like {{itemTitle}} and {{baseUrl}} from the trigger payload.',
+    operatorOnlyNote:
+      'The mail server, delivery queue, recent activity and the on/off defaults apply to the whole install, so only admins of the operator organization can see or change them. Templates and previews are yours to edit.',
     previewHeading: 'Preview',
     subject: 'Subject',
     html: 'HTML',
@@ -4192,10 +4307,12 @@ export const en = {
       sendInvite: 'Send invite',
       errUsernameMin: 'Username must be at least 2 characters.',
       errEmailInvalid: 'Please enter a valid email address.',
-      errInviteFailed: 'Invite failed: {status} {detail}',
-      alertEmailFailedTitle: 'User created, email failed',
+      errDuplicate: 'An account with that username or email already exists. No address is shown here.',
+      errUpstream: 'The identity server could not create the account. Try again in a moment. If it keeps failing, check that the identity server is running. No address is shown here.',
+      errInviteFailed: 'The invite did not finish (status {status}). No account detail is shown.',
+      alertEmailFailedTitle: 'Account created, email not sent',
       alertEmailFailedMessage:
-        'User "{username}" was created, but the password-setup email could not be sent:\n\n{error}\n\nOnce SMTP is healthy, click "Reset password" on this user to re-send the email.',
+        'The account was created, but the sign-in email did not send. Open Notifications, fix SMTP, then use Reset password on the new account. This message does not include the address.',
     },
     edit: {
       title: 'Edit user',
@@ -5161,21 +5278,21 @@ export const en = {
       nothingVisibleDescribe: "Nothing visible to describe.",
     },
     errors: {
-      clickToOutline: "Click a building, pond, or lot to outline-solid it.",
+      clickToOutline: "Click a building, pond, or lot to outline it.",
       couldNotGetLocation: "Could not get location.",
       couldNotLoadData: "Could not load data.",
       couldNotLoadValues: "Could not load values.",
       geolocationUnavailable: "Geolocation is not available in this browser.",
       loadSchemaFailed: "Failed to load schema",
       moveCursorOverMap: "Move cursor over the bound map",
-      needImageryLayer: "Add an imagery layer to this map to outline-solid from it.",
+      needImageryLayer: "Add an imagery layer to this map to outline from it.",
       noBoundMapTarget: "No bound map / target.",
       noEditableLayer: "No editable layer set. Add one in the app settings.",
       noFeaturesInViewport: "No features in the current viewport.",
       noFeaturesSelected: "No features selected on the bound map.",
       outlineAdded: "Outline added.",
       outlineReview: "Review the outline, then Save or Discard.",
-      outlineToolProblem: "The outline-solid tool hit a problem.",
+      outlineToolProblem: "The outline tool hit a problem.",
       outlining: "Outlining...",
       pickNumberField: "Pick a number field to {aggregate}.",
       printPopupBlocked: "Could not open the print preview window.  Allow popups for this site and try again.",
@@ -5243,7 +5360,6 @@ export const en = {
       layers: "Layers",
       legend: "Legend",
       magicOutline: "Magic outline",
-      magicOutlineSolid: "Magic outline-solid",
       myLocation: "My Location",
       myLocationShort: "My location",
       print: "Print",

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import {
   BadGatewayException,
+  ConflictException,
   Injectable,
   InternalServerErrorException,
   Logger,
@@ -50,6 +51,7 @@ export interface KeycloakUserRep {
   lastName?: string;
   enabled: boolean;
   emailVerified?: boolean;
+  requiredActions?: string[];
   createdTimestamp?: number;
   attributes?: Record<string, string[]>;
   /** Convenience: combined name for display. */
@@ -142,7 +144,7 @@ export class KeycloakAdminService implements OnApplicationBootstrap {
     // bootstrap. Non-leaders rely on the leader's converged state
     // and, in the rare leader-handoff case, the next leader's own
     // boot wave will re-sync. See class doc above.
-    if (!this.leader.shouldRun()) {
+    if (!this.leader.holdsLock()) {
       this.logger.log(
         'Skipping Keycloak realm bootstrap on this replica: another process holds the cron-leader lock. ' +
           'The admin can still trigger a sync at any time via PUT /admin/notifications/smtp.',
@@ -404,10 +406,13 @@ export class KeycloakAdminService implements OnApplicationBootstrap {
       body: JSON.stringify(body),
     });
     if (!res.ok) {
-      const text = await res.text();
+      await res.text();
+      // Keycloak answers 409 when the username or email is taken. That
+      // is a client conflict, not an upstream failure, so the web UI can
+      // tell it apart from a Keycloak outage (502).
       if (res.status === 409) {
-        throw new BadGatewayException(
-          `A user with that username or email already exists (${text}).`,
+        throw new ConflictException(
+          'A user with that username or email already exists.',
         );
       }
       throw new BadGatewayException(
@@ -440,12 +445,9 @@ export class KeycloakAdminService implements OnApplicationBootstrap {
           'UPDATE_PASSWORD',
           'VERIFY_EMAIL',
         ]);
-      } catch (err) {
-        setupEmailError =
-          err instanceof Error ? err.message : String(err);
-        this.logger.warn(
-          `User ${input.username} created in Keycloak but setup email failed: ${setupEmailError}`,
-        );
+      } catch {
+        setupEmailError = 'smtp_unavailable';
+        this.logger.warn(`Setup email failed for user id ${id}`);
       }
     }
     const rep = await this.getUser(id);
@@ -471,6 +473,19 @@ export class KeycloakAdminService implements OnApplicationBootstrap {
       enabled: patch.enabled ?? current.enabled,
       attributes,
     };
+    // A new address is unproven. Keycloak's admin API keeps the old
+    // emailVerified flag on a PUT, so clear it and ask the user to
+    // verify on the next sign-in. Without this, whoever changed the
+    // address could use "Forgot password" on it straight away.
+    if (
+      patch.email !== undefined &&
+      patch.email.trim().toLowerCase() !== (current.email ?? '').trim().toLowerCase()
+    ) {
+      body.emailVerified = false;
+      body.requiredActions = Array.from(
+        new Set([...(current.requiredActions ?? []), 'VERIFY_EMAIL']),
+      );
+    }
     const res = await fetch(this.adminUrl(`/users/${id}`), {
       method: 'PUT',
       headers: {

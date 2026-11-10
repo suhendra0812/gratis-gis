@@ -17,7 +17,7 @@ export const PROXY_FETCH_TIMEOUT_MS = 30_000;
  * buffering it whole would be a memory-exhaustion vector. 64 MB is
  * far above any legitimate tile or metadata response.
  */
-const DEFAULT_MAX_PROXY_BYTES = 64 * 1024 * 1024;
+export const DEFAULT_MAX_PROXY_BYTES = 64 * 1024 * 1024;
 
 /**
  * Ceiling for a probe that has to hold the upstream body in memory
@@ -33,6 +33,77 @@ export class UpstreamBodyTooLargeError extends Error {
   constructor(readonly maxBytes: number) {
     super(`Upstream response exceeded ${maxBytes} bytes`);
     this.name = 'UpstreamBodyTooLargeError';
+  }
+}
+
+/**
+ * Same-origin script surface of a proxied response.
+ *
+ * The item and public proxies relay whatever an item's `data.url`
+ * answers, and any contributor sets that URL. They are served from the
+ * portal origin, so an upstream that answers `text/html` (or XHTML,
+ * SVG, or XML with an XHTML-namespace script) would run its script with
+ * the viewer's portal session. Legitimate consumers are map libraries
+ * that read the body with fetch or as an image, so none of them needs
+ * the browser to render the response as a document.
+ *
+ * Every proxied response therefore gets:
+ * - `Content-Security-Policy: sandbox; default-src 'none'`, so a
+ *   document that does render has an opaque origin and no scripts.
+ * - `X-Content-Type-Options: nosniff`.
+ * - `Content-Disposition: attachment` unless the type is on the
+ *   inline allowlist below, so a top-level navigation downloads it.
+ * Script types are also relabelled `text/plain`, which nosniff then
+ * refuses to execute from a `<script src>` on the portal origin.
+ */
+/**
+ * Types a proxied response may render inline: what map clients read
+ * with fetch or as an image. Everything else (HTML, XML, SVG, PDF,
+ * multipart, unknown, or no type at all) is sent as an attachment, so
+ * a top-level navigation downloads it instead of rendering it. An
+ * allowlist rather than a denylist, because there is always one more
+ * renderable type.
+ */
+const INLINE_MEDIA = new Set([
+  'text/plain',
+  'text/csv',
+  'application/json',
+  'application/geo+json',
+  'application/vnd.geo+json',
+  'application/x-protobuf',
+  'application/vnd.mapbox-vector-tile',
+  'application/octet-stream',
+]);
+const SCRIPT_MEDIA =
+  /^[a-z]+\/(x-)?(javascript|ecmascript|jscript|livescript)[\d.]*$|^application\/wasm$/;
+
+function mayRenderInline(media: string): boolean {
+  if (INLINE_MEDIA.has(media)) return true;
+  // Raster images; SVG is a document that can carry script.
+  return /^image\/[a-z0-9.+-]+$/.test(media) && media !== 'image/svg+xml';
+}
+
+export function applyProxyResponseHeaders(
+  res: Pick<ExpressResponse, 'setHeader'>,
+  upstreamContentType: string | null,
+): void {
+  res.setHeader('content-security-policy', "sandbox; default-src 'none'");
+  res.setHeader('x-content-type-options', 'nosniff');
+  const raw = upstreamContentType ?? '';
+  // fetch joins repeated Content-Type headers with a comma, and a
+  // browser uses the last one, so `text/plain, text/html` would render
+  // as HTML. Any comma makes the type untrusted.
+  const media = raw.includes(',')
+    ? ''
+    : (raw.split(';')[0]?.trim().toLowerCase() ?? '');
+  if (SCRIPT_MEDIA.test(media)) {
+    res.setHeader('content-type', 'text/plain; charset=utf-8');
+    res.setHeader('content-disposition', 'attachment');
+    return;
+  }
+  if (upstreamContentType) res.setHeader('content-type', upstreamContentType);
+  if (!mayRenderInline(media)) {
+    res.setHeader('content-disposition', 'attachment');
   }
 }
 
@@ -60,8 +131,7 @@ export async function streamUpstreamToResponse(
 ): Promise<void> {
   const maxBytes = opts?.maxBytes ?? DEFAULT_MAX_PROXY_BYTES;
   res.status(upstream.status);
-  const contentType = upstream.headers.get('content-type');
-  if (contentType) res.setHeader('content-type', contentType);
+  applyProxyResponseHeaders(res, upstream.headers.get('content-type'));
 
   const body = upstream.body;
   if (!body) {

@@ -29,6 +29,10 @@ import {
   sanitizeAttributionHtml,
   sanitizePopupHtml,
   scaledStyleExpression,
+  TILE_INCLUDE_PARAM,
+  TILE_LABEL_POINT_PROP,
+  TILE_LABELS_LAYER,
+  tileFieldRefs,
 } from '@gratis-gis/shared-types';
 import {
   customBasemapToStyle,
@@ -114,6 +118,12 @@ import {
   renderIconSvgForSdf,
 } from './map-icons';
 import { svgToSdf } from './sdf';
+import {
+  dataLayerKeepKey,
+  dataLayerSourceZoom,
+  dataLayerVectorSource,
+  ensureSourceZooms,
+} from '@/lib/tile-zoom';
 import {
   syncPointCloudOverlay,
   teardownPointCloudOverlay,
@@ -611,6 +621,9 @@ export const MapCanvas = forwardRef<MapCanvasHandle, Props>(function MapCanvas(
   // Tick bumped whenever a batch of icons finishes registering, so the
   // layer-sync effect can re-run and pick up the new images.
   const [iconsTick, setIconsTick] = useState(0);
+  // Bumped when a data layer's tile zoom range arrives (tile-zoom.ts),
+  // so the overlay sync rebuilds that source with the right range.
+  const [tileZoomTick, setTileZoomTick] = useState(0);
 
   // Remember the last selection we applied to MapLibre's feature-state,
   // so we know which ids to clear when the selection shrinks. A bare
@@ -1072,7 +1085,17 @@ export const MapCanvas = forwardRef<MapCanvasHandle, Props>(function MapCanvas(
     // sync trigger: every MVT source needs its URL rebuilt when
     // the runtime scrubs back in time so MapLibre re-fetches tiles
     // tagged with the new `at` value.
-  }, [map.layers, map.clipBoundaryId, iconsTick, asOfTime]);
+  }, [map.layers, map.clipBoundaryId, iconsTick, asOfTime, tileZoomTick]);
+
+  // Learn each data layer's tile zoom range so its vector source can
+  // overzoom past the deepest zoom its tiles are built for.
+  useEffect(() => {
+    const sources: Array<{ itemId: string; layerKey?: string }> = [];
+    for (const l of map.layers) {
+      if (l.source.kind === 'data-layer') sources.push(l.source);
+    }
+    ensureSourceZooms(sources, () => setTileZoomTick((t) => t + 1));
+  }, [map.layers]);
 
   // #186: 3D terrain. Registers a raster-dem source from the map's
   // elevation layer (a dem tile_layer COG served through the cog
@@ -2631,6 +2654,7 @@ function overlayLayerIds(layerId: string): string[] {
     `gg:${layerId}-icon-halo`,
     `gg:${layerId}-circle`,
     `gg:${layerId}-label`,
+    `gg:${layerId}-label-pt`,
   ];
 }
 
@@ -2879,6 +2903,16 @@ function dataLayerTileUrl(
   boundaryFilterItemId: string | null | undefined,
   mapClipBoundaryId: string | undefined,
   asOfTime: string | null | undefined,
+  /**
+   * The attribute fields this layer reads from its tiles (tileFieldRefs:
+   * renderer, labels, filter, hover popup). An owner can trim the
+   * fields a layer's tiles carry; the server always adds back the ones
+   * named here, so this map's own styling keeps working. A layer with
+   * no tile field setting ignores the param, so its tiles and cache
+   * are unchanged. Changing the style's fields changes the URL, which
+   * refetches the tiles with the new set, as it must.
+   */
+  include: string[] = [],
 ): string {
   const base = source.layerKey
     ? `/api/portal/items/${source.itemId}/layers/${encodeURIComponent(source.layerKey)}/tile/{z}/{x}/{y}.mvt`
@@ -2901,6 +2935,11 @@ function dataLayerTileUrl(
   // an expression over the tile already in cache.
   if (source.via) {
     tileParams.push(`via=${encodeURIComponent(JSON.stringify(source.via))}`);
+  }
+  if (include.length > 0) {
+    tileParams.push(
+      `${TILE_INCLUDE_PARAM}=${include.map(encodeURIComponent).join(',')}`,
+    );
   }
   return tileParams.length > 0 ? `${base}?${tileParams.join('&')}` : base;
 }
@@ -2989,7 +3028,7 @@ function syncOverlays(
   // fetches). Those keep the rebuild-every-pass behavior.
   const keepDataUrl = new Map<
     string,
-    { url: string; type: 'vector' | 'geojson' }
+    { url: string; type: 'vector' | 'geojson'; key: string }
   >();
   for (const l of layers) {
     if (!l.visible) continue;
@@ -2997,17 +3036,24 @@ function syncOverlays(
       l.source.kind === 'data-layer' &&
       !l.id.startsWith('editor-target:')
     ) {
+      const url = dataLayerTileUrl(
+        l.source,
+        l.boundaryFilterItemId,
+        mapClipBoundaryId,
+        asOfTime,
+        tileFieldRefs(l),
+      );
       keepDataUrl.set(`gg:${l.id}`, {
-        url: dataLayerTileUrl(
-          l.source,
-          l.boundaryFilterItemId,
-          mapClipBoundaryId,
-          asOfTime,
-        ),
+        url,
         type: 'vector',
+        key: dataLayerKeepKey(url, dataLayerSourceZoom(l.source)),
       });
     } else if (l.source.kind === 'geojson-url') {
-      keepDataUrl.set(`gg:${l.id}`, { url: l.source.url, type: 'geojson' });
+      keepDataUrl.set(`gg:${l.id}`, {
+        url: l.source.url,
+        type: 'geojson',
+        key: l.source.url,
+      });
     }
   }
 
@@ -3037,7 +3083,7 @@ function syncOverlays(
         | { ggDataUrl?: string }
         | undefined
     )?.ggDataUrl;
-    if (priorUrl && priorUrl === want.url) keptDataSources.add(srcId);
+    if (priorUrl && priorUrl === want.key) keptDataSources.add(srcId);
   }
 
   if (style?.layers) {
@@ -3245,6 +3291,7 @@ function syncOverlays(
     // written onto the -fill layer spec further down.
     const kept = keptDataSources.has(sourceId);
     const keepUrl = keepDataUrl.get(sourceId)?.url;
+    const keepKey = keepDataUrl.get(sourceId)?.key;
 
     if (isMvt && layer.source.kind === 'data-layer') {
       if (!kept) {
@@ -3261,17 +3308,16 @@ function syncOverlays(
             layer.boundaryFilterItemId,
             mapClipBoundaryId,
             asOfTime,
+            tileFieldRefs(layer),
           );
-        m.addSource(sourceId, {
-          type: 'vector',
-          tiles: [tileUrl],
-          minzoom: 0,
-          maxzoom: 22,
-          // Vector-source promoteId is keyed by source-layer name.
-          // Our MVT emits one layer named "features", so we attach
-          // the promote rule there.
-          promoteId: { features: '_global_id' },
-        });
+        // The layer's tile zoom range (from its TileJSON): past the
+        // deepest built zoom MapLibre overzooms instead of drawing the
+        // server's empty tiles, so a layer with maxZoom 14 stays
+        // visible at z15+.
+        m.addSource(
+          sourceId,
+          dataLayerVectorSource(tileUrl, dataLayerSourceZoom(layer.source)),
+        );
       }
     } else if (!kept) {
       m.addSource(sourceId, {
@@ -3574,7 +3620,7 @@ function syncOverlays(
         // Canonical data URL stamp the next pass's keep-alive
         // decision reads (see keepDataUrl up top). Only present for
         // source kinds that participate in keep-alive.
-        ...(keepUrl ? { metadata: { ggDataUrl: keepUrl } } : {}),
+        ...(keepKey ? { metadata: { ggDataUrl: keepKey } } : {}),
         minzoom,
         maxzoom,
         filter: combineFilter(
@@ -3612,7 +3658,7 @@ function syncOverlays(
         source: sourceId,
         ...sourceLayerProp,
         // URL stamp for keep-alive; twin of the extrusion branch.
-        ...(keepUrl ? { metadata: { ggDataUrl: keepUrl } } : {}),
+        ...(keepKey ? { metadata: { ggDataUrl: keepKey } } : {}),
         minzoom,
         maxzoom,
         filter: combineFilter(
@@ -3903,13 +3949,47 @@ function syncOverlays(
           'text-opacity': op,
         },
       };
-      if (layer.filter) {
+      // Label points (the data layer's tile setting `labelPoints`).
+      // MapLibre labels a line or polygon once per tile piece, so a
+      // parcel that crosses a tile edge gets two labels and a long road
+      // gets one per tile. When the server sends a `labels` layer, each
+      // line and polygon carries `_label_point: true` in `features` and
+      // exactly one point in `labels`, in the one tile that contains
+      // it. So: label the geometry only where it is NOT marked, and
+      // label the marked ones from their point. A layer without the
+      // setting has no marks and no `labels` layer, so this draws
+      // exactly what it always did. Along-the-line placement keeps
+      // labelling the geometry, because a point cannot follow a line.
+      const usePoints = isMvt && labels.placement !== 'line';
+      if (usePoints) {
+        symbolLayer.filter = combineFilter(
+          ['!=', ['get', TILE_LABEL_POINT_PROP], true],
+          layer.filter,
+        ) as maplibregl.FilterSpecification;
+      } else if (layer.filter) {
         symbolLayer.filter = combineFilter(
           ['all'],
           layer.filter,
         ) as maplibregl.FilterSpecification;
       }
       applyLayer(symbolLayer);
+      if (usePoints) {
+        const pointLabels: maplibregl.SymbolLayerSpecification = {
+          ...symbolLayer,
+          id: `gg:${layer.id}-label-pt`,
+          'source-layer': TILE_LABELS_LAYER,
+          layout: { ...symbolLayer.layout, 'symbol-placement': 'point' },
+        };
+        if (layer.filter) {
+          pointLabels.filter = combineFilter(
+            ['all'],
+            layer.filter,
+          ) as maplibregl.FilterSpecification;
+        } else {
+          delete pointLabels.filter;
+        }
+        applyLayer(pointLabels);
+      }
     }
 
     // Kept sources skip the global teardown, so prune any of their

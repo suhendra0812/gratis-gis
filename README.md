@@ -12,13 +12,13 @@ field collection, and QGIS. It is not a full ArcGIS Online replacement,
 and it is not a drop-in for Experience Builder, Survey123, Field Maps,
 or enterprise identity depth.
 
-**Status:** [v1.2.0](./CHANGELOG.md). The public surface follows
+**Status:** [v1.3.0](./CHANGELOG.md). The public surface follows
 [semantic versioning](./docs/VERSIONING.md). For what ships today, see
 [docs/walkthrough.md](./docs/walkthrough.md) and the
 [changelog](./CHANGELOG.md). Store-listed native mobile apps are not
 part of 1.0; the field PWA is the supported field client.
 
-**Try it:** [gratisgis.org](https://gratisgis.org) is a public demo
+**Try it:** [demo.gratisgis.org](https://demo.gratisgis.org) is a public demo
 (test credentials and a daily reset on the landing page). Same sample
 workspace as in-app "Load sample data." Bugs and chat:
 [Issues](https://github.com/palavido-dev/gratis-gis/issues) ·
@@ -40,7 +40,7 @@ Commits, and how reviews work (the maintainer is the final reviewer).
 | Authorization | [Cedar](https://www.cedarpolicy.com/) |
 | Object storage | [MinIO](https://min.io/) |
 | Edge | [Caddy](https://caddyserver.com/) |
-| Tiles | [pg\_tileserv](https://github.com/CrunchyData/pg_tileserv) + PostGIS MVT |
+| Tiles | PostGIS MVT served by portal-api, which checks sharing on every tile |
 | Web | [Next.js](https://nextjs.org/) + [React](https://react.dev/) |
 | Maps | [MapLibre GL](https://maplibre.org/) + [Terra Draw](https://terradraw.io/) |
 | Tile bundles | [PMTiles](https://github.com/protomaps/PMTiles) |

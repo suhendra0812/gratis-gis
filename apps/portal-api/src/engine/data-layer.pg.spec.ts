@@ -242,6 +242,14 @@ d('observation-log read paths against real PostGIS', () => {
         AFTER INSERT ON observation
         FOR EACH ROW EXECUTE FUNCTION observation_notify_written()
     `);
+    await pool.query(`DROP TABLE IF EXISTS item`);
+    await pool.query(`
+      CREATE TABLE item (
+        id uuid PRIMARY KEY,
+        data_json jsonb NOT NULL,
+        updated_at timestamptz NOT NULL DEFAULT now()
+      )
+    `);
   });
 
   afterAll(async () => {
@@ -1445,6 +1453,12 @@ d('observation-log read paths against real PostGIS', () => {
     const itemsStub = {
       get: async (_user: AuthUser, id: string) =>
         id === geocoderId ? geocoderItem : sourceItem,
+      // The owner reads every row: no geo limit, no own-rows scope.
+      featureReadScope: async () => ({
+        geoLimit: null,
+        rowScope: 'all' as const,
+        userId: 'owner',
+      }),
     };
 
     beforeAll(async () => {
@@ -2533,6 +2547,19 @@ d('observation-log read paths against real PostGIS', () => {
 
     const user = { id: 'itest-user', username: 'itest' } as AuthUser;
 
+    beforeAll(async () => {
+      await pool.query(
+        `INSERT INTO item (id, data_json) VALUES ($1, $2::jsonb)`,
+        [
+          itemId,
+          JSON.stringify({
+            version: 3,
+            layers: [{ id: layerId, syncVersion: 0 }],
+          }),
+        ],
+      );
+    });
+
     async function createRowCount(scope: string, entity: string) {
       const res = await pool.query(
         `SELECT COUNT(*)::int AS n FROM observation
@@ -2662,8 +2689,140 @@ d('observation-log read paths against real PostGIS', () => {
       expect(again.inserted).toBe(1);
       expect(again.deduplicated).toBe(0);
       expect(await createRowCount(scope, gid)).toBe(2);
+      // Both create rows used to join, listing the entity twice with
+      // two different `_created_at` values. Exactly one row, stamped
+      // with the latest create, on every read that joins creates.
+      const engine = makeEngine();
+      const list = await engine.listFeatures({ itemId, layerId });
+      const mine = list.features.filter((f) => f.id === gid);
+      expect(mine).toHaveLength(1);
+      const creates = await pool.query(
+        `SELECT tx_time FROM observation
+          WHERE scope = $1 AND entity = $2::uuid AND kind = 'create'
+          ORDER BY valid_from DESC, tx_time DESC, id DESC`,
+        [scope, gid],
+      );
+      expect(new Date(mine[0]!.properties._created_at as string).getTime()).toBe(
+        (creates.rows[0].tx_time as Date).getTime(),
+      );
+      const bbox = await engine.listFeatures({
+        itemId,
+        layerId,
+        bbox: [HERE[0] - 1, HERE[1] - 1, HERE[0] + 1, HERE[1] + 1],
+      });
+      expect(bbox.features.filter((f) => f.id === gid)).toHaveLength(1);
+      const paged: string[] = [];
+      for await (const page of engine.iterateFeatures({ itemId, layerId })) {
+        for (const f of page) if (f.id === gid) paged.push(String(f.id));
+      }
+      expect(paged).toHaveLength(1);
+    });
+
+    it('own rows follow the latest create: a re-created id is not the old creator\'s', async () => {
+      const A = { sub: 'own-latest-a', displayName: 'A' };
+      const B = { sub: 'own-latest-b', displayName: 'B' };
+      const gid = uuidv7();
+      const engine = makeEngine();
+      const create = (principal: typeof A, name: string) =>
+        engine.writeFeaturesCreateIdempotent([
+          {
+            itemId,
+            layerId,
+            principal,
+            globalId: gid,
+            properties: { NAME: name },
+            geometry: { type: 'Point', coordinates: HERE },
+          },
+        ]);
+      await create(A, 'OwnLatest First');
+      await engine.writeFeatureDelete({ itemId, layerId, globalId: gid, principal: A });
+      await create(B, 'OwnLatest Second');
+
+      const near: [number, number, number, number] = [
+        HERE[0] - 1,
+        HERE[1] - 1,
+        HERE[0] + 1,
+        HERE[1] + 1,
+      ];
+      const sees = async (sub: string) => {
+        const ownRowsOnly = { userId: sub };
+        const list = await engine.listFeatures({ itemId, layerId, ownRowsOnly });
+        const page = await engine.pageFeatures({
+          itemId,
+          layerId,
+          limit: 1000,
+          entityIds: [gid],
+          ownRowsOnly,
+        });
+        const search = await engine.searchFeatures({
+          itemId,
+          layerId,
+          q: 'OwnLatest',
+          limit: 8,
+          ownRowsOnly,
+        });
+        const agg = await engine.aggregateFeatures({
+          itemId,
+          layerId,
+          aggs: [{ op: 'count', as: 'count' }],
+          ownRowsOnly,
+        });
+        const extent = await engine.filteredExtent({ itemId, layerId, ownRowsOnly });
+        return {
+          list: list.features.some((f) => f.id === gid),
+          page: page.features.some((f) => f.id === gid),
+          search: search.results.some((r) => r.id === gid),
+          count: Number(agg.groups[0]?.values.count ?? 0),
+          extent: extent !== null && near[0] <= HERE[0],
+        };
+      };
+      // Before: A matched on either create, so A could still read (and
+      // through the same predicate, edit) B's feature.
+      expect(await sees(A.sub)).toEqual({
+        list: false,
+        page: false,
+        search: false,
+        count: 0,
+        extent: false,
+      });
+      expect(await sees(B.sub)).toEqual({
+        list: true,
+        page: true,
+        search: true,
+        count: 1,
+        extent: true,
+      });
+
+    });
+
+    it('an entity whose create row is missing still lists', async () => {
+      const svc = makeService();
+      const gid = uuidv7();
+      const scope = dataLayerScope(itemId, layerId);
+      await svc.insertFeatures(
+        itemId,
+        layerId,
+        [{ globalId: gid, geometry: { type: 'Point', coordinates: HERE }, properties: { NAME: 'Orphan' } }],
+        user,
+      );
+      await makeEngine().writeFeatureUpdate({
+        itemId,
+        layerId,
+        globalId: gid,
+        principal: PRINCIPAL,
+        properties: { NAME: 'Orphan 2' },
+        geometry: { type: 'Point', coordinates: HERE },
+      });
+      // A replace import that raced an online edit can leave the head
+      // live with no create row; tiles and aggregates still show it.
+      await pool.query(
+        `DELETE FROM observation WHERE scope = $1 AND entity = $2::uuid AND kind = 'create'`,
+        [scope, gid],
+      );
       const list = await makeEngine().listFeatures({ itemId, layerId });
-      expect(list.features.some((f) => f.id === gid)).toBe(true);
+      const mine = list.features.filter((f) => f.id === gid);
+      expect(mine).toHaveLength(1);
+      expect(mine[0]!.properties._created_by).toBe(PRINCIPAL.sub);
     });
   });
 
@@ -2742,6 +2901,149 @@ d('observation-log read paths against real PostGIS', () => {
       expect(cache.onObservationWritten(scope)).toBe(1);
       expect(cache.get(`${scope}|12/1/1|`)).toBeNull();
       expect(cache.get(`${scope}-other|12/1/1|`)).not.toBeNull();
+    });
+  });
+
+  describe('scenario 12: disk tiles follow the scope data version', () => {
+    // The disk tier files a tile under the scope's data version, read
+    // from Postgres. It must move on every change a tile can see,
+    // including ones no NOTIFY reports (a raw DELETE) and a delete plus
+    // insert of the same row count in one transaction, and it must not
+    // move for another scope.
+    const itemId = uuidv7();
+    const layerId = 'layer-disk-version';
+    const scope = dataLayerScope(itemId, layerId);
+    let dir: string;
+    const prevDir = process.env.TILE_CACHE_DIR;
+    const prevSha = process.env.GIT_SHA;
+
+    beforeAll(async () => {
+      const { mkdtemp } = await import('node:fs/promises');
+      const { tmpdir } = await import('node:os');
+      const { join } = await import('node:path');
+      dir = await mkdtemp(join(tmpdir(), 'gg-tile-disk-pg-'));
+    });
+
+    afterAll(async () => {
+      if (prevDir === undefined) delete process.env.TILE_CACHE_DIR;
+      else process.env.TILE_CACHE_DIR = prevDir;
+      if (prevSha === undefined) delete process.env.GIT_SHA;
+      else process.env.GIT_SHA = prevSha;
+      const { rm } = await import('node:fs/promises');
+      await rm(dir, { recursive: true, force: true });
+    });
+
+    it('changes on insert, raw delete and same-count replace, and not for other scopes', async () => {
+      const engine = makeEngine();
+      const v0 = await engine.scopeDataVersion(scope);
+      const a = uuidv7();
+      await seed(scope, a, 'create', { N: 1 }, HERE);
+      const v1 = await engine.scopeDataVersion(scope);
+      expect(v1).not.toBe(v0);
+
+      await seed(dataLayerScope(uuidv7(), layerId), uuidv7(), 'create', {}, HERE);
+      expect(await engine.scopeDataVersion(scope)).toBe(v1);
+
+      // Replace one row with another in one transaction: same count.
+      const tx = await pool.connect();
+      await tx.query('BEGIN');
+      await tx.query('DELETE FROM observation WHERE scope = $1', [scope]);
+      await tx.query(
+        `INSERT INTO observation (id, valid_from, scope, entity, kind, attrs, geom, author_sub, source)
+         VALUES ($1, now() - interval '1 day', $2, $3, 'create', '{"N":2}',
+                 ST_SetSRID(ST_MakePoint($4, $5), 4326), 'itest', '{}')`,
+        [uuidv7(), scope, a, HERE[0], HERE[1]],
+      );
+      await tx.query('COMMIT');
+      tx.release();
+      const v2 = await engine.scopeDataVersion(scope);
+      expect(v2).not.toBe(v1);
+
+      // A raw delete fires no NOTIFY; the version still moves.
+      await pool.query('DELETE FROM observation WHERE scope = $1', [scope]);
+      expect(await engine.scopeDataVersion(scope)).not.toBe(v2);
+    });
+
+    it('serves a restarted process from disk, and recomputes after a write it never heard', async () => {
+      process.env.TILE_CACHE_DIR = dir;
+      process.env.GIT_SHA = 'pg-spec';
+      const e = uuidv7();
+      await seed(scope, e, 'create', { STATUS: 'Open' }, HERE);
+      // Tiles under 1 KiB are not persisted; forty more points make
+      // this one comfortably larger.
+      for (let i = 0; i < 40; i += 1) {
+        await seed(scope, uuidv7(), 'create', {}, [HERE[0] + i * 0.00001, HERE[1]]);
+      }
+      const { x, y } = tileFor(14, HERE[0], HERE[1]);
+
+      const first = new TileCacheService();
+      const before = await new DataLayerEngine(engineSvc, prisma, lensPolicyPassthrough, first)
+        .mvtTile({ itemId, layerId, z: 14, x, y });
+      expect(tileContains(before.mvt, e)).toBe(true);
+      await first.onModuleDestroy();
+
+      // "Restart": a fresh cache and engine over the same directory.
+      const second = new TileCacheService();
+      const again = await new DataLayerEngine(engineSvc, prisma, lensPolicyPassthrough, second)
+        .mvtTile({ itemId, layerId, z: 14, x, y });
+      expect(second.getStats().diskHits).toBe(1);
+      expect(again.etag).toBe(before.etag);
+      await second.onModuleDestroy();
+
+      // A delete written while no process was listening.
+      await seed(scope, e, 'delete', null, null);
+      const third = new TileCacheService();
+      const after = await new DataLayerEngine(engineSvc, prisma, lensPolicyPassthrough, third)
+        .mvtTile({ itemId, layerId, z: 14, x, y });
+      expect(third.getStats().diskHits).toBe(0);
+      expect(tileContains(after.mvt, e)).toBe(false);
+      await third.onModuleDestroy();
+    });
+
+    it('never persists a relate (via) tile', async () => {
+      process.env.TILE_CACHE_DIR = dir;
+      process.env.GIT_SHA = 'pg-spec';
+      const { readdir } = await import('node:fs/promises');
+      const { join } = await import('node:path');
+      const countFiles = async () => {
+        let n = 0;
+        for (const shard of await readdir(dir).catch(() => [] as string[])) {
+          if (!/^[0-9a-f]{2}$/.test(shard)) continue;
+          n += (await readdir(join(dir, shard))).filter((f) => f.endsWith('.tile')).length;
+        }
+        return n;
+      };
+      const parentItemId = uuidv7();
+      const parentLayerId = 'layer-disk-parent';
+      const parentScope = dataLayerScope(parentItemId, parentLayerId);
+      await seed(parentScope, uuidv7(), 'create', { KEY: 'k' }, HERE);
+      const childItemId = uuidv7();
+      const childScope = dataLayerScope(childItemId, layerId);
+      for (let i = 0; i < 40; i += 1) {
+        await seed(childScope, uuidv7(), 'create', { SITE: 'k' }, [HERE[0] + i * 0.00001, HERE[1]]);
+      }
+      const { x, y } = tileFor(14, HERE[0], HERE[1]);
+      const cache = new TileCacheService();
+      const engine = new DataLayerEngine(engineSvc, prisma, lensPolicyPassthrough, cache);
+      const before = await countFiles();
+      const plain = await engine.mvtTile({ itemId: childItemId, layerId, z: 14, x, y });
+      expect(plain.mvt.length).toBeGreaterThan(1024);
+      await cache.diskTier()?.flush();
+      // The plain tile was written: the tier is on and the tile is big
+      // enough, so the next assertion means something.
+      expect(await countFiles()).toBe(before + 1);
+      const viaTile = await engine.mvtTile({
+        itemId: childItemId,
+        layerId,
+        z: 14,
+        x,
+        y,
+        via: { myField: 'SITE', parentField: 'KEY', parentItemId, parentLayerId },
+      });
+      expect(viaTile.mvt.length).toBeGreaterThan(1024);
+      await cache.diskTier()?.flush();
+      expect(await countFiles()).toBe(before + 1);
+      await cache.onModuleDestroy();
     });
   });
 

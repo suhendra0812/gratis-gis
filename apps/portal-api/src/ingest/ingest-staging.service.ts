@@ -1,13 +1,16 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import {
+  BadRequestException,
   ForbiddenException,
   Injectable,
   Logger,
   NotFoundException,
   OnModuleInit,
+  Optional,
 } from '@nestjs/common';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { LeaderElectionService } from '../cron/leader-election.service.js';
+import { PrismaService } from '../prisma/prisma.service.js';
 import {
   copyFile,
   mkdir,
@@ -21,8 +24,10 @@ import {
 import { createWriteStream, existsSync } from 'node:fs';
 import { pipeline } from 'node:stream/promises';
 import { tmpdir } from 'node:os';
-import { basename, join } from 'node:path';
+import { realpathSync } from 'node:fs';
+import { basename, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { containedPayloadFile, payloadFileName } from './ingest-disk-path.js';
 
 /**
  * Staged-upload service. The data_layer create wizard uploads a
@@ -39,26 +44,64 @@ import { randomUUID } from 'node:crypto';
  * On-disk layout (one directory per stagingId):
  *
  *   /tmp/gg-staging/<uuid>/
- *     <safe-original-name>     -- the actual bytes
- *     meta.json                -- { ownerId, originalName, sizeBytes, createdAt }
+ *     <stored-name>            the actual bytes
+ *     meta.json                { ownerId, originalName, storedName, sizeBytes, createdAt }
+ *
+ * `storedName` is the plain file name the bytes were written under.
+ * Stagings written before it existed have no `storedName`; for those
+ * getStaging() falls back to safeFilename(originalName), the rule
+ * those versions used.
  *
  * Authorization is per-user: we record the userId at stage time and
  * refuse a getStaging() lookup from anyone else. This is also why the
  * wizard's Create item flow is the only thing that consumes a staging
  * -- shared/team uploads are out of scope for v1.
  *
- * Lifetime: one hour. The cleanup cron runs every 15 minutes and
- * blows away any staging whose meta.createdAt is older than that. A
+ * Lifetime: one hour. The cleanup cron runs every 30 minutes and
+ * blows away any staging whose meta.createdAt is older than that,
+ * unless an import job still queued or running reads from it. A
  * user who pauses on the Create item screen for over an hour will
  * have to re-upload, which we treat as an acceptable trade for
  * bounded disk usage. Stagings are also implicitly bounded by the
  * 1 GB per-file ceiling shared with the rest of the ingest stack.
  */
+const STAGING_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** True only for one string shaped like the UUIDs stage() mints. */
+export function isStagingId(value: unknown): value is string {
+  return typeof value === 'string' && STAGING_ID.test(value);
+}
+
+/**
+ * The filesystem that holds staged uploads. Prod mounts STAGING_DIR
+ * as its own volume, so free-space checks must look there and not at
+ * the container's tmpdir. Without STAGING_DIR the staging tree sits
+ * under tmpdir(), so that is the filesystem to measure.
+ */
+export function stagingDiskPath(): string {
+  return process.env.STAGING_DIR?.trim() || tmpdir();
+}
+
+/**
+ * Resolve `child` under `root` and refuse anything that lands outside
+ * it. Returns null for an escape so callers pick their own error.
+ */
+function insideRoot(root: string, ...parts: string[]): string | null {
+  const base = resolve(root);
+  const target = resolve(base, ...parts);
+  return target.startsWith(base + sep) ? target : null;
+}
+
 @Injectable()
 export class IngestStagingService implements OnModuleInit {
   private readonly log = new Logger(IngestStagingService.name);
 
-  constructor(private readonly leader: LeaderElectionService) {}
+  constructor(
+    private readonly leader: LeaderElectionService,
+    // Optional so the bare-construction specs keep working. Every Nest
+    // graph that provides this service has the global PrismaModule.
+    @Optional() private readonly prisma?: PrismaService,
+  ) {}
 
   /** Stagings expire after this many ms of wall-clock age. */
   private readonly maxAgeMs = 60 * 60 * 1000; // 1h
@@ -110,24 +153,23 @@ export class IngestStagingService implements OnModuleInit {
   }> {
     const stagingId = randomUUID();
     const dir = join(this.root, stagingId);
-    await mkdir(dir, { recursive: true });
-    const fileName = safeFilename(input.originalName);
+    await mkdir(dir, { recursive: true, mode: 0o700 });
+    const fileName = notMetaFile(safeFilename(input.originalName));
     const filePath = join(dir, fileName);
-    await writeFile(filePath, input.buffer);
+    await writeFile(filePath, input.buffer, { mode: 0o600 });
     const meta: StagingMeta = {
       ownerId: input.ownerId,
-      originalName: input.originalName,
+      originalName: plainLabel(input.originalName),
+      storedName: fileName,
       sizeBytes: input.buffer.length,
       createdAt: new Date().toISOString(),
     };
-    await writeFile(join(dir, 'meta.json'), JSON.stringify(meta));
-    this.log.log(
-      `Staged ${input.originalName} (${input.buffer.length} B) as ${stagingId} for user ${input.ownerId}`,
-    );
+    await writeFile(join(dir, 'meta.json'), JSON.stringify(meta), { mode: 0o600 });
+    this.log.log(`Staged upload (${input.buffer.length} B) as ${stagingId}`);
     return {
       stagingId,
       filePath,
-      originalName: input.originalName,
+      originalName: plainLabel(input.originalName),
       sizeBytes: input.buffer.length,
     };
   }
@@ -152,18 +194,26 @@ export class IngestStagingService implements OnModuleInit {
   }> {
     const stagingId = randomUUID();
     const dir = join(this.root, stagingId);
-    await mkdir(dir, { recursive: true });
-    const fileName = safeFilename(input.originalName);
-    const filePath = join(dir, fileName);
+    await mkdir(dir, { recursive: true, mode: 0o700 });
+    // The source path was chosen by the disk-upload pin, not by the
+    // request filename. Resolve it and refuse anything that is not
+    // that file, then keep the same server-chosen name in staging.
+    const source = containedPayloadFile(input.filePath);
+    const payloadName = payloadFileName(basename(source));
+    const storedName = payloadName ? notMetaFile(payloadName) : null;
+    if (!storedName) {
+      throw new BadRequestException('Upload file was not accepted.');
+    }
+    const filePath = join(dir, storedName);
     // rename is instant within a filesystem; fall back to copy+unlink
     // across devices (multer's tmpdir may be on a different mount than
     // the staging root).
     try {
-      await rename(input.filePath, filePath);
+      await rename(source, filePath);
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code === 'EXDEV') {
-        await copyFile(input.filePath, filePath);
-        await rm(input.filePath, { force: true }).catch(() => {});
+        await copyFile(source, filePath);
+        await rm(source, { force: true }).catch(() => {});
       } else {
         throw err;
       }
@@ -171,18 +221,17 @@ export class IngestStagingService implements OnModuleInit {
     const sizeBytes = (await stat(filePath)).size;
     const meta: StagingMeta = {
       ownerId: input.ownerId,
-      originalName: input.originalName,
+      originalName: plainLabel(input.originalName),
+      storedName,
       sizeBytes,
       createdAt: new Date().toISOString(),
     };
-    await writeFile(join(dir, 'meta.json'), JSON.stringify(meta));
-    this.log.log(
-      `Staged ${input.originalName} (${sizeBytes} B) as ${stagingId} for user ${input.ownerId}`,
-    );
+    await writeFile(join(dir, 'meta.json'), JSON.stringify(meta), { mode: 0o600 });
+    this.log.log(`Staged upload (${sizeBytes} B) as ${stagingId}`);
     return {
       stagingId,
       filePath,
-      originalName: input.originalName,
+      originalName: plainLabel(input.originalName),
       sizeBytes,
     };
   }
@@ -209,11 +258,11 @@ export class IngestStagingService implements OnModuleInit {
   }> {
     const stagingId = randomUUID();
     const dir = join(this.root, stagingId);
-    await mkdir(dir, { recursive: true });
-    const fileName = safeFilename(input.originalName);
+    await mkdir(dir, { recursive: true, mode: 0o700 });
+    const fileName = notMetaFile(safeFilename(input.originalName));
     const filePath = join(dir, fileName);
     try {
-      await pipeline(input.stream, createWriteStream(filePath));
+      await pipeline(input.stream, createWriteStream(filePath, { mode: 0o600 }));
     } catch (err) {
       // A half-written staging must not survive: the id was never
       // returned so nothing references it, and meta.json is written
@@ -227,18 +276,17 @@ export class IngestStagingService implements OnModuleInit {
     const sizeBytes = (await stat(filePath)).size;
     const meta: StagingMeta = {
       ownerId: input.ownerId,
-      originalName: input.originalName,
+      originalName: plainLabel(input.originalName),
+      storedName: fileName,
       sizeBytes,
       createdAt: new Date().toISOString(),
     };
-    await writeFile(join(dir, 'meta.json'), JSON.stringify(meta));
-    this.log.log(
-      `Staged ${input.originalName} (${sizeBytes} B, streamed) as ${stagingId} for user ${input.ownerId}`,
-    );
+    await writeFile(join(dir, 'meta.json'), JSON.stringify(meta), { mode: 0o600 });
+    this.log.log(`Staged upload (${sizeBytes} B, streamed) as ${stagingId}`);
     return {
       stagingId,
       filePath,
-      originalName: input.originalName,
+      originalName: plainLabel(input.originalName),
       sizeBytes,
     };
   }
@@ -254,21 +302,33 @@ export class IngestStagingService implements OnModuleInit {
     stagingId: string,
     callerUserId: string,
   ): Promise<{ filePath: string; originalName: string; sizeBytes: number }> {
-    if (!stagingId || !/^[0-9a-f-]{8,40}$/i.test(stagingId)) {
-      throw new NotFoundException(`Unknown stagingId "${stagingId}".`);
+    // Only a UUID minted by stage() is a staging id, and the resolved
+    // directory must sit directly inside the staging root.
+    if (!isStagingId(stagingId)) {
+      throw new NotFoundException('Unknown stagingId.');
     }
-    const dir = join(this.root, stagingId);
+    const dir = insideRoot(this.root, stagingId);
+    if (!dir) {
+      throw new NotFoundException('Unknown stagingId.');
+    }
+    const id = stagingId;
     if (!existsSync(dir)) {
       throw new NotFoundException(
-        `Staging "${stagingId}" not found (it may have expired; re-upload to retry).`,
+        'Staging was not found. It may have expired; re-upload to retry.',
       );
     }
-    const metaRaw = await readFile(join(dir, 'meta.json'), 'utf8').catch(
+    const rootReal = realpathSync(this.root);
+    const dirReal = realpathSync(dir);
+    const rel = relative(rootReal, dirReal);
+    if (rel.startsWith('..' + sep) || rel === '..' || isAbsolute(rel) || rel !== id) {
+      throw new NotFoundException('Staging was not found.');
+    }
+    const metaRaw = await readFile(join(dirReal, 'meta.json'), 'utf8').catch(
       () => null,
     );
     if (!metaRaw) {
       throw new NotFoundException(
-        `Staging "${stagingId}" is missing its meta record (re-upload to retry).`,
+        'Staging is missing its meta record. Re-upload to retry.',
       );
     }
     let meta: StagingMeta;
@@ -276,7 +336,7 @@ export class IngestStagingService implements OnModuleInit {
       meta = JSON.parse(metaRaw) as StagingMeta;
     } catch {
       throw new NotFoundException(
-        `Staging "${stagingId}" has a corrupt meta record (re-upload to retry).`,
+        'Staging has a corrupt meta record. Re-upload to retry.',
       );
     }
     if (meta.ownerId !== callerUserId) {
@@ -284,10 +344,18 @@ export class IngestStagingService implements OnModuleInit {
         'That staging belongs to a different user.',
       );
     }
-    const filePath = join(dir, safeFilename(meta.originalName));
+    const stored = storedFileName(meta);
+    if (!stored) {
+      throw new NotFoundException('Staging file was not accepted.');
+    }
+    const filePath = join(dirReal, stored);
+    const fileRel = relative(dirReal, filePath);
+    if (fileRel !== stored || isAbsolute(fileRel)) {
+      throw new NotFoundException('Staging file was not accepted.');
+    }
     if (!existsSync(filePath)) {
       throw new NotFoundException(
-        `Staging "${stagingId}" file is missing (re-upload to retry).`,
+        'Staging file is missing. Re-upload to retry.',
       );
     }
     return {
@@ -324,7 +392,13 @@ export class IngestStagingService implements OnModuleInit {
    * Periodic cleanup. Walks the staging root and removes any
    * directory whose meta.createdAt is older than maxAgeMs. Also
    * deletes meta-less directories older than maxAgeMs (a stage()
-   * that crashed before writing meta.json). Runs every 15 min.
+   * that crashed before writing meta.json). Runs every 30 min.
+   *
+   * A staging that a queued or running import job still reads from is
+   * kept whatever its age. The import worker runs one job at a time,
+   * so a multi-layer upload, or anything queued behind a county-sized
+   * import, can easily wait over an hour; deleting its file then fails
+   * an import the user was already told was queued.
    */
   @Cron(CronExpression.EVERY_30_MINUTES)
   async cleanupStaleScheduled(): Promise<void> {
@@ -334,6 +408,29 @@ export class IngestStagingService implements OnModuleInit {
     // recursive deletes.
     if (!this.leader.shouldRun()) return;
     await this.cleanupStaleSync();
+  }
+
+  /**
+   * Staging ids an unfinished import job still needs, or null when that
+   * cannot be read. A failed read skips the sweep: deleting a file a
+   * job needs is worse than keeping one an extra half hour.
+   */
+  private async stagingIdsInUse(): Promise<Set<string> | null> {
+    if (!this.prisma) return new Set();
+    try {
+      const rows = await this.prisma.importJob.findMany({
+        where: { status: { in: [...STAGING_SWEEP_KEEPS_JOB_STATES] } },
+        select: { stagingId: true },
+      });
+      return new Set(rows.map((r) => r.stagingId));
+    } catch (err) {
+      this.log.warn(
+        `Staging cleanup skipped; could not read import jobs: ${
+          err instanceof Error ? err.message : err
+        }`,
+      );
+      return null;
+    }
   }
 
   private async cleanupStaleSync(): Promise<void> {
@@ -349,9 +446,12 @@ export class IngestStagingService implements OnModuleInit {
       );
       return;
     }
+    const inUse = await this.stagingIdsInUse();
+    if (inUse === null) return;
     const now = Date.now();
     let removed = 0;
     for (const id of entries) {
+      if (inUse.has(id)) continue;
       const dir = join(this.root, id);
       const metaPath = join(dir, 'meta.json');
       let createdAt: number | null = null;
@@ -386,11 +486,70 @@ export class IngestStagingService implements OnModuleInit {
   }
 }
 
+/** Exported for the spec. */
+export const STAGING_SWEEP_KEEPS_JOB_STATES = ['queued', 'running'] as const;
+
 interface StagingMeta {
   ownerId: string;
   originalName: string;
+  /** File name inside the staging directory. Absent on stagings
+   *  written before this field existed. */
+  storedName?: string;
   sizeBytes: number;
   createdAt: string;
+}
+
+/** Display label for an upload name: printable ASCII, no path. */
+function plainLabel(name: string): string {
+  const base = basename(typeof name === 'string' ? name : '');
+  const chars: string[] = [];
+  for (let i = 0; i < base.length && chars.length < 120; i += 1) {
+    const ch = base.charAt(i);
+    const ok =
+      (ch >= 'a' && ch <= 'z') ||
+      (ch >= 'A' && ch <= 'Z') ||
+      (ch >= '0' && ch <= '9') ||
+      ch === '.' ||
+      ch === '_' ||
+      ch === '-' ||
+      ch === ' ';
+    if (ok) chars.push(ch);
+  }
+  return chars.join('') || 'upload';
+}
+
+/**
+ * File name of the staged bytes, or null when meta.json names
+ * anything other than a plain file inside the staging directory.
+ * Disk uploads store a `serverUploadName` result; buffer and stream
+ * stagings store safeFilename(originalName). Both are fixed points of
+ * their own rule, so a value that a rule would change (a separator,
+ * `..`, a leading dot) is refused. Stagings written before
+ * `storedName` existed fall back to safeFilename(originalName).
+ */
+function storedFileName(meta: StagingMeta): string | null {
+  const candidate =
+    typeof meta.storedName === 'string'
+      ? meta.storedName
+      : typeof meta.originalName === 'string'
+        ? safeFilename(meta.originalName)
+        : '';
+  if (
+    candidate.length === 0 ||
+    candidate === '.' ||
+    candidate === '..' ||
+    candidate === 'meta.json'
+  ) {
+    return null;
+  }
+  if (candidate.includes('/') || candidate.includes('\\')) return null;
+  if (payloadFileName(candidate)) return candidate;
+  return safeFilename(candidate) === candidate ? candidate : null;
+}
+
+/** An upload literally named meta.json must not overwrite the record. */
+function notMetaFile(name: string): string {
+  return name === 'meta.json' ? 'upload_meta.json' : name;
 }
 
 /**

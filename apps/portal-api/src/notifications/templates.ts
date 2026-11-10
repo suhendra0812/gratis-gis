@@ -227,7 +227,7 @@ const STANDARD_VARIABLES: TemplateVariableDescriptor[] = [
     name: 'baseUrl',
     label: 'Portal base URL',
     description: 'Public-facing URL prefix for deep links.',
-    example: 'https://gratisgis.org',
+    example: 'https://demo.gratisgis.org',
   },
 ];
 
@@ -387,6 +387,9 @@ const TYPE_VARIABLES: { [K in NotificationType]?: TemplateVariableDescriptor[] }
       description: 'Short plain-text excerpt of the comment.',
       example: 'Hey @bob can you check this?',
     },
+  ],
+  backup_failed: [
+    { name: 'runId', label: 'Backup run ID' },
   ],
 };
 
@@ -669,6 +672,19 @@ const renderers: { [K in NotificationType]?: Renderer<unknown> } = {
       `<blockquote style="margin:12px 0;padding:8px 12px;border-left:3px solid #cbd5e1;color:#334155;">` +
       `${escapeHtml(payload.snippet)}</blockquote>` +
       `<p><a href="${escapeAttr(itemUrl)}">Open the conversation</a></p>`;
+    return { subject, text, html };
+  }) as Renderer<unknown>,
+
+  backup_failed: ((payload: { runId?: string }, ctx) => {
+    const runId = typeof payload.runId === 'string' ? payload.runId : '';
+    const subject = `A backup did not finish on ${ctx.orgLabel}`;
+    const text =
+      `A backup did not finish. Open Admin, Backup, and read that run.\n` +
+      `Run id: ${runId}\n`;
+    const html =
+      `<p>A backup did not finish on ${escapeHtml(ctx.orgLabel)}. ` +
+      `Open Admin, Backup, and read that run.</p>` +
+      `<p>Run id: ${escapeHtml(runId)}</p>`;
     return { subject, text, html };
   }) as Renderer<unknown>,
 };

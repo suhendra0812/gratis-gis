@@ -41,8 +41,20 @@ import {
   tileOverloadRetryAfterSeconds,
 } from '../engine/tile-cache.service.js';
 import { requestAbortSignal } from '../common/request-signal.js';
+import {
+  buildTileJson,
+  layerAttribution,
+  parseIncludeParam,
+  planTile,
+  readTileSettings,
+  storedLayerBounds,
+  tileCacheControl,
+  tileJsonBase,
+} from '../data-layer/tile-settings.js';
 import { synthesizeThumbnailUrl } from '../items/thumbnail-url.js';
 import { withMetaUi } from '../items/meta-ui.js';
+import { ItemsService } from '../items/items.service.js';
+import { redactItemData } from '../items/item-data-redact.js';
 import {
   PUBLIC_TIER_SELECT,
   publicTierGeoLimit,
@@ -65,6 +77,7 @@ export class PublicController {
   constructor(
     private readonly prisma: PrismaService,
     private readonly v3: DataLayerFeaturesService,
+    private readonly itemsService: ItemsService,
   ) {}
 
   /**
@@ -283,7 +296,20 @@ export class PublicController {
     // meta.ui is the shared presentation contract for web / QGIS /
     // MCP (docs/meta-ui.md); computed here so anon detail matches
     // the authenticated GET /api/items/:id shape.
-    return withMetaUi(synthesizeThumbnailUrl(item));
+    // Same reader view a signed-in non-editor gets: per-layer access
+    // applied to a map (custom-access layers and their rosters do not
+    // reach an anonymous reader), and server-only fields such as
+    // anonymous markup tokens removed. Without this, signing out
+    // showed more than signing in.
+    const data =
+      item.type === 'map'
+        ? await this.itemsService.filterMapForViewer(null, item.data)
+        : item.data;
+    const safe = {
+      ...item,
+      data: redactItemData(item.type, data, { canEdit: false }) as typeof item.data,
+    };
+    return withMetaUi(synthesizeThumbnailUrl(safe));
   }
 
   /**
@@ -990,6 +1016,7 @@ export class PublicController {
     @Param('y') yStr: string,
     @Query('where') whereRaw?: string,
     @Query('via') viaRaw?: string,
+    @Query('include') includeRaw?: string,
   ) {
     if (!isUuidShape(itemId)) {
       throw new NotFoundException('Item not found');
@@ -1033,8 +1060,27 @@ export class PublicController {
       geoLimit?: unknown;
       where?: MapLayerFilter;
       via?: EngineVia;
+      maxFeaturesPerTile?: number;
+      zoomRange?: { min: number; max: number };
+      labelPoints?: boolean;
     } = {};
-    if (layer.fields.length > 0) opts.fields = layer.fields;
+    // The layer's tile settings narrow the field list (keeping what
+    // this map says it reads), cap the feature count and bound the
+    // zoom range, exactly as on the authenticated route.
+    const tileSettings = readTileSettings(layer.tiles);
+    const plan = planTile({
+      declared: layer.fields,
+      settings: tileSettings,
+      include: parseIncludeParam(includeRaw),
+      geometryType: layer.geometryType,
+    });
+    if (layer.fields.length > 0) opts.fields = plan.fields;
+    if (plan.maxFeaturesPerTile !== undefined) {
+      opts.maxFeaturesPerTile = plan.maxFeaturesPerTile;
+    }
+    if (plan.zoomRange) opts.zoomRange = plan.zoomRange;
+    if (plan.labelPoints) opts.labelPoints = true;
+    const cacheControl = tileCacheControl(tileSettings, 'public');
     if (layer.geometryType === null) opts.isTable = true;
     // The predicate an anonymous viewer's map sends. A relate is the
     // one that matters: without it the map layer drawn from a related
@@ -1079,16 +1125,83 @@ export class PublicController {
     }
     if (matchesIfNoneMatch(req.headers['if-none-match'], etag)) {
       res.setHeader('ETag', etag);
-      res.setHeader('Cache-Control', 'public, max-age=300');
+      res.setHeader('Cache-Control', cacheControl);
       res.status(304).end();
       return;
     }
     res.setHeader('Content-Type', 'application/vnd.mapbox-vector-tile');
     res.setHeader('ETag', etag);
     // Public tiles can sit in shared caches; same posture as the
-    // OGC tile endpoint (5-min public window).
-    res.setHeader('Cache-Control', 'public, max-age=300');
+    // OGC tile endpoint (5-min public window unless the layer's tile
+    // settings choose another max-age, bounded to an hour).
+    res.setHeader('Cache-Control', cacheControl);
     res.end(mvt);
+  }
+
+  /**
+   * Anonymous TileJSON 3.0.0 for a layer of a public data_layer item,
+   * describing the tile route above. Same gate (access='public', not
+   * deleted, layer in the v3 schema): a private or org item answers
+   * 404 exactly as its tiles do, so the document leaks nothing the
+   * tiles would not. `bounds` is left out when a public tier boundary
+   * clips the layer, because the stored extent is then the unclipped
+   * one.
+   */
+  @Public()
+  @Get('items/:id/layers/:layerId/tilejson.json')
+  async layerTileJson(
+    @Res() res: Response,
+    @Param('id') itemId: string,
+    @Param('layerId') layerId: string,
+  ) {
+    if (!isUuidShape(itemId)) {
+      throw new NotFoundException('Item not found');
+    }
+    const item = await this.prisma.item.findFirst({
+      where: {
+        id: itemId,
+        type: 'data_layer',
+        access: 'public',
+        deletedAt: null,
+      },
+      select: {
+        id: true,
+        title: true,
+        description: true,
+        data: true,
+        bbox: true,
+        ...PUBLIC_TIER_SELECT,
+      },
+    });
+    if (!item) throw new NotFoundException('Item not found');
+    const layer = pickV3Layer(item.data, layerId);
+    if (!layer) throw new NotFoundException('Layer not found');
+    if (layer.geometryType === null) {
+      throw new NotFoundException('A table sublayer has no tiles.');
+    }
+    const settings = readTileSettings(layer.tiles);
+    const plan = planTile({
+      declared: layer.fields,
+      settings,
+      geometryType: layer.geometryType,
+    });
+    const doc = buildTileJson({
+      name:
+        layer.layerCount > 1 ? `${item.title} / ${layer.label}` : item.title,
+      description: item.description,
+      tileUrl:
+        `${tileJsonBase()}/api/public/items/${encodeURIComponent(itemId)}` +
+        `/layers/${encodeURIComponent(layerId)}/tile/{z}/{x}/{y}.mvt`,
+      settings,
+      fields: plan.fields,
+      bounds: item.publicGeoBoundaryId
+        ? null
+        : storedLayerBounds(layer.bbox, item.bbox),
+      attribution: layerAttribution(layer.raw, item.data),
+      labelPoints: plan.labelPoints === true,
+    });
+    res.setHeader('Cache-Control', 'public, max-age=300');
+    res.json(doc);
   }
 
   /**
@@ -1136,19 +1249,19 @@ export class PublicController {
         // recommended field, and aggregators like data.gov filter
         // their crawls to license-bearing rows).
         license: true,
-        // Include the data payload so the landing tile can route a
-        // templated web_app (editor / viewer) straight to its
-        // runtime URL. Without `data`, getItemHref / isViewerItem
-        // can't read the `template` discriminator and falls through
-        // to /items/:id, which middleware then redirects to sign-in
-        // for anonymous visitors. The payload is already public-by-
-        // construction (we only emit access='public' rows) and the
-        // data shape across the supported types is small.
+        // Read so the landing tile can route a templated web_app
+        // (editor / viewer / custom) straight to its runtime URL;
+        // getItemHref needs the `template` discriminator. Only that
+        // field is returned (landingItemData): the full blob carries
+        // map drawings' anonymous author tokens, data layer sync
+        // conflicts and layers a public map hides from viewers.
         data: true,
       },
       orderBy: { updatedAt: 'desc' },
     });
-    const all = rows.map((r) => synthesizeThumbnailUrl(r));
+    const all = rows.map((r) =>
+      synthesizeThumbnailUrl({ ...r, data: landingItemData(r.data) }),
+    );
     if (featuredIds.length === 0) return all;
 
     // Featured = strict filter when it resolves to anything: when the
@@ -1193,6 +1306,14 @@ export function isUuidShape(id: string): boolean {
 interface V3LayerInfo {
   geometryType: string | null;
   fields: Array<{ name: string; type?: string }>;
+  label: string;
+  /** How many layers the item has, for the TileJSON name. */
+  layerCount: number;
+  /** Raw stored tile settings; read with readTileSettings. */
+  tiles?: unknown;
+  bbox?: unknown;
+  /** The raw layer object, for layerAttribution. */
+  raw: unknown;
 }
 
 /**
@@ -1209,7 +1330,10 @@ function pickV3Layer(data: unknown, layerId: string): V3LayerInfo | null {
     layers?: Array<{
       id?: unknown;
       geometryType?: unknown;
+      label?: unknown;
       fields?: Array<{ name?: unknown; type?: unknown }>;
+      tiles?: unknown;
+      bbox?: unknown;
     }>;
   };
   if (d.version !== 3 || !Array.isArray(d.layers)) return null;
@@ -1232,5 +1356,24 @@ function pickV3Layer(data: unknown, layerId: string): V3LayerInfo | null {
       }
     }
   }
-  return { geometryType, fields };
+  return {
+    geometryType,
+    fields,
+    label: typeof match.label === 'string' ? match.label : layerId,
+    layerCount: d.layers.length,
+    ...(match.tiles !== undefined ? { tiles: match.tiles } : {}),
+    ...(match.bbox !== undefined ? { bbox: match.bbox } : {}),
+    raw: match,
+  };
+}
+
+/**
+ * The part of a public item's `data` the landing page needs: the
+ * web_app `template` discriminator that getItemHref routes on.
+ * Everything else is dropped.
+ */
+export function landingItemData(data: unknown): { template: string } | null {
+  if (!data || typeof data !== 'object' || Array.isArray(data)) return null;
+  const template = (data as { template?: unknown }).template;
+  return typeof template === 'string' ? { template } : null;
 }

@@ -1,6 +1,11 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 'use client';
 
+import {
+  isStaleItemSave,
+  useGuardedItemPatch,
+  withExpectedUpdatedAt,
+} from '@/lib/item-version';
 import { useFormat } from '@/lib/i18n/format';
 import { useT } from '@/lib/i18n/locale-context';
 
@@ -111,9 +116,12 @@ import {
 } from '@/components/form-runtime';
 import { RegexQuestionFields } from './regex-builder';
 import { SubmissionReceipts } from './submission-receipts';
+import { apiErrorMessage, parseApiError } from '@/lib/api-error';
 
 interface Props {
   itemId: string;
+  /** The item's updatedAt as loaded; guards saves against a newer one. */
+  updatedAt?: string;
   initial: FormSchema | null;
   canEdit: boolean;
 }
@@ -145,7 +153,8 @@ interface Props {
  * Field-mode runtime can map submissions back to the layer
  * automatically.
  */
-export function FormDesigner({ itemId, initial, canEdit }: Props) {
+export function FormDesigner({ itemId, initial, canEdit, updatedAt }: Props) {
+  const patchItem = useGuardedItemPatch(itemId, updatedAt);
   const t = useT();
   const fmt = useFormat();
   const confirmDialog = useConfirm();
@@ -414,12 +423,12 @@ export function FormDesigner({ itemId, initial, canEdit }: Props) {
     setSaving(true);
     setError(null);
     try {
-      const res = await fetch(`/api/portal/items/${itemId}`, {
-        method: 'PATCH',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ data: form }),
-      });
-      if (!res.ok) throw new Error(`${res.status} ${await res.text()}`);
+      const res = await patchItem({ data: form });
+      if (isStaleItemSave(res)) {
+        setError(t('common.itemChangedElsewhere'));
+        return;
+      }
+      if (!res.ok) throw new Error(await apiErrorMessage(res));
       // Path-1 schema sync (#293 / #281d). Walk top-level and group
       // children for question types that map cleanly to typed
       // columns. Add missing columns to the linked layer's matching
@@ -6537,6 +6546,7 @@ interface RawSublayer {
 interface RawDataLayerItem {
   id: string;
   title: string;
+  updatedAt?: string;
   data?: {
     version?: number;
     layers?: RawSublayer[];
@@ -7022,22 +7032,27 @@ async function syncPairedLayerColumns(
   }
 
   const nextData = { ...data, layers: nextLayers };
+  // Guarded by the version just read, so a schema edit saved on the
+  // layer between that read and this write is not erased by it.
   const res = await fetch(`/api/portal/items/${layerItemId}`, {
     method: 'PATCH',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ data: nextData }),
+    body: JSON.stringify(withExpectedUpdatedAt({ data: nextData }, item.updatedAt)),
   });
-  // eslint-disable-next-line no-console
-  console.info(
-    '[gratisgis] syncPairedLayerColumns PATCH',
-    res.status,
-    res.ok ? 'ok' : await res.text().catch(() => ''),
-  );
-  if (!res.ok) {
-    throw new Error(
-      `Layer schema patch failed: ${res.status} ${await res.text().catch(() => '')}`,
-    );
+  if (isStaleItemSave(res)) {
+    throw new Error('The linked layer changed while its columns were being added. Save the form again to retry.');
   }
+  if (!res.ok) {
+    // Read the body once. It used to be read for this log line and
+    // again for the error, and the second read always came back empty,
+    // so the validator's sentence never reached the author.
+    const message = await parseApiError(res, 'Layer schema patch failed');
+    // eslint-disable-next-line no-console
+    console.info('[gratisgis] syncPairedLayerColumns PATCH', res.status, message);
+    throw new Error(message);
+  }
+  // eslint-disable-next-line no-console
+  console.info('[gratisgis] syncPairedLayerColumns PATCH', res.status, 'ok');
 }
 
 /**

@@ -1,4 +1,4 @@
-﻿// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: AGPL-3.0-or-later
 'use client';
 
 import {
@@ -105,6 +105,7 @@ import {
 import { DataCollectionBuilder } from './data-collection-builder';
 import { PostgisConnectionBuilder } from './postgis-connection-builder';
 import { BasemapConfigSection } from '../_components/basemap-config-section';
+import { enqueueStagedLayerImports } from '@/lib/staged-layer-import';
 import {
   DataLayerBuilder,
   type PendingFileImport,
@@ -392,6 +393,7 @@ export function NewItemWizard({
         ? (searchParams.get('type') as ItemType)
         : null;
   const [step, setStep] = useState<Step>(queryType ? 'details' : 'pick');
+  const [showMoreTypes, setShowMoreTypes] = useState(false);
   // #259: 'viewer' is a wizard-only sentinel that maps to web_app +
   // template='viewer' at submit time. It isn't a persisted ItemType
   // (the picker stays an Esri-friendly noun while the storage stays
@@ -1609,36 +1611,11 @@ export function NewItemWizard({
       // itself. Surface those inline; the user can retry per-layer
       // from the detail page. Per-layer-import-while-running errors
       // surface in the detail-page banner from the import_job row.
-      const ingestErrors: string[] = [];
+      const ingestErrors =
+        type === 'data_layer' && pendingFileImports.length > 0
+          ? await enqueueStagedLayerImports(saved.id, pendingFileImports)
+          : [];
       if (type === 'data_layer' && pendingFileImports.length > 0) {
-        for (const entry of pendingFileImports) {
-          for (const layer of entry.layers) {
-            try {
-              const enqueueUrl = `/api/portal/items/${saved.id}/layers/${layer.layerId}/import-jobs`;
-              const enqueueRes = await fetch(enqueueUrl, {
-                method: 'POST',
-                headers: { 'content-type': 'application/json' },
-                body: JSON.stringify({
-                  stagingId: entry.stagingId,
-                  sourceLayerName: layer.sourceLayerName,
-                  mode: 'replace',
-                }),
-              });
-              if (!enqueueRes.ok) {
-                const text = await enqueueRes.text().catch(() => '');
-                ingestErrors.push(
-                  `${layer.sourceLayerName}: ${enqueueRes.status} ${text.slice(0, 200)}`,
-                );
-              }
-            } catch (err) {
-              ingestErrors.push(
-                `${layer.sourceLayerName}: ${
-                  err instanceof Error ? err.message : 'network error'
-                }`,
-              );
-            }
-          }
-        }
         setPendingFileImports([]);
       }
       // data_layer still wants the ingest panel front and centre.
@@ -1679,14 +1656,18 @@ export function NewItemWizard({
     // Drop any type the portal cannot actually service, and any group
     // left empty as a result, so a disabled feature leaves no heading
     // hanging over nothing.
+    const PRIMARY = new Set(['data_layer', 'map', 'form']);
     const visibleGroups = TYPE_GROUPS.map((g) => ({
       ...g,
       options: g.options.filter(
-        (o) => o.value !== 'script' || scriptsEnabled,
+        (o) =>
+          (o.value !== 'script' || scriptsEnabled) &&
+          (showMoreTypes || PRIMARY.has(o.value) || queryType === o.value),
       ),
     })).filter((g) => g.options.length > 0);
     return (
       <div className="space-y-8">
+        <p className="text-sm text-ink-1">{t('newItem.taskIntro')}</p>
         {visibleGroups.map((group) => (
           <section key={group.groupKey}>
             {/* Group header inherits the group color via a small
@@ -1751,6 +1732,14 @@ export function NewItemWizard({
             </div>
           </section>
         ))}
+        <button
+          type="button"
+          className="rounded-md border border-border px-3 py-2 text-sm focus:outline-hidden focus:ring-2 focus:ring-accent/30"
+          aria-expanded={showMoreTypes}
+          onClick={() => setShowMoreTypes((value) => !value)}
+        >
+          {showMoreTypes ? t('newItem.fewerTypes') : t('newItem.moreTypes')}
+        </button>
       </div>
     );
   }
@@ -2349,7 +2338,7 @@ function FileItemUploader({
               {value.fileName}
             </div>
             <div className="mt-0.5 text-xs text-muted">
-              {humanFileSize(value.sizeBytes)} &middot;{' '}
+              {formatBytes(value.sizeBytes)} &middot;{' '}
               <span className="font-mono">{value.mimeType}</span>
             </div>
           </div>
@@ -2490,7 +2479,7 @@ function ServiceConfigSection({
               {data.serviceTitle ? (
                 <>
                   <span className="font-medium text-ink-0">{data.serviceTitle}</span>
-                  {' Â· '}
+                  {' · '}
                 </>
               ) : null}
               {data.layers.length} layer{data.layers.length === 1 ? '' : 's'}
@@ -2649,10 +2638,10 @@ function OgcConfigSection({
               {probeResult.title ? (
                 <>
                   <span className="font-medium text-ink-0">{probeResult.title}</span>
-                  {' Â· '}
+                  {' · '}
                 </>
               ) : null}
-              {protocolLabel} {probeResult.protocolVersion} Â· {probeResult.layers.length}{' '}
+              {protocolLabel} {probeResult.protocolVersion} · {probeResult.layers.length}{' '}
               {layerWord}
               {probeResult.layers.length === 1 ? '' : 's'}
             </div>
@@ -2722,14 +2711,6 @@ function OgcConfigSection({
   );
 }
 
-
-/** Human-friendly size string for the file metadata row. */
-function humanFileSize(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-  return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
-}
 
 interface ArcgisConfigProps {
   urlDraft: string;
@@ -2977,12 +2958,12 @@ function ArcgisConfigSection({
               </p>
               <p className="mt-0.5 flex items-center gap-1 text-2xs text-muted">
                 <span>{probeResult.serviceType}</span>
-                <span aria-hidden="true">Â·</span>
+                <span aria-hidden="true">·</span>
                 <span>
                   {probeResult.layers.length}{' '}
                   {probeResult.layers.length === 1 ? 'layer' : 'layers'}
                 </span>
-                <span aria-hidden="true">Â·</span>
+                <span aria-hidden="true">·</span>
                 <a
                   href={`${probeResult.url}?f=html`}
                   target="_blank"

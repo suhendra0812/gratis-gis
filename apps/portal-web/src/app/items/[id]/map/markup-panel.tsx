@@ -1,9 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 'use client';
 
-import { formatDate } from '@/lib/i18n/format';
+import { useFormat } from '@/lib/i18n/format';
 import { useT } from '@/lib/i18n/locale-context';
-import { DEFAULT_LOCALE } from '@/lib/i18n/locales';
 
 /**
  * Markup panel (#154 Phase 1 + 1.5 + annotation kinds).
@@ -62,6 +61,7 @@ import {
   useTerraDraw,
   type MarkupDrawTool,
 } from './use-terra-draw';
+import { portalJson } from '@/lib/portal-json';
 
 type MarkupTool = 'off' | MarkupDrawTool;
 
@@ -144,6 +144,7 @@ export function MarkupPanel({
   initialDrawings,
 }: Props) {
   const t = useT();
+  const fmt = useFormat();
   const [drawings, setDrawings] = useState<DrawingSet[]>(initialDrawings);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -724,7 +725,7 @@ export function MarkupPanel({
                         </button>
                       )}
                       <p className="truncate text-2xs text-muted">
-                        {set.authorDisplay} - {formatRelative(set.updatedAt)}
+                        {set.authorDisplay} - {fmt.relativeTime(set.updatedAt)}
                         {' - '}
                         {t('mapMarkup.features', {
                           count: set.features.length,
@@ -981,50 +982,3 @@ function message(e: unknown, fallback: string): string {
   return fallback;
 }
 
-/**
- * Tiny client-side wrapper around fetch for the BFF surface. Lives
- * here rather than in a shared lib because most other map editor
- * panels inline their fetches and we don't want to pull them all
- * into a refactor right now. Returns parsed JSON on success or
- * undefined for empty responses (e.g. 204 on DELETE).
- */
-async function portalJson<T = unknown>(
-  url: string,
-  init: RequestInit = {},
-): Promise<T> {
-  const headers: Record<string, string> = {
-    ...((init.headers as Record<string, string>) ?? {}),
-  };
-  if (init.body && !headers['content-type'] && !headers['Content-Type']) {
-    headers['content-type'] = 'application/json';
-  }
-  const res = await fetch(url, { ...init, headers });
-  if (!res.ok) {
-    const body = await res.text().catch(() => '');
-    throw new Error(`${res.status}: ${body || res.statusText}`);
-  }
-  const text = await res.text();
-  if (!text) return undefined as T;
-  return JSON.parse(text) as T;
-}
-
-/**
- * Render a UTC ISO timestamp as a human-readable relative time
- * ("3 min ago", "yesterday"). Falls back to the date for anything
- * older than a week so the panel doesn't drift into useless
- * "47 days ago" text.
- */
-function formatRelative(iso: string): string {
-  const then = new Date(iso).getTime();
-  if (!Number.isFinite(then)) return iso;
-  const diff = Date.now() - then;
-  if (diff < 0) return 'just now';
-  const minutes = Math.floor(diff / 60_000);
-  if (minutes < 1) return 'just now';
-  if (minutes < 60) return `${minutes} min ago`;
-  const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `${hours} hr ago`;
-  const days = Math.floor(hours / 24);
-  if (days < 7) return `${days} d ago`;
-  return formatDate(iso, DEFAULT_LOCALE);
-}

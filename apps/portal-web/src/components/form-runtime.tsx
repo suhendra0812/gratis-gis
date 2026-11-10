@@ -2,6 +2,10 @@
 'use client';
 
 import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  geolocationBlock,
+  isInsecureGeolocationMessage,
+} from '@/lib/geolocation-context';
 import { useT } from '@/lib/i18n/locale-context';
 import {
   Camera,
@@ -37,6 +41,14 @@ import { attachmentPreviewSrc, uploadFormAttachment } from '@/lib/form-attachmen
 import { GeoPointMapPicker } from './form-inputs/geopoint-map-picker';
 import { SignatureInput } from './form-inputs/signature-input';
 import { useFormat } from '@/lib/i18n/format';
+import {
+  addRepeatInstance,
+  applyValueUpdate,
+  removeRepeatInstance,
+  updateGroupAnswer,
+  updateRepeatInstance,
+} from '@/lib/form-value-update';
+import { formatBytes } from '@/lib/format-bytes';
 
 /**
  * Mobile-first runtime that renders any FormSchema and captures a
@@ -145,8 +157,11 @@ export function FormRuntime({
     return m;
   }, [errors]);
 
+  // `value` may be an updater (see applyValueUpdate) so that a write
+  // that lands after an await (an upload finishing) builds on the
+  // latest answers rather than the ones from when it started.
   function setValue(id: string, value: unknown) {
-    setResponse((prev) => ({ ...prev, [id]: value }));
+    setResponse((prev) => ({ ...prev, [id]: applyValueUpdate(value, prev[id]) }));
   }
 
   async function handleSubmit() {
@@ -346,6 +361,10 @@ export function FormRuntime({
 
 // ---- Per-question rendering -------------------------------------
 
+function asArray(v: unknown): unknown[] {
+  return Array.isArray(v) ? v : [];
+}
+
 function QuestionField({
   q,
   response,
@@ -516,7 +535,9 @@ function GroupField({
           questions={q.children}
           response={inner}
           readOnly={readOnly}
-          onSet={(id, v) => onChange({ ...inner, [id]: v })}
+          onSet={(id, v) =>
+            onChange((prev: unknown) => updateGroupAnswer(prev, id, v))
+          }
         />
       </fieldset>
     );
@@ -539,8 +560,7 @@ function GroupField({
                   type="button"
                   className="inline-flex items-center gap-1 text-danger"
                   onClick={() => {
-                    const next = instances.filter((_, i) => i !== idx);
-                    onChange(next);
+                    onChange((prev: unknown) => removeRepeatInstance(prev, idx));
                   }}
                 >
                   <Trash2 className="h-3 w-3" />
@@ -553,9 +573,13 @@ function GroupField({
               response={inst}
               readOnly={readOnly}
               onSet={(id, v) => {
-                const next = instances.slice();
-                next[idx] = { ...inst, [id]: v };
-                onChange(next);
+                // Built from the latest array, not the render-time
+                // `instances`: a photo upload that resolves after the
+                // collector typed in another instance used to put the
+                // whole pre-upload array back.
+                onChange((prev: unknown) =>
+                  updateRepeatInstance(prev, idx, id, v),
+                );
               }}
             />
           </div>
@@ -565,7 +589,7 @@ function GroupField({
           <button
             type="button"
             onClick={() => {
-              onChange([...instances, {}]);
+              onChange((prev: unknown) => addRepeatInstance(prev));
             }}
             className="inline-flex h-9 items-center gap-1 rounded-md border border-dashed border-border bg-surface-1 px-3 text-sm font-medium text-ink-1 hover:bg-surface-2"
           >
@@ -1397,7 +1421,7 @@ function PhotoInput({
                   if (typeof navigator !== 'undefined' && navigator.onLine) {
                     try {
                       const uploaded = await uploadFormAttachment(file);
-                      onChange([...photos, uploaded]);
+                      onChange((prev: unknown) => [...normalizePhotoValue(prev), uploaded]);
                       return;
                     } catch (upErr) {
                       // Surface the error briefly but still queue the
@@ -1410,8 +1434,8 @@ function PhotoInput({
                     }
                   }
                   const dataUrl = await fileToDataUrl(file);
-                  onChange([
-                    ...photos,
+                  onChange((prev: unknown) => [
+                    ...normalizePhotoValue(prev),
                     {
                       name: file.name || 'photo',
                       mimeType: file.type || 'image/jpeg',
@@ -1636,7 +1660,7 @@ function MediaCaptureInput({
                         ? { durationSec }
                         : {}),
                     };
-                    onChange([...clips, next]);
+                    onChange((prev: unknown) => [...asArray(prev), next]);
                     return;
                   } catch (upErr) {
                     setErr(
@@ -1655,7 +1679,7 @@ function MediaCaptureInput({
                   dataUrl,
                   ...(typeof durationSec === 'number' ? { durationSec } : {}),
                 };
-                onChange([...clips, next]);
+                onChange((prev: unknown) => [...asArray(prev), next]);
               } finally {
                 setBusy(false);
               }
@@ -2073,12 +2097,6 @@ function FileInput({
     onChange(files.filter((_, i) => i !== idx));
   }
 
-  function fmtSize(b: number): string {
-    if (b < 1024) return `${b} B`;
-    if (b < 1024 * 1024) return `${(b / 1024).toFixed(1)} KB`;
-    return `${(b / (1024 * 1024)).toFixed(1)} MB`;
-  }
-
   return (
     <div className="space-y-2">
       {files.length > 0 ? (
@@ -2091,7 +2109,7 @@ function FileInput({
               <span className="flex-1 truncate" title={f.name}>
                 {f.name}
               </span>
-              <span className="text-2xs text-muted">{fmtSize(f.sizeBytes)}</span>
+              <span className="text-2xs text-muted">{formatBytes(f.sizeBytes)}</span>
               {!readOnly ? (
                 <button
                   type="button"
@@ -2516,6 +2534,10 @@ function GeoPointInput({
   const mapOnlyFailed = q.capture === 'map' && mapFailed;
 
   function capture() {
+    if (geolocationBlock() === 'insecure-context') {
+      setErr(t('common.geolocationInsecure'));
+      return;
+    }
     if (!('geolocation' in navigator)) {
       setErr(t('formRuntime.geolocationUnsupported'));
       return;
@@ -2532,7 +2554,11 @@ function GeoPointInput({
         setBusy(false);
       },
       (e) => {
-        setErr(e.message);
+        setErr(
+          isInsecureGeolocationMessage(e.message)
+            ? t('common.geolocationInsecure')
+            : e.message,
+        );
         setBusy(false);
       },
       { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 },

@@ -718,11 +718,15 @@ function InviteUserDialog({ onClose, onInvited }: InviteDialogProps) {
     });
     setSubmitting(false);
     if (!res.ok) {
+      await res.text().catch(() => '');
       setError(
-        t('adminUsers.invite.errInviteFailed', {
-          status: String(res.status),
-          detail: await res.text(),
-        }),
+        res.status === 409
+          ? t('adminUsers.invite.errDuplicate')
+          : res.status === 502
+            ? t('adminUsers.invite.errUpstream')
+            : t('adminUsers.invite.errInviteFailed', {
+                status: String(res.status),
+              }),
       );
       return;
     }
@@ -735,10 +739,7 @@ function InviteUserDialog({ onClose, onInvited }: InviteDialogProps) {
       await alert({
         title: t('adminUsers.invite.alertEmailFailedTitle'),
         tone: 'warn',
-        message: t('adminUsers.invite.alertEmailFailedMessage', {
-          username: created.username,
-          error: created.setupEmailError,
-        }),
+        message: t('adminUsers.invite.alertEmailFailedMessage'),
       });
     }
     onInvited(created);
@@ -1121,6 +1122,8 @@ interface CapabilityRow {
   capability: string;
   baseline: boolean;
   effective: boolean;
+  /** False when the API does not check this capability yet. */
+  enforced?: boolean;
   override: {
     enabled: boolean;
     note: string | null;
@@ -1275,7 +1278,12 @@ function CapabilitiesSection({
         </p>
       ) : (
         <ul className="space-y-1">
-          {rows.map((row) => {
+          {rows
+            // A capability no route checks yet would be a switch that
+            // does nothing. Keep an old override visible so it can be
+            // reset.
+            .filter((row) => row.enforced !== false || row.override !== null)
+            .map((row) => {
             const baseline =
               localBaselines?.get(row.capability) ?? row.baseline;
             const overridden = row.override !== null;

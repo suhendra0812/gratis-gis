@@ -1796,7 +1796,15 @@ function validateType(q: Question, value: unknown): string | null {
         return `Must be ${q.maxLength} characters or fewer.`;
       }
       if (q.type === 'text' && q.pattern) {
-        const re = new RegExp(`^(?:${q.pattern})$`);
+        let re: RegExp;
+        try {
+          re = new RegExp(`^(?:${q.pattern})$`);
+        } catch {
+          // Same rule as the `regex` type: a bad pattern is a designer
+          // error, so pass rather than throw out of validate(), which
+          // the server would turn into a 500 on every submission.
+          return null;
+        }
         if (!re.test(value)) return 'Does not match the required format.';
       }
       return null;
@@ -2977,6 +2985,7 @@ export {
   EXPRESSION_OP_ENGINE_VERSION,
   BUILTIN_ENGINE_VERSION,
   FORM_SCHEMA_ENGINE_VERSION,
+  BEHAVIOUR_ENGINE_VERSION,
   engineRequirement,
   requiredEngineVersion,
   engineSupports,

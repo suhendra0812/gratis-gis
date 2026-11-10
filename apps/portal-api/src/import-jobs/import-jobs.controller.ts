@@ -11,7 +11,7 @@ import {
   Post,
 } from '@nestjs/common';
 import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
-import { IsIn, IsOptional, IsString } from 'class-validator';
+import { IsIn, IsOptional, IsString, IsUUID } from 'class-validator';
 
 import { CurrentUser } from '../auth/current-user.decorator.js';
 import type { AuthUser } from '../auth/auth-sync.service.js';
@@ -22,7 +22,7 @@ import { ImportJobsService } from './import-jobs.service.js';
 import type { DataLayerLayerShape } from '../data-layer/tables.service.js';
 
 class CreateImportJobDto {
-  @IsString() stagingId!: string;
+  @IsUUID() stagingId!: string;
   @IsString() sourceLayerName!: string;
   @IsOptional() @IsIn(['replace', 'append']) mode?: 'replace' | 'append';
 }
@@ -95,7 +95,11 @@ export class ImportJobsController {
         `Layer ${layerId} is not part of this item's schema.`,
       );
     }
-    await this.items.assertCanEdit(user, itemId);
+    await this.items.assertCanImportAllRows(
+      user,
+      itemId,
+      (layer as { editingPolicy?: unknown }).editingPolicy,
+    );
 
     // Pre-validate the staging so a doomed job never lands in the
     // queue. getStaging throws Forbidden if the staging belongs to
@@ -131,6 +135,7 @@ export class ImportJobsController {
       totalFeatures,
       userId: user.id,
       orgId: user.orgId,
+      bytes: BigInt(staged.sizeBytes),
     });
     return this.jobs.toWire(row);
   }

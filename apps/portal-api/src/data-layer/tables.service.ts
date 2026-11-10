@@ -102,8 +102,7 @@ export class DataLayerTablesService {
              SELECT DISTINCT ON (entity) entity, geom, kind
              FROM observation
              WHERE scope = $1
-               AND valid_to IS NULL
-             ORDER BY entity, valid_from DESC, tx_time DESC
+             ORDER BY entity, valid_from DESC, tx_time DESC, id DESC
            ) latest
            WHERE kind <> 'delete' AND geom IS NOT NULL`,
           scope,
@@ -170,32 +169,6 @@ export class DataLayerTablesService {
   }
 
   /**
-   * Empty a layer's data without dropping the data_layer item itself
-   * (#244). Replace-mode ingest contract: "this is the data now,
-   * forget what was there before." Phase 2.4 rewires this onto the
-   * engine: every observation in the scope is removed, including
-   * history. The append-only log alternative (write a tombstone per
-   * entity) preserves history but isn't what replace-ingest asked
-   * for and would balloon the log on full-file refreshes.
-   *
-   * Caveat: this DELETE commits in its own transaction. The async
-   * import worker no longer calls it for replace mode; it runs the
-   * scoped delete through CopyWriter.deleteScope INSIDE the COPY
-   * transaction, so a failed or cancelled replace rolls back to the
-   * pre-import rows instead of an empty layer. The synchronous
-   * ingest controller still uses this method and carries that
-   * empty-on-failure caveat.
-   */
-  async truncateLayer(itemId: string, layerId: string): Promise<void> {
-    const scope = `data_layer:${itemId}:${layerId}`;
-    await this.prisma.$executeRawUnsafe(
-      `DELETE FROM observation WHERE scope = $1`,
-      scope,
-    );
-    this.log.log(`Wiped engine scope ${scope} (replace ingest)`);
-  }
-
-  /**
    * Return the count of currently-live entities in a layer scope
    * (one row per entity, latest observation, tombstones excluded).
    * Replaces the pre-Phase-2.5 `SELECT COUNT(*) FROM "fs_..."` the
@@ -227,30 +200,46 @@ export class DataLayerTablesService {
     if (!data || data.version !== 3 || !Array.isArray(data.layers)) {
       return false;
     }
-    let changed = false;
-    const nextLayers: Array<Record<string, unknown>> = [];
+    // Count outside any lock: it can be slow on a big layer.
+    const counts = new Map<string, number>();
     for (const layer of data.layers) {
       const layerId = (layer as { id?: unknown }).id;
-      if (typeof layerId !== 'string' || layerId === '') {
-        nextLayers.push(layer);
-        continue;
-      }
-      const count = await this.countLiveEntities(itemId, layerId);
-      if (layer.featureCount === count) {
-        nextLayers.push(layer);
-        continue;
-      }
-      nextLayers.push({ ...layer, featureCount: count });
-      changed = true;
+      if (typeof layerId !== 'string' || layerId === '') continue;
+      counts.set(layerId, await this.countLiveEntities(itemId, layerId));
     }
-    if (!changed) return false;
-    await this.prisma.item.update({
-      where: { id: itemId },
-      data: {
-        data: { ...(data as object), layers: nextLayers } as never,
-      },
+    // Then write only featureCount, against the row as it is now and
+    // under the same row lock commitLayerSync takes. Writing back the
+    // `data` read above would put a stale syncVersion back if an edit
+    // committed while we counted, and the cursor would go backwards.
+    return this.prisma.$transaction(async (tx) => {
+      const locked = await tx.$queryRaw<Array<{ data: unknown }>>`
+        SELECT data_json AS data FROM item WHERE id = ${itemId}::uuid FOR UPDATE
+      `;
+      const current = locked[0]?.data as
+        | { version?: number; layers?: Array<Record<string, unknown>> }
+        | null
+        | undefined;
+      if (!current || current.version !== 3 || !Array.isArray(current.layers)) {
+        return false;
+      }
+      let changed = false;
+      const nextLayers = current.layers.map((layer) => {
+        const layerId = (layer as { id?: unknown }).id;
+        if (typeof layerId !== 'string' || !counts.has(layerId)) return layer;
+        const count = counts.get(layerId);
+        if (layer.featureCount === count) return layer;
+        changed = true;
+        return { ...layer, featureCount: count };
+      });
+      if (!changed) return false;
+      await tx.item.update({
+        where: { id: itemId },
+        data: {
+          data: { ...(current as object), layers: nextLayers } as never,
+        },
+      });
+      return true;
     });
-    return true;
   }
 
   async countLiveEntities(
@@ -267,8 +256,7 @@ export class DataLayerTablesService {
            SELECT DISTINCT ON (entity) entity, kind
            FROM observation
            WHERE scope = $1
-             AND valid_to IS NULL
-           ORDER BY entity, valid_from DESC, tx_time DESC
+           ORDER BY entity, valid_from DESC, tx_time DESC, id DESC
          ) latest
          WHERE kind <> 'delete'`,
         scope,

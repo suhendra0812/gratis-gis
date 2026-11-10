@@ -6,6 +6,7 @@ import {
   Logger,
 } from '@nestjs/common';
 import { mkdtemp, open, realpath, rm, writeFile } from 'node:fs/promises';
+import { containedPayloadFile, serverUploadName } from './ingest-disk-path.js';
 import type { FileHandle } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, isAbsolute, join, relative, resolve } from 'node:path';
@@ -32,7 +33,15 @@ import {
   nominatimAnswers,
 } from './nominatim-search.js';
 import { toSqlSafeFieldName } from '@gratis-gis/shared-types';
-import { assertZipExpansionBudget } from '../tile-layer/tile-conversion.js';
+import { assertZipExpansionBudget, readZipMember } from '../tile-layer/tile-conversion.js';
+import { readGpkgFeatureTables } from './gpkg-catalog.js';
+import { preferredKmlZipEntry } from './kmz-entry.js';
+import { gdalTypeToSimple, normalizeGdalProps } from './gdal-values.js';
+import {
+  kmlAugmentFor,
+  parseKmlExtendedData,
+  type KmlExtendedLayer,
+} from './kml-extended-data.js';
 import {
   DuckDbUnavailableError,
   ParquetUserError,
@@ -148,8 +157,6 @@ export class IngestService {
       if (addressed) return addressed;
     }
 
-    const gdal = await this.loadGdal();
-
     // Write to a temp dir so GDAL can open it by path. Directory-based
     // formats (`.gdb`) are delivered as zips, which GDAL handles via
     // its `/vsizip/` virtual filesystem when we point at the zip.
@@ -161,6 +168,91 @@ export class IngestService {
     const dirPath = await mkdtemp(join(tmpdir(), 'gg-ingest-'));
     const filePath = join(dirPath, safeFilename(originalName));
     await writeFile(filePath, buffer);
+    try {
+      return await this.readVectorFileAtPath(filePath, originalName, buffer);
+    } finally {
+      // Clean up the scratch dir even if GDAL threw, so we don't
+      // accumulate temp files under sustained failure.
+      await rm(dirPath, { recursive: true, force: true }).catch(() => {
+        this.log.warn(`Failed to remove temp dir ${dirPath}`);
+      });
+    }
+  }
+
+  /**
+   * Parse a file that is already on disk. The caller owns the path
+   * and deletes it. Used by the upload handlers so a 1 GB county file
+   * is not also held in the API heap.
+   *
+   * Tabular files up to 32 MB still run the coordinate and address
+   * detectors, which need the text. Larger files go straight to GDAL
+   * at the contained path. `originalName` is only a label. The bytes
+   * are read from the server-chosen file, after its real path is
+   * checked to be a direct child of the upload directory.
+   */
+  async fileToGeoJsonFromPath(
+    filePath: string,
+    originalName: string,
+  ): Promise<{
+    geojson: { type: 'FeatureCollection'; features: unknown[] };
+    fields: Array<{ name: string; type: 'string' | 'number' | 'boolean' | 'date' }>;
+    driver: string;
+    sourceSrs: string | null;
+  }> {
+    const safePath = containedPayloadFile(filePath);
+    // One open, then size and bytes from that handle. A separate
+    // stat() followed by readFile() is a window where the file can
+    // be swapped, and it is what CodeQL reports as js/file-system-race.
+    const handle = await open(safePath, 'r');
+    try {
+      const info = await handle.stat();
+      if (info.size === 0) {
+        throw new BadRequestException('Uploaded file is empty.');
+      }
+      if (info.size > this.maxBytes) {
+        throw new BadRequestException(
+          `File is too large. Current cap is ${this.maxBytes / 1024 / 1024} MB.`,
+        );
+      }
+      const TEXT_DETECT_MAX = 32 * 1024 * 1024;
+      if (looksLikeTabularText(safePath) && info.size <= TEXT_DETECT_MAX) {
+        const buffer = Buffer.alloc(info.size);
+        const { bytesRead } = await handle.read(buffer, 0, info.size, 0);
+        // The stored name is payload.<ext>. Passing the caller's name
+        // here would build another temp path from that name.
+        return this.fileToGeoJson(buffer.subarray(0, bytesRead), basename(safePath));
+      }
+    } finally {
+      await handle.close();
+    }
+    if (isParquetPath(safePath)) {
+      try {
+        const out = await collectParquetFromPath(safePath, undefined);
+        return {
+          geojson: out.geojson,
+          fields: out.fields,
+          driver: out.driver,
+          sourceSrs: out.sourceSrs,
+        };
+      } catch (err) {
+        throw mapParquetError(err);
+      }
+    }
+    return this.readVectorFileAtPath(safePath, originalName);
+  }
+
+  /** GDAL read of a path the caller already materialised. Does not delete it. */
+  private async readVectorFileAtPath(
+    filePath: string,
+    originalName: string,
+    buffer?: Buffer,
+  ): Promise<{
+    geojson: { type: 'FeatureCollection'; features: unknown[] };
+    fields: Array<{ name: string; type: 'string' | 'number' | 'boolean' | 'date' }>;
+    driver: string;
+    sourceSrs: string | null;
+  }> {
+    const gdal = await this.loadGdal();
     const openPath = await this.resolveGdalOpenPath(filePath);
     this.assertGdalOpen(openPath, originalName, buffer);
 
@@ -192,6 +284,7 @@ export class IngestService {
         // something stable to record.
         let sourceSrs: string | null = null;
         const target4326 = gdal.SpatialReference.fromEPSG(4326);
+        const kmlExtended = await this.kmlExtendedFor(ds, filePath);
 
         for (let i = 0; i < layerCount; i += 1) {
           const layer = layers.get(i);
@@ -219,14 +312,26 @@ export class IngestService {
               });
             }
           }
+          const kml = kmlAugmentFor(kmlExtended, i, layer);
+          for (const extra of kml?.fields ?? []) {
+            if (!fieldMap.has(extra.name)) {
+              fieldMap.set(extra.name, {
+                name: registerSafeFieldName(extra.name, usedFieldNames, fieldRename),
+                type: extra.type,
+              });
+            }
+          }
           // Iterate features. `layer.features.forEach` would be nicer
           // but gdal-async's iterator helpers don't always cover every
           // driver; the explicit loop is bulletproof.
+          let featureIndex = 0;
           layer.features.forEach((feature) => {
+            const extra = kml?.valuesAt(featureIndex);
+            featureIndex += 1;
             const geomJson = featureGeomJson(feature, xform);
             if (!geomJson) return;
             const props = remapPropsToSafeNames(
-              feature.fields.toObject() as Record<string, unknown>,
+              { ...(feature.fields.toObject() as Record<string, unknown>), ...extra },
               fieldRename,
             );
             combined.push({
@@ -250,12 +355,6 @@ export class IngestService {
       if (err instanceof BadRequestException) throw err;
       const msg = err instanceof Error ? err.message : String(err);
       throw new BadRequestException(`GDAL could not read that file: ${msg}`);
-    } finally {
-      // Clean up the scratch dir even if GDAL threw, so we don't
-      // accumulate temp files under sustained failure.
-      await rm(dirPath, { recursive: true, force: true }).catch(() => {
-        this.log.warn(`Failed to remove temp dir ${dirPath}`);
-      });
     }
   }
 
@@ -404,6 +503,7 @@ export class IngestService {
         // entirely and use the plain layer enumeration.
         const featureTableAllowlist =
           driver === 'GPKG' ? readGpkgFeatureTables(ds) : null;
+        const kmlExtended = await this.kmlExtendedFor(ds, filePath);
 
         for (let i = 0; i < layerCount; i += 1) {
           const layer = ds.layers.get(i);
@@ -435,6 +535,12 @@ export class IngestService {
                 fieldRename,
               ),
               type: gdalTypeToSimple(def.type),
+            });
+          }
+          for (const extra of kmlAugmentFor(kmlExtended, i, layer)?.fields ?? []) {
+            fields.push({
+              name: registerSafeFieldName(extra.name, usedFieldNames, fieldRename),
+              type: extra.type,
             });
           }
           // Geometry type detection. The declared geomType is
@@ -593,14 +699,24 @@ export class IngestService {
             type: gdalTypeToSimple(def.type),
           });
         }
+        const kml = kmlAugmentFor(await this.kmlExtendedFor(ds, filePath), targetIdx, layer);
+        for (const extra of kml?.fields ?? []) {
+          fields.push({
+            name: registerSafeFieldName(extra.name, usedFieldNames, fieldRename),
+            type: extra.type,
+          });
+        }
         const target4326 = gdal.SpatialReference.fromEPSG(4326);
         const xform = buildTransform(gdal, layer.srs, target4326);
         const features: unknown[] = [];
+        let featureIndex = 0;
         layer.features.forEach((feature) => {
+          const extra = kml?.valuesAt(featureIndex);
+          featureIndex += 1;
           const geomJson = featureGeomJson(feature, xform);
           if (!geomJson) return;
           const props = remapPropsToSafeNames(
-            feature.fields.toObject() as Record<string, unknown>,
+            { ...(feature.fields.toObject() as Record<string, unknown>), ...extra },
             fieldRename,
           );
           features.push({
@@ -704,6 +820,12 @@ export class IngestService {
        * here and the source's opinion stops mattering.
        */
       isTable?: boolean;
+      /**
+       * Stem used as the layer name for a CSV geomatch or address
+       * file. This is the name the user picked. It is not the path
+       * the bytes were stored under.
+       */
+      layerLabel?: string;
     } = {},
   ): Promise<{
     fields: Array<{ name: string; type: 'string' | 'number' | 'boolean' | 'date' }>;
@@ -718,16 +840,36 @@ export class IngestService {
     // walk below. The batch and return contracts are identical.
     if (isParquetPath(filePath)) {
       try {
-        return await streamParquetFromPath(filePath, sourceLayer, onBatch, {
+        const streamed = await streamParquetFromPath(filePath, sourceLayer, onBatch, {
           batchSize,
         });
+        // The name in the response is the file the user picked. The
+        // path on disk is not a label, and a stored path must not be
+        // written back into the NDJSON body.
+        if (opts.layerLabel) {
+          streamed.layerName = uploadLayerStem(opts.layerLabel);
+        }
+        return streamed;
       } catch (err) {
         throw mapParquetError(err);
       }
     }
     if (opts.isTable !== true) {
-      const geomatch = await this.tryUsGeomatchPlan(filePath);
+      const geomatch = await this.tryUsGeomatchPlan(filePath, opts.layerLabel);
       if (geomatch) {
+        if (opts.layerLabel) {
+          const layerName = uploadLayerStem(opts.layerLabel);
+          if (sourceLayer && sourceLayer !== layerName) {
+            throw new BadRequestException(
+              `File has no layer named "${sourceLayer}".`,
+            );
+          }
+          return this.streamUsGeomatchLayer(
+            { ...geomatch, layerName },
+            onBatch,
+            batchSize,
+          );
+        }
         if (sourceLayer && sourceLayer !== geomatch.layerName) {
           throw new BadRequestException(
             `File has no layer named "${sourceLayer}".`,
@@ -735,8 +877,21 @@ export class IngestService {
         }
         return this.streamUsGeomatchLayer(geomatch, onBatch, batchSize);
       }
-      const addressed = await this.tryAddressPlan(filePath);
+      const addressed = await this.tryAddressPlan(filePath, opts.layerLabel);
       if (addressed) {
+        if (opts.layerLabel) {
+          const layerName = uploadLayerStem(opts.layerLabel);
+          if (sourceLayer && sourceLayer !== layerName) {
+            throw new BadRequestException(
+              `File has no layer named "${sourceLayer}".`,
+            );
+          }
+          return this.streamAddressLayer(
+            { ...addressed, layerName },
+            onBatch,
+            batchSize,
+          );
+        }
         if (sourceLayer && sourceLayer !== addressed.layerName) {
           throw new BadRequestException(
             `File has no layer named "${sourceLayer}".`,
@@ -793,6 +948,13 @@ export class IngestService {
           type: gdalTypeToSimple(def.type),
         });
       }
+      const kml = kmlAugmentFor(await this.kmlExtendedFor(ds, filePath), targetIdx, layer);
+      for (const extra of kml?.fields ?? []) {
+        fields.push({
+          name: registerSafeFieldName(extra.name, usedFieldNames, fieldRename),
+          type: extra.type,
+        });
+      }
       const target4326 = gdal.SpatialReference.fromEPSG(4326);
       const xform = buildTransform(gdal, layer.srs, target4326);
       const total = layer.features.count();
@@ -826,7 +988,10 @@ export class IngestService {
         const skip = !isTable && !geomJson;
         if (!skip) {
           const props = remapPropsToSafeNames(
-            feature.fields.toObject() as Record<string, unknown>,
+            {
+              ...(feature.fields.toObject() as Record<string, unknown>),
+              ...kml?.valuesAt(processed - 1),
+            },
             fieldRename,
           );
           batch.push({
@@ -1099,6 +1264,7 @@ export class IngestService {
 
   private async tryUsGeomatchPlan(
     filePath: string,
+    layerLabel?: string,
   ): Promise<(GeomatchPlan & { layerName: string }) | null> {
     if (!looksLikeTabularText(filePath)) return null;
     const text = await this.readDelimitedPrefix(filePath);
@@ -1109,6 +1275,9 @@ export class IngestService {
         `No US geomatch in ${basename(filePath)}: ${plan.reason}`,
       );
       return null;
+    }
+    if (layerLabel) {
+      return { ...plan, layerName: uploadLayerStem(layerLabel) };
     }
     const dot = basename(filePath).lastIndexOf('.');
     const layerName =
@@ -1171,6 +1340,7 @@ export class IngestService {
    */
   private async tryAddressPlan(
     filePath: string,
+    layerLabel?: string,
   ): Promise<(AddressColumnPlan & { layerName: string }) | null> {
     if (!looksLikeTabularText(filePath)) return null;
     const text = await this.readDelimitedPrefix(filePath);
@@ -1194,6 +1364,9 @@ export class IngestService {
         `Local geocoder did not answer at ${base}; leaving ${basename(filePath)} on the table path.`,
       );
       return null;
+    }
+    if (layerLabel) {
+      return { ...plan, layerName: uploadLayerStem(layerLabel) };
     }
     const dot = basename(filePath).lastIndexOf('.');
     const layerName =
@@ -1353,7 +1526,13 @@ export class IngestService {
    * directory ceiling before VSI walks members.
    */
   private async resolveGdalOpenPath(filePath: string): Promise<string> {
-    if (!filePath.toLowerCase().endsWith('.zip')) return filePath;
+    const lower = filePath.toLowerCase();
+    // KMZ is a zip of KML. Opening the archive path needs the LIBKML
+    // driver, which the distro GDAL build often omits, and GDAL then
+    // reports "not recognized as a supported file format". A shapefile
+    // bundle is a .zip. Both go through /vsizip/ after the same
+    // expansion budget.
+    if (!lower.endsWith('.zip') && !lower.endsWith('.kmz')) return filePath;
     // Same containment pattern as sniffCsvColumns: validate via
     // realpath + relative, then open the returned path (not the
     // caller string). That is what CodeQL treats as sanitised.
@@ -1364,8 +1543,9 @@ export class IngestService {
       );
     }
     const fh = await open(safePath, 'r');
+    let names: string[];
     try {
-      await assertZipExpansionBudget(fh);
+      names = await assertZipExpansionBudget(fh);
     } catch (err) {
       throw new BadRequestException(
         err instanceof Error ? err.message : 'Zip archive rejected',
@@ -1373,7 +1553,65 @@ export class IngestService {
     } finally {
       await fh.close();
     }
+    if (lower.endsWith('.kmz')) {
+      const member = preferredKmlZipEntry(names);
+      if (!member) {
+        throw new BadRequestException(
+          'This KMZ archive does not contain a KML document.',
+        );
+      }
+      return `/vsizip/${safePath}/${member}`;
+    }
     return `/vsizip/${safePath}`;
+  }
+
+  /**
+   * ExtendedData for a KML or KMZ upload (#573), or [] for anything
+   * else. GDAL's KML driver drops these attributes; see
+   * kml-extended-data.ts. Never throws: a file we cannot read here
+   * still imports with Name and Description, as before.
+   */
+  private async kmlExtendedFor(
+    ds: { driver: { description: string } },
+    filePath: string,
+  ): Promise<KmlExtendedLayer[]> {
+    if (ds.driver.description !== 'KML') return [];
+    const lower = filePath.toLowerCase();
+    if (!lower.endsWith('.kml') && !lower.endsWith('.kmz')) return [];
+    try {
+      const safePath = await this.resolveInsideIngestRoot(filePath);
+      if (safePath === null) return [];
+      let xml: Buffer | null;
+      // One handle for the size check and the read, so the file cannot
+      // change between them.
+      const fh = await open(safePath, 'r');
+      try {
+        if (lower.endsWith('.kml')) {
+          const { size } = await fh.stat();
+          xml = size <= KML_EXTENDED_MAX_BYTES ? await fh.readFile() : null;
+          if (xml !== null && xml.length > KML_EXTENDED_MAX_BYTES) xml = null;
+        } else {
+          const member = preferredKmlZipEntry(await assertZipExpansionBudget(fh));
+          xml = member ? await readZipMember(fh, member, KML_EXTENDED_MAX_BYTES) : null;
+        }
+      } finally {
+        await fh.close();
+      }
+      if (xml === null) {
+        this.log.warn(
+          `KML in ${basename(filePath)} is over ${KML_EXTENDED_MAX_BYTES} bytes; ` +
+            'importing Name and Description only',
+        );
+        return [];
+      }
+      return parseKmlExtendedData(xml.toString('utf8'));
+    } catch (err) {
+      this.log.warn(
+        `Could not read KML ExtendedData from ${basename(filePath)}: ` +
+          (err instanceof Error ? err.message : String(err)),
+      );
+      return [];
+    }
   }
 
   /**
@@ -1476,6 +1714,18 @@ function mapParquetError(err: unknown): Error {
   );
 }
 
+/**
+ * Layer name for a CSV geomatch, address, or Parquet import. Taken
+ * from the name the user picked, using the same stem rule as the
+ * stored upload name, so the name matches what the probe reported
+ * for the stored file. The result cannot be a path.
+ */
+export function uploadLayerStem(label: string): string {
+  const stored = serverUploadName(typeof label === 'string' ? label : '');
+  const dot = stored.lastIndexOf('.');
+  return dot > 0 ? stored.slice(0, dot) : stored;
+}
+
 function safeFilename(name: string): string {
   const fileOnly = basename(name);
   let base = fileOnly.replace(/[^\w.-]/g, '_');
@@ -1484,18 +1734,6 @@ function safeFilename(name: string): string {
   // suspicious on Windows; flatten it.
   base = base.replace(/^\.+/, '_').replace(/\.+$/, '_');
   return base.length > 0 && base !== '_' ? base : 'upload.bin';
-}
-
-function gdalTypeToSimple(
-  t: string,
-): 'string' | 'number' | 'boolean' | 'date' {
-  const u = t.toLowerCase();
-  if (u.includes('int') || u.includes('real') || u.includes('double')) {
-    return 'number';
-  }
-  if (u.includes('date') || u.includes('time')) return 'date';
-  if (u.includes('bool')) return 'boolean';
-  return 'string';
 }
 
 /**
@@ -1558,70 +1796,12 @@ function gdalGeomToSimple(
   return null;
 }
 
-/**
- * GPKG-specific filter: query `gpkg_contents` through gdal-async's
- * `executeSQL` hook to identify which tables are registered as
- * feature layers (data_type='features'). The data_layer wizard
- * uses this to skip auxiliary tables (NGA style extension's
- * `nga_*` tables, gpkg internals, rtree spatial-index tables,
- * tile pyramids, etc.) that GDAL otherwise exposes as
- * zero-geometry layers.
- *
- * Returns a Set of allowed table names. If anything goes wrong
- * (no gpkg_contents, executeSQL fails, etc.) we return an empty
- * set rather than failing; the caller treats null vs empty
- * differently: null skips filtering entirely (non-GPKG drivers);
- * empty set means "we tried to filter and nothing qualified."
- *
- * The any-cast is because gdal-async's TypeScript declarations
- * don't currently surface executeSQL; the method is available at
- * runtime on the Dataset object.
- */
-function readGpkgFeatureTables(ds: unknown): Set<string> {
-  const set = new Set<string>();
-  try {
-    const sql = `
-      SELECT table_name FROM gpkg_contents WHERE data_type = 'features'
-    `;
-    // gdal-async exposes executeSQL on the Dataset; the result is a
-    // virtual Layer with one row per result. Iterate it to collect
-    // table names. We release the result layer immediately so the
-    // virtual layer doesn't leak.
-    const dataset = ds as {
-      executeSQL: (sql: string) => {
-        features: { forEach: (cb: (f: unknown) => void) => void };
-      };
-      releaseResultSet?: (layer: unknown) => void;
-    };
-    const result = dataset.executeSQL(sql);
-    result.features.forEach((f) => {
-      const feature = f as { fields: { get: (name: string) => unknown } };
-      const tableName = feature.fields.get('table_name');
-      if (typeof tableName === 'string' && tableName.length > 0) {
-        set.add(tableName);
-      }
-    });
-    // Best-effort cleanup; many gdal-async builds don't expose
-    // releaseResultSet directly. The result layer is gc'd anyway
-    // when the dataset closes.
-    if (typeof dataset.releaseResultSet === 'function') {
-      try {
-        dataset.releaseResultSet(result);
-      } catch {
-        /* non-fatal */
-      }
-    }
-  } catch {
-    // No gpkg_contents (malformed GPKG?) or executeSQL not
-    // available. Fall through to "everything passes" by treating
-    // missing filter as null at the call site.
-  }
-  return set;
-}
+/** How many rows peekFirstFeatureGeomType reads before giving up. */
+const PEEK_GEOMETRY_ROWS = 1000;
 
 /**
- * Read the first feature's geometry from a GDAL layer and classify
- * it as point / line / polygon. Used when the layer's DECLARED
+ * Read the first rows' geometry from a GDAL layer and classify the
+ * first one found as point / line / polygon. Used when the layer's DECLARED
  * geometry type is unknown (wkbUnknown / wkbGeometry / 'GEOMETRY' in
  * GeoPackage parlance) but the rows themselves carry real
  * geometries. Without this, GPKG layers registered with the
@@ -1637,11 +1817,21 @@ function peekFirstFeatureGeomType(
     const l = layer as {
       features: {
         first: () => { geometry: { name: string } | null } | null;
+        next: () => { geometry: { name: string } | null } | null;
       };
     };
-    const first = l.features.first();
-    if (!first || !first.geometry) return null;
-    return gdalGeomToSimple(first.geometry.name);
+    // The first row can carry no geometry (a GeoJSON feature with
+    // "geometry": null) while the rest do. Look a little further before
+    // calling the whole layer a table.
+    let feature = l.features.first();
+    for (let seen = 0; feature && seen < PEEK_GEOMETRY_ROWS; seen += 1) {
+      if (feature.geometry) {
+        const kind = gdalGeomToSimple(feature.geometry.name);
+        if (kind) return kind;
+      }
+      feature = l.features.next();
+    }
+    return null;
   } catch {
     return null;
   }
@@ -1741,13 +1931,19 @@ function buildTransform(
  * already safe; this catches the rare apostrophe / space case and
  * keeps schema `name` aligned with property keys.
  */
+/** Largest KML document we parse for ExtendedData (#573). */
+const KML_EXTENDED_MAX_BYTES = 128 * 1024 * 1024;
+
 function remapPropsToSafeNames(
   raw: Record<string, unknown>,
   rename: Map<string, string>,
 ): Record<string, unknown> {
-  if (rename.size === 0) return raw;
+  // GDAL date objects become ISO strings here, the one place every
+  // GDAL read path passes its property bag through.
+  const values = normalizeGdalProps(raw);
+  if (rename.size === 0) return values;
   const out: Record<string, unknown> = {};
-  for (const [k, v] of Object.entries(raw)) {
+  for (const [k, v] of Object.entries(values)) {
     out[rename.get(k) ?? k] = v;
   }
   return out;
