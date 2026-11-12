@@ -39,6 +39,12 @@
     # presents as the bridge gateway, come from a private address, and
     # their own X-Forwarded-For would then pass through to Keycloak and
     # portal-api and become the logged client_ip.
+    #
+    # Deploy branch: GG_TLS_MODE=cloudflare (in .env.prod) puts the
+    # Cloudflare proxy in front. That mode trusts Cloudflare's ranges
+    # only and serves a Cloudflare Origin Certificate; the default
+    # (acme) keeps the behaviour above. Files: infra/caddy-tls/.
+    import /etc/caddy/tls/global-{$GG_TLS_MODE:acme}.caddy
 }
 
 # www.{$PORTAL_DOMAIN} (www.demo.gratisgis.org on the demo) always 301s to the
@@ -48,10 +54,12 @@
 # Caddy include it in the SAN when it asks Let's Encrypt for a
 # cert, so https://www.demo.gratisgis.org also serves valid TLS.
 www.{$PORTAL_DOMAIN} {
+    import /etc/caddy/tls/site-{$GG_TLS_MODE:acme}.caddy
     redir https://{$PORTAL_DOMAIN}{uri} 301
 }
 
 {$PORTAL_DOMAIN} {
+    import /etc/caddy/tls/site-{$GG_TLS_MODE:acme}.caddy
     encode gzip zstd
 
     log {
@@ -218,6 +226,7 @@ www.{$PORTAL_DOMAIN} {
 }
 
 {$AUTH_DOMAIN} {
+    import /etc/caddy/tls/site-{$GG_TLS_MODE:acme}.caddy
     encode gzip zstd
 
     # Lock the Keycloak admin surface to the LAN / SSH-tunnel side.
@@ -282,6 +291,7 @@ www.{$PORTAL_DOMAIN} {
 # Caddy has to preserve the Host on the way through. Caddy v2's
 # reverse_proxy preserves Host by default, which is what we need.
 {$STORAGE_DOMAIN} {
+    import /etc/caddy/tls/site-{$GG_TLS_MODE:acme}.caddy
     encode gzip zstd
 
     # MinIO speaks plain HTTP inside the docker network. The TLS

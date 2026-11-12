@@ -205,3 +205,6 @@ OSGEO-SUBMISSION.md
 # MapLibre 6 ships a worker that imports a sibling chunk; both are copied
 # here so the relative import resolves. Regenerated on every build.
 apps/portal-web/public/maplibre/
+
+# Cloudflare Origin Certificate for GG_TLS_MODE=cloudflare (deploy branch)
+infra/caddy-certs/

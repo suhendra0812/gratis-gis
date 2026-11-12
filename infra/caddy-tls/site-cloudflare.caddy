@@ -1,0 +1,7 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# GG_TLS_MODE=cloudflare: serve the Cloudflare Origin Certificate
+# instead of asking Let's Encrypt. Create it in the Cloudflare
+# dashboard (SSL/TLS > Origin Server) for *.<your domain> and save the
+# two files as origin.pem and origin.key in GG_TLS_CERT_DIR
+# (default infra/caddy-certs, ignored by git).
+tls /etc/caddy/certs/origin.pem /etc/caddy/certs/origin.key

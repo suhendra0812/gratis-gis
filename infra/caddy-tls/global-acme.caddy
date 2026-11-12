@@ -1,0 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# GG_TLS_MODE=acme (default): Caddy is the edge and gets Let's Encrypt
+# certificates itself. No upstream proxy is trusted; see the note in
+# the Caddyfile's global block.

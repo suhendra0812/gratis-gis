@@ -322,7 +322,13 @@ services:
       # First boot with --import-realm parses and imports the whole
       # realm JSON; give it a generous grace window before failures
       # start counting.
-      start_period: 120s
+      # Deploy branch: 300s, not 120s. On a 4 GB host the first boot
+      # builds Keycloak, creates its schema and imports the realm right
+      # after the image builds, and 120s can run out: deploy then stops
+      # and every service that waits on a healthy Keycloak stays
+      # `created`.
+      # Healthy is still reported as soon as the probe passes.
+      start_period: 300s
     # JVM ceiling is -Xmx1024m above; the cgroup limit adds headroom
     # for metaspace, thread stacks, and native buffers on top of the
     # heap. See the memory-budget comment on portal-api below for the
@@ -1238,10 +1244,18 @@ services:
       # values in .env.prod:
       #   docker run --rm caddy caddy hash-password --plaintext '...'
       # and single-quote the hash there so nothing expands the $ signs.
+      # Deploy branch: `cloudflare` serves a Cloudflare Origin
+      # Certificate and trusts only Cloudflare's proxy ranges; `acme`
+      # (default) gets Let's Encrypt certificates. See infra/caddy-tls/.
+      GG_TLS_MODE: ${GG_TLS_MODE:-acme}
       STATS_USER: ${STATS_USER:-stats}
       STATS_HASH: ${STATS_HASH:-$$2a$$14$$h.JUdPIZywlDk54gHFpKa..58uz7UVWNW/NvgJw4kC8ziYgQwGC4K}
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./caddy-tls:/etc/caddy/tls:ro
+      # Cloudflare Origin Certificate (origin.pem, origin.key) for
+      # GG_TLS_MODE=cloudflare. Kept out of git.
+      - ${GG_TLS_CERT_DIR:-./caddy-certs}:/etc/caddy/certs:ro
       - caddy-data:/data
       - caddy-config:/config
       # Access logs Caddy writes and the rendered dashboard it serves.
