@@ -140,6 +140,108 @@ versioning policy is in [docs/VERSIONING.md](./docs/VERSIONING.md).
   spatial layer of the data layer, so one asset's inspections showed
   up under unrelated layers.
 
+## [1.4.2] - 2026-11-11
+
+Patch release. Purging a data layer works again for layers of any
+real size: on 1.4.1 even a 468,000 polygon layer failed to purge and
+left its rows behind. Nothing here is breaking.
+
+### Fixed
+
+- Purging a large data layer no longer fails with "canceling statement
+  due to statement timeout". Deleting a layer's rows ran into the 30 s
+  limit the app's database role carries, so purge failed for any
+  sizable layer (a 468,000 polygon layer failed on the demo) and the
+  rows stayed behind for good, in the nightly trash sweep too. That
+  one delete now lifts the limit for itself, and the web app gives
+  purge the same 15 minute budget as an import. Refs #573
+
+## [1.4.1] - 2026-11-10
+
+Patch release. File imports from the create wizard work again: in
+1.4.0 every upload failed with a 502 right after it finished. VPS
+deploys also pick up Caddyfile changes and clean up retired
+containers on their own. Nothing here is breaking.
+
+### Fixed
+
+- Imports, exports and backup restores no longer fail at once with
+  "The portal API could not be reached. (502)". Every call the web
+  app gives a long time budget (finishing an upload, per-layer import,
+  GeoParquet export, backup restore, the wizard's file probe) failed
+  before it reached the API: the web app handed a connection setting
+  from the undici package (version 8) to the fetch built into Node 24
+  (undici 7), and the two do not fit together. In 1.4.0 that broke
+  every file upload in the create wizard, whatever its size. Those
+  calls now use undici's own fetch, so the pair always matches. The
+  web app's log also gives the underlying reason when a call to the
+  API fails, not only "fetch failed". Refs #573
+- VPS deploys now pick up a changed Caddyfile. Caddy mounts the single
+  file `infra/Caddyfile`, and a git checkout replaces that file, so the
+  running Caddy kept the old config until something restarted it. After
+  the 1.4.0 deploy the demo still capped uploads at 1 GB. `deploy.sh`
+  now compares the Caddyfile Caddy sees with the one on disk and
+  restarts Caddy when they differ.
+- VPS deploys remove containers whose service left the compose file.
+  On Docker Compose v5.3.1, `up -d --remove-orphans` only warned about
+  the retired pg_tileserv container and left it running. `deploy.sh`
+  now removes such containers itself. Profile services that are off
+  (scripts) and one-off `compose run` containers are left alone.
+
+## [1.4.0] - 2026-11-10
+
+Minor release. Imports of any size now upload straight to storage and
+can resume after a dropped connection, point symbols are fixed and can
+be PNG or JPEG images, and release images publish without a manual
+re-run. Nothing here is breaking.
+
+### Added
+
+- Map point symbols can now be PNG or JPEG images, not only SVG. Use
+  "+ Image" in the icon picker. The server checks that the file really
+  is a PNG or JPEG, caps uploads at 2 MB and 4096 x 4096 pixels, and
+  stores a cleaned PNG of at most 256 px on the long side with all
+  metadata removed. Image icons keep their own colors, so the tint
+  option is hidden for them. (#686)
+
+### Fixed
+
+- Release images publish on their own again. Since 1.3.0's publish
+  gate, a release tag refused to publish while CI on its commit was
+  still running, which it always is right after the merge, so images
+  needed a manual re-run. A tag now waits up to an hour for CI and
+  Security to finish. Publish runs for the same commit also queue
+  instead of running side by side. (#684)
+- Large imports no longer stop at 1 GB or after 5 minutes. A 1.4 GB
+  GeoPackage froze at 67% because Caddy capped the request body at
+  1 GB and both Node servers dropped requests slower than 5 minutes.
+  The create wizard and Import features now send the file straight to
+  storage in parts. A dropped connection or a closed tab loses only
+  the parts in flight: pick the same file again and the upload resumes
+  where it stopped. Cancel removes the partial upload. There is no
+  fixed size limit beyond a 50 GB sanity ceiling. The server checks
+  its free disk before the upload starts and says how much is free
+  and how much is needed when the file will not fit. On the item page,
+  spatial files of 64 MB or more now take this path and import as a
+  background job. Refs #573
+- The older multipart `POST /ingest/stage` path stays for scripts. Its
+  1 GB cap is raised to the same 50 GB ceiling, portal-api no longer
+  ends a request after 5 minutes, and the Caddy body cap in the VPS
+  Caddyfile and the NAS compose is raised to match.
+  Upgrade note: NAS installs pick up the new Caddy cap when the
+  bootstrap container rewrites the Caddyfile on the next start.
+- Point icons with a circle or rounded square background now sit in
+  the middle of the shape and fit inside it, with even padding, at any
+  icon size. Before, the icon stood above the shape and was larger
+  than it. The rounded square is now drawn as a real rounded square
+  instead of a circle. Clicking the background selects the point.
+  (#686)
+- Tinted point icons are sharp again at any color and on high-DPI
+  screens. The tint image spread each edge over several pixels, which
+  made recolored icons look blurry. (#686)
+- Uploaded SVG icons with a wide or tall shape keep their proportions
+  instead of being stretched into a square. (#686)
+
 ## [1.3.0] - 2026-11-09
 
 Minor release. Security hardening, a large set of audit fixes, and new
@@ -4572,6 +4674,9 @@ Everything is new in a first release. What ships, briefly:
   4.24.15, sharp, fast-uri, postcss, brace-expansion, tar, and the
   `@hono/node-server` override.
 
+[1.4.2]: https://github.com/palavido-dev/gratis-gis/releases/tag/v1.4.2
+[1.4.1]: https://github.com/palavido-dev/gratis-gis/releases/tag/v1.4.1
+[1.4.0]: https://github.com/palavido-dev/gratis-gis/releases/tag/v1.4.0
 [1.3.0]: https://github.com/palavido-dev/gratis-gis/releases/tag/v1.3.0
 [1.2.0]: https://github.com/palavido-dev/gratis-gis/releases/tag/v1.2.0
 [1.1.0]: https://github.com/palavido-dev/gratis-gis/releases/tag/v1.1.0

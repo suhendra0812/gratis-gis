@@ -1280,16 +1280,17 @@ export const en = {
     tintWithFill: 'Tint with fill color',
     tintHint:
       'Tinting renders the icon as a signed-distance field so the fill color applies cleanly at any size. Un-tick if you want the icon to stay in its shipped color.',
+    rasterNoTint:
+      'PNG and JPEG icons keep their own colors. Tinting works only with SVG icons.',
     background: 'Background',
     shape: 'Shape',
     shapeNone: 'None',
     shapeCircle: 'Circle',
     shapeRoundedSquare: 'Rounded square',
-    roundedSquareHint:
-      'Rounded square renders as a soft pill until the sprite-bake renderer ships; appearance is close but the corners read as fully circular.',
     searchIcons: 'Search icons...',
     categoryAll: 'all',
-    uploadSvg: '+ SVG',
+    uploadIcon: '+ Image',
+    uploadIconTitle: 'Upload an SVG, PNG or JPEG icon',
     uploading: 'Uploading {name}...',
     uploadFailed: 'Upload failed',
     yourUploads: 'Your uploads',
@@ -3309,6 +3310,14 @@ export const en = {
     editDescUnavailable: 'Not available: this layer has no writable source',
     editOnlyFeatureService:
       "Edit is only available for feature-service layers. Remote sources (ArcGIS REST, URL, inline) stay read-only in the matrix to avoid offering permissions that can't take effect.",
+  },
+  resumableUpload: {
+    resumingHeadline: 'Resuming upload {pct}%',
+    networkError:
+      'The connection dropped and the upload could not continue. Pick the same file again to resume where it stopped.',
+    partFailed:
+      'Storage refused part of the file. Pick the same file again to resume where it stopped.',
+    failed: 'Upload failed',
   },
   layerDataPanel: {
     tablistAria: '{label} views',
