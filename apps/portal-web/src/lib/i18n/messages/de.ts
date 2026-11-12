@@ -1234,16 +1234,17 @@ export const de: Partial<CatalogShape> = {
     tintWithFill: 'Mit Füllfarbe einfärben',
     tintHint:
       'Einfärben rendert das Symbol als Signed-Distance-Feld, damit die Füllfarbe in jeder Größe sauber wirkt. Abwählen, wenn das Symbol seine Auslieferungsfarbe behalten soll.',
+    rasterNoTint:
+      'PNG- und JPEG-Symbole behalten ihre eigenen Farben. Einfärben funktioniert nur mit SVG-Symbolen.',
     background: 'Hintergrund',
     shape: 'Form',
     shapeNone: 'Keine',
     shapeCircle: 'Kreis',
     shapeRoundedSquare: 'Abgerundetes Quadrat',
-    roundedSquareHint:
-      'Abgerundetes Quadrat wird als weiche Pille gerendert, bis der Sprite-Bake-Renderer kommt; das Aussehen ist ähnlich, aber die Ecken wirken vollständig rund.',
     searchIcons: 'Symbole suchen...',
     categoryAll: 'alle',
-    uploadSvg: '+ SVG',
+    uploadIcon: '+ Bild',
+    uploadIconTitle: 'SVG-, PNG- oder JPEG-Symbol hochladen',
     uploading: '{name} wird hochgeladen...',
     uploadFailed: 'Upload fehlgeschlagen',
     yourUploads: 'Ihre Uploads',
@@ -3192,6 +3193,14 @@ export const de: Partial<CatalogShape> = {
     editDescUnavailable: 'Nicht verfügbar: diese Ebene hat keine schreibbare Quelle',
     editOnlyFeatureService:
       'Bearbeiten ist nur für Feature-Service-Ebenen verfügbar. Remote-Quellen (ArcGIS REST, URL, inline) bleiben in der Matrix schreibgeschützt, damit keine wirkungslosen Berechtigungen angeboten werden.',
+  },
+  resumableUpload: {
+    resumingHeadline: 'Upload wird fortgesetzt {pct}%',
+    networkError:
+      'Die Verbindung wurde unterbrochen und der Upload konnte nicht fortgesetzt werden. Wählen Sie dieselbe Datei erneut, um dort weiterzumachen, wo er aufgehört hat.',
+    partFailed:
+      'Der Speicher hat einen Teil der Datei abgelehnt. Wählen Sie dieselbe Datei erneut, um dort weiterzumachen, wo der Upload aufgehört hat.',
+    failed: 'Upload fehlgeschlagen',
   },
   layerDataPanel: {
     tablistAria: 'Ansichten von {label}',

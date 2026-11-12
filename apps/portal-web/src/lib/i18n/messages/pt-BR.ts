@@ -1232,16 +1232,17 @@ export const ptBR: Partial<CatalogShape> = {
     tintWithFill: 'Tingir com a cor de preenchimento',
     tintHint:
       'O tingimento renderiza o ícone como um campo de distância assinado para que a cor de preenchimento se aplique limpa em qualquer tamanho. Desmarque se quiser manter a cor original do ícone.',
+    rasterNoTint:
+      'Ícones PNG e JPEG mantêm as próprias cores. O tingimento só funciona com ícones SVG.',
     background: 'Fundo',
     shape: 'Forma',
     shapeNone: 'Nenhuma',
     shapeCircle: 'Círculo',
     shapeRoundedSquare: 'Quadrado arredondado',
-    roundedSquareHint:
-      'O quadrado arredondado aparece como uma pílula suave até o renderizador sprite-bake chegar; a aparência é parecida, mas os cantos parecem totalmente circulares.',
     searchIcons: 'Buscar ícones...',
     categoryAll: 'todos',
-    uploadSvg: '+ SVG',
+    uploadIcon: '+ Imagem',
+    uploadIconTitle: 'Envie um ícone SVG, PNG ou JPEG',
     uploading: 'Enviando {name}...',
     uploadFailed: 'Falha no envio',
     yourUploads: 'Seus envios',
@@ -3173,6 +3174,14 @@ export const ptBR: Partial<CatalogShape> = {
     editDescUnavailable: 'Indisponível: esta camada não tem origem gravável',
     editOnlyFeatureService:
       'Editar só está disponível para camadas de serviço de feições. Origens remotas (ArcGIS REST, URL, inline) ficam somente leitura na matriz para não oferecer permissões sem efeito.',
+  },
+  resumableUpload: {
+    resumingHeadline: 'Retomando o envio {pct}%',
+    networkError:
+      'A conexão caiu e o envio não pôde continuar. Escolha o mesmo arquivo de novo para retomar de onde parou.',
+    partFailed:
+      'O armazenamento recusou uma parte do arquivo. Escolha o mesmo arquivo de novo para retomar o envio de onde parou.',
+    failed: 'Falha no envio',
   },
   layerDataPanel: {
     tablistAria: 'Visualizações de {label}',

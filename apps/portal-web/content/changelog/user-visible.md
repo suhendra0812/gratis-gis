@@ -29,6 +29,25 @@ A date or time question in a form can start with the current date and time alrea
 
 ## 2026-11-06 - Edit and delete features in the field app
 In the field app, tap a feature to zoom to, edit, copy or delete it. Drag its shape on the map, place a point by hand or by GPS, and add, edit or delete its related records without leaving the form. It all works offline and syncs later. The compass can turn the map with the way you face.
+
+## [1.4.2] - 2026-11-11
+
+## 2026-11-11 - Permanently deleting large layers works
+Permanently deleting a data layer from Recently deleted failed for large layers and left their data behind. It now finishes, however big the layer is.
+
+## [1.4.1] - 2026-11-10
+
+## 2026-11-10 - File imports work again
+In 1.4.0, importing a file from the new item wizard failed with "The portal API could not be reached" right after the upload finished. Imports, exports and backup restores now go through again.
+
+## [1.4.0] - 2026-11-10
+
+## 2026-11-10 - Upload files of any size
+Imports go straight to storage in parts, so multi-gigabyte files upload from the browser. If the connection drops or the tab closes, pick the same file again and the upload picks up where it stopped. The only limit is the server's free disk space, and you are told up front if a file will not fit.
+
+## 2026-11-10 - Sharper point symbols, and image symbols
+Point icons now sit centered inside their circle or square background and stay sharp when you change their color. You can also use your own PNG or JPEG images as point symbols.
+
 ## [1.3.0] - 2026-11-09
 
 ## 2026-11-09 - KML and KMZ keep all their fields
