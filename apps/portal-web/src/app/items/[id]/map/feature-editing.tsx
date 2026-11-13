@@ -172,6 +172,9 @@ export function useFeatureEditing({
   // the map not having loaded yet, which it already handles.
   const { draw, ready } = useTerraDraw(editableLayerIds.size > 0 ? map : null, {
     snapping,
+    // Snap onto the features of every layer on the map, not only the
+    // sketch, and mark the vertices that snapped.
+    snapToMap: true,
   });
   const geometryEdit = useGeometryEdit(draw, pendingEdit);
 
