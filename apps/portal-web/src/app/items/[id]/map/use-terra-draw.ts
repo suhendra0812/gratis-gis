@@ -44,6 +44,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type * as maplibregl from 'maplibre-gl';
 import type { TerraDraw } from 'terra-draw';
+import { MapFeatureSnapper, type SnapMap } from '@/lib/map-snap';
 import { clientUuid } from '@/lib/uuid';
 
 /**
@@ -143,12 +144,14 @@ export function roundCoordsToPrecision(
  *     midpoints to insert, alt-click a vertex to delete.
  *   - snappable: snap while dragging a vertex, when snapping is on.
  */
-function selectFlags(snapping: boolean) {
+function selectFlags(snapping: boolean, toCustom?: SnapToMap) {
   const coordinates = {
     midpoints: true,
     draggable: true,
     deletable: true,
-    snappable: snapping ? { toLine: true, toCoordinate: true } : false,
+    snappable: snapping
+      ? { toLine: true, toCoordinate: true, ...(toCustom ? { toCustom } : {}) }
+      : false,
   };
   return {
     point: { feature: { draggable: true } },
@@ -160,13 +163,35 @@ function selectFlags(snapping: boolean) {
   };
 }
 
-function drawSnapping(snapping: boolean) {
-  return snapping ? { toLine: true, toCoordinate: true } : undefined;
+/** terra-draw `snapping.toCustom`, here always a MapFeatureSnapper. */
+type SnapToMap = MapFeatureSnapper['snap'];
+
+/**
+ * With `toCustom` the map snapper draws its own markers, so terra-draw's
+ * snapping point is turned off rather than drawn twice.
+ */
+function drawSnapping(snapping: boolean, toCustom?: SnapToMap) {
+  if (!snapping) return undefined;
+  return toCustom
+    ? { toLine: true, toCoordinate: true, toCustom, showSnappingPoint: false }
+    : { toLine: true, toCoordinate: true };
+}
+
+/** A point has no line to snap to: coordinates and the map only. */
+function pointSnapping(snapping: boolean, toCustom?: SnapToMap) {
+  if (!snapping || !toCustom) return undefined;
+  return { toCoordinate: true, toCustom, showSnappingPoint: false };
 }
 
 export interface UseTerraDrawOptions {
   /** Snap to existing vertices and lines while drawing or dragging. */
   snapping: boolean;
+  /**
+   * Also snap to the features the map's own layers draw, on any layer,
+   * and mark what snapped (see MapFeatureSnapper). Off for surfaces
+   * that only edit their own sketch.
+   */
+  snapToMap?: boolean;
 }
 
 /**
@@ -187,6 +212,8 @@ export function useTerraDraw(
   // rebuild the instance when the toggle flips.
   const snappingRef = useRef(options.snapping);
   snappingRef.current = options.snapping;
+  const snapToMap = options.snapToMap === true;
+  const snapperRef = useRef<MapFeatureSnapper | null>(null);
 
   useEffect(() => {
     if (!map) return;
@@ -198,7 +225,13 @@ export function useTerraDraw(
       const adapterMod = await import('terra-draw-maplibre-gl-adapter');
       if (cancelled) return;
       const snapping = snappingRef.current;
-      const snapInit = drawSnapping(snapping);
+      const snapper = snapToMap
+        ? new MapFeatureSnapper(map as unknown as SnapMap, DRAW_COORD_PRECISION)
+        : null;
+      snapperRef.current = snapper;
+      const custom = snapper?.snap;
+      const snapInit = drawSnapping(snapping, custom);
+      const pointInit = pointSnapping(snapping, custom);
       const draw = new td.TerraDraw({
         adapter: new adapterMod.TerraDrawMapLibreGLAdapter({
           map,
@@ -217,7 +250,7 @@ export function useTerraDraw(
           getId: () => clientUuid(),
         },
         modes: [
-          new td.TerraDrawPointMode(),
+          new td.TerraDrawPointMode(pointInit ? { snapping: pointInit } : undefined),
           new td.TerraDrawLineStringMode(
             snapInit ? { snapping: snapInit } : undefined,
           ),
@@ -227,13 +260,106 @@ export function useTerraDraw(
           // 32 segments matches shared-types DrawingFeature docs
           // (circle materialised as a polygon on finish).
           new td.TerraDrawCircleMode({ segments: 32 }),
-          new td.TerraDrawSelectMode({ flags: selectFlags(snapping) }),
+          new td.TerraDrawSelectMode({ flags: selectFlags(snapping, custom) }),
         ],
       });
       drawRef.current = draw;
       setReady(true);
 
+      // Keep the "landed on a snap" markers in step with the store, and
+      // end the session's markers once nothing is being drawn or edited.
+      const readSnapshot = () => {
+        try {
+          return draw.getSnapshot() as Array<{
+            id?: string | number;
+            geometry: GeoJSON.Geometry;
+            properties: Record<string, unknown>;
+          }>;
+        } catch {
+          return []; // not started
+        }
+      };
+      // A point is dragged whole, and terra-draw only snaps coordinate
+      // drags (line and polygon vertices); it also emits no `finish`
+      // for a feature drag. So a dragged point is checked here: markers
+      // while it moves, and on pointer release it is moved onto the
+      // snap.
+      let draggingPointId: string | number | null = null;
+      const draggedPoint = (id: string | number) => {
+        if (!snappingRef.current || draw.getMode() !== 'select') return null;
+        const f = readSnapshot().find((x) => String(x.id) === String(id));
+        if (!f || f.geometry.type !== 'Point' || f.properties.mode === 'select') {
+          return null;
+        }
+        const p = map.project(f.geometry.coordinates as [number, number]);
+        return { id: f.id!, event: { containerX: p.x, containerY: p.y } };
+      };
+      const onChange = (
+        ids: Array<string | number> = [],
+        type?: string,
+        context?: object,
+      ) => {
+        if (!snapper) return;
+        const snapshot = readSnapshot();
+        if (snapshot.length === 0) {
+          snapper.reset();
+          return;
+        }
+        const fromApi = !!context && 'origin' in context && context.origin === 'api';
+        if (type === 'update' && !fromApi) {
+          for (const id of ids) {
+            const d = draggedPoint(id);
+            if (d) {
+              draggingPointId = d.id;
+              snapper.snap(d.event, { currentId: d.id });
+            }
+          }
+        }
+        snapper.refreshPlaced(snapshot);
+      };
+      const onRelease = () => {
+        const id = draggingPointId;
+        draggingPointId = null;
+        if (!snapper || id === null) return;
+        // After terra-draw has ended its own drag on the same release.
+        setTimeout(() => {
+          const d = draggedPoint(id);
+          const c = d ? snapper.snap(d.event, { currentId: d.id }) : undefined;
+          if (d && c) {
+            try {
+              draw.updateFeatureGeometry(d.id, { type: 'Point', coordinates: c });
+            } catch {
+              /* the feature went away meanwhile */
+            }
+          }
+          snapper.clearLive();
+          onChange();
+        }, 0);
+      };
+      const onFinish = () => onChange();
+      const onLeave = () => snapper?.clearLive();
+      if (snapper) {
+        draw.on('change', onChange);
+        draw.on('finish', onFinish);
+        map.on('mouseout', onLeave);
+        map.on('mouseup', onRelease);
+        map.on('touchend', onRelease);
+      }
+
       cleanup = () => {
+        if (snapper) {
+          try {
+            draw.off('change', onChange);
+            draw.off('finish', onFinish);
+          } catch {
+            /* already torn down */
+          }
+          map.off('mouseout', onLeave);
+          map.off('mouseup', onRelease);
+          map.off('touchend', onRelease);
+          snapper.dispose();
+          snapperRef.current = null;
+        }
         try {
           draw.stop();
         } catch {
@@ -248,6 +374,7 @@ export function useTerraDraw(
       cancelled = true;
       cleanup?.();
     };
+    // snapToMap is fixed per call site; it is read once, like the map.
   }, [map]);
 
   // Runtime snapping toggle. Each call is wrapped separately because a
@@ -256,7 +383,9 @@ export function useTerraDraw(
   useEffect(() => {
     const draw = drawRef.current;
     if (!draw || !ready) return;
-    const snap = drawSnapping(options.snapping);
+    const snapper = snapperRef.current;
+    const custom = snapper?.snap;
+    const snap = drawSnapping(options.snapping, custom);
     for (const mode of ['linestring', 'polygon'] as const) {
       try {
         draw.updateModeOptions(mode, { snapping: snap });
@@ -264,11 +393,25 @@ export function useTerraDraw(
         /* mode not registered on this build */
       }
     }
+    if (custom) {
+      try {
+        // An empty object switches point snapping off again.
+        draw.updateModeOptions('point', {
+          snapping: pointSnapping(options.snapping, custom) ?? {},
+        });
+      } catch {
+        /* same */
+      }
+    }
     try {
-      draw.updateModeOptions('select', { flags: selectFlags(options.snapping) });
+      draw.updateModeOptions('select', {
+        flags: selectFlags(options.snapping, custom),
+      });
     } catch {
       /* same */
     }
+    // Turning snapping off clears its markers with it.
+    if (!options.snapping) snapper?.reset();
   }, [options.snapping, ready]);
 
   return { draw: ready ? drawRef.current : null, ready };
