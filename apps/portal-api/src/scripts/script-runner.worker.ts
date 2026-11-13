@@ -4,6 +4,7 @@ import { Prisma } from '@prisma/client';
 import {
   SCRIPT_MAX_NOTEBOOK_BYTES,
   clampScriptTimeout,
+  SCRIPT_MAX_TIMEOUT_SECONDS,
   looksLikeNotebook,
   type ScriptFormat,
 } from '@gratis-gis/shared-types';
@@ -37,6 +38,15 @@ import { PrismaService } from '../prisma/prisma.service.js';
  * Claim, heartbeat, and stale reclaim are the analysis queue's proven
  * mechanism, reused rather than reinvented.
  */
+/** Prune the run history at most this often. */
+const PRUNE_EVERY_MS = 60 * 60 * 1000;
+
+/** Finished runs kept per script. SCRIPT_RUN_KEEP, default 100. */
+export function scriptRunKeep(env: NodeJS.ProcessEnv = process.env): number {
+  const n = Number(env.SCRIPT_RUN_KEEP);
+  return Number.isInteger(n) && n > 0 ? n : 100;
+}
+
 @Injectable()
 export class ScriptRunnerWorker implements OnModuleDestroy {
   private readonly log = new Logger(ScriptRunnerWorker.name);
@@ -46,6 +56,8 @@ export class ScriptRunnerWorker implements OnModuleDestroy {
   private busy = false;
   /** In-flight runs, so shutdown can abort them promptly. */
   private readonly inFlight = new Map<string, AbortController>();
+  /** When the run history was last pruned. See pruneOldRuns(). */
+  private lastPruneAt = 0;
 
   constructor(
     private readonly prisma: PrismaService,
@@ -81,6 +93,11 @@ export class ScriptRunnerWorker implements OnModuleDestroy {
     this.busy = true;
     try {
       await this.reclaimStale();
+      if (Date.now() - this.lastPruneAt >= PRUNE_EVERY_MS) {
+        this.lastPruneAt = Date.now();
+        const removed = await this.pruneOldRuns();
+        if (removed > 0) this.log.log(`pruned ${removed} old script runs`);
+      }
       const claimed = await this.claimOne();
       if (claimed) await this.dispatch(claimed);
     } catch (err) {
@@ -127,14 +144,40 @@ export class ScriptRunnerWorker implements OnModuleDestroy {
     }
   }
 
+  /**
+   * Keep the newest SCRIPT_RUN_KEEP finished runs of each script and
+   * delete the rest. Each run can carry a 256 KB log, a source snapshot
+   * and a 4 MB notebook, and a script can run hourly, so without this
+   * the table (and every backup) grows forever. Queued and running
+   * rows are never touched.
+   */
+  async pruneOldRuns(keep = scriptRunKeep()): Promise<number> {
+    return this.prisma.$executeRaw(Prisma.sql`
+      DELETE FROM script_run r
+      USING (
+        SELECT id,
+               row_number() OVER (PARTITION BY script_id ORDER BY created_at DESC) AS rn
+        FROM script_run
+        WHERE state IN ('done', 'failed', 'cancelled')
+      ) old
+      WHERE r.id = old.id AND old.rn > ${keep}
+    `);
+  }
+
   private async claimOne(): Promise<{
     id: string;
     userId: string;
+    scriptId?: string;
     source: string;
     format: ScriptFormat;
   } | null> {
     const rows = await this.prisma.$queryRaw<
-      Array<{ id: string; user_id: string; source_snapshot: string | null }>
+      Array<{
+        id: string;
+        user_id: string;
+        script_id: string;
+        source_snapshot: string | null;
+      }>
     >(Prisma.sql`
       UPDATE script_run
       SET state = 'running', started_at = now(), heartbeat_at = now()
@@ -145,7 +188,7 @@ export class ScriptRunnerWorker implements OnModuleDestroy {
         FOR UPDATE SKIP LOCKED
         LIMIT 1
       )
-      RETURNING id, user_id, source_snapshot
+      RETURNING id, user_id, script_id, source_snapshot
     `);
     const row = rows[0];
     if (!row) return null;
@@ -165,6 +208,7 @@ export class ScriptRunnerWorker implements OnModuleDestroy {
     return {
       id: row.id,
       userId: row.user_id,
+      scriptId: row.script_id,
       source: row.source_snapshot,
       format: looksLikeNotebook(row.source_snapshot) ? 'notebook' : 'python',
     };
@@ -173,22 +217,37 @@ export class ScriptRunnerWorker implements OnModuleDestroy {
   private async dispatch(job: {
     id: string;
     userId: string;
+    scriptId?: string;
     source: string;
     format: ScriptFormat;
   }): Promise<void> {
-    const timeoutSeconds = clampScriptTimeout(
-      Number(process.env.SCRIPT_TIMEOUT_SECONDS ?? NaN),
-    );
+    const timeoutSeconds = await this.runTimeoutSeconds(job.scriptId);
     // A little slack past the wall clock so the key cannot expire
     // while the script is still legitimately finishing a request.
-    const key = await this.apiKeys.mintForRun(job.userId, {
-      label: `script run ${job.id}`,
-      ttlSeconds: timeoutSeconds + 60,
-    });
-    await this.prisma.scriptRun.update({
-      where: { id: job.id },
-      data: { apiKeyId: key.id },
-    });
+    //
+    // The row is already 'running'. A failure here (owner deleted,
+    // database blip) used to leave it there until the stale sweep
+    // called it a crashed worker, with any minted key still live.
+    let key: Awaited<ReturnType<ApiKeyService['mintForRun']>> | null = null;
+    try {
+      key = await this.apiKeys.mintForRun(job.userId, {
+        label: `script run ${job.id}`,
+        ttlSeconds: timeoutSeconds + 60,
+      });
+      await this.prisma.scriptRun.update({
+        where: { id: job.id },
+        data: { apiKeyId: key.id },
+      });
+    } catch (err) {
+      await this.finish(job.id, {
+        state: 'failed',
+        error: `Could not start the run: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+        apiKeyId: key?.id ?? null,
+      });
+      return;
+    }
 
     const ac = new AbortController();
     this.inFlight.set(job.id, ac);
@@ -220,6 +279,9 @@ export class ScriptRunnerWorker implements OnModuleDestroy {
     cancelPoll.unref();
 
     const started = Date.now();
+    // Set once the executor has answered: an error after that is ours
+    // (saving the result), not a failure to reach the executor.
+    let answered = false;
     try {
       const res = await fetch(`${executorUrl()}/execute`, {
         method: 'POST',
@@ -247,6 +309,7 @@ export class ScriptRunnerWorker implements OnModuleDestroy {
         ]),
       });
 
+      answered = true;
       if (!res.ok) {
         const detail = await res.text().catch(() => '');
         await this.finish(job.id, {
@@ -307,26 +370,58 @@ export class ScriptRunnerWorker implements OnModuleDestroy {
         });
       }
     } catch (err) {
-      // An aborted fetch is the cancel path, not a failure of ours.
-      const cancelled = ac.signal.aborted;
+      // An aborted fetch is the cancel path, not a failure of ours,
+      // unless the abort came from this process shutting down.
+      const cancelled = ac.signal.aborted && !this.stopping;
+      const shutDown = ac.signal.aborted && this.stopping;
       const timedOut =
-        !cancelled && err instanceof Error && err.name === 'TimeoutError';
+        !ac.signal.aborted && err instanceof Error && err.name === 'TimeoutError';
+      const detail = err instanceof Error ? err.message : String(err);
       await this.finish(job.id, {
         state: cancelled ? 'cancelled' : 'failed',
         error: cancelled
           ? 'Cancelled.'
-          : timedOut
-            ? 'The script executor did not answer in time.'
-            : `Could not reach the script executor: ${
-                err instanceof Error ? err.message : String(err)
-              }`,
+          : shutDown
+            ? 'Stopped because the script service shut down.'
+            : timedOut
+              ? 'The script executor did not answer in time.'
+              : answered
+                ? `The run finished but its result could not be saved: ${detail}`
+                : `Could not reach the script executor: ${detail}`,
         apiKeyId: key.id,
-      });
+      }).catch(() => undefined);
     } finally {
       clearInterval(heartbeat);
       clearInterval(cancelPoll);
       this.inFlight.delete(job.id);
     }
+  }
+
+  /**
+   * The time limit for one run: the script's own setting (the panel
+   * saves it as data.timeoutSeconds), never above the operator's
+   * SCRIPT_TIMEOUT_SECONDS when that is set, nor above the hard
+   * maximum. The per-script value used to be saved and then ignored.
+   */
+  private async runTimeoutSeconds(scriptId: string | undefined): Promise<number> {
+    const envRaw = process.env.SCRIPT_TIMEOUT_SECONDS;
+    const operatorCap =
+      envRaw !== undefined && envRaw.trim() !== ''
+        ? clampScriptTimeout(Number(envRaw))
+        : SCRIPT_MAX_TIMEOUT_SECONDS;
+    let perScript: number | undefined;
+    if (scriptId) {
+      const item = await this.prisma.item
+        .findUnique({ where: { id: scriptId }, select: { data: true } })
+        .catch(() => null);
+      const raw = (item?.data as { timeoutSeconds?: unknown } | null)?.timeoutSeconds;
+      if (typeof raw === 'number' && Number.isFinite(raw)) perScript = raw;
+    }
+    const wanted =
+      perScript !== undefined
+        ? clampScriptTimeout(perScript)
+        : clampScriptTimeout(envRaw !== undefined ? Number(envRaw) : undefined);
+    return Math.min(wanted, operatorCap);
   }
 
   /**
@@ -359,9 +454,14 @@ export class ScriptRunnerWorker implements OnModuleDestroy {
         state: input.state,
         finishedAt: new Date(),
         ...(input.exitCode !== undefined ? { exitCode: input.exitCode } : {}),
-        ...(input.error !== undefined ? { error: input.error } : {}),
-        ...(input.log !== undefined ? { log: input.log } : {}),
-        ...(input.notebook !== undefined ? { notebook: input.notebook } : {}),
+        // Postgres text refuses NUL. A script that printed one used to
+        // fail this write, and the run was then recorded as unreachable
+        // with no log.
+        ...(input.error !== undefined ? { error: stripNul(input.error) } : {}),
+        ...(input.log !== undefined ? { log: stripNul(input.log) } : {}),
+        ...(input.notebook !== undefined
+          ? { notebook: input.notebook === null ? null : stripNul(input.notebook) }
+          : {}),
       },
     });
     if (input.apiKeyId) {
@@ -376,6 +476,11 @@ export class ScriptRunnerWorker implements OnModuleDestroy {
     }
     return res.count === 1;
   }
+}
+
+/** Drop NUL characters, which a Postgres text column refuses. */
+export function stripNul(text: string): string {
+  return text.includes('\u0000') ? text.split('\u0000').join('') : text;
 }
 
 /** How long past the run timeout the claimer waits for the executor. */

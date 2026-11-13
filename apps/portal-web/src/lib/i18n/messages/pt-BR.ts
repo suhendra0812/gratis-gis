@@ -317,6 +317,13 @@ export const ptBR: Partial<CatalogShape> = {
     term: 'XML de metadados',
     importTitle:
       'Importe um arquivo XML de metadados exportado pelo ArcGIS, QGIS ou por um catálogo de dados (ISO 19115, FGDC CSDGM ou Dublin Core) para preencher previamente os campos abaixo',
+    sectionAria: 'Importação opcional de metadados XML',
+    optional: 'Opcional',
+    importButton: 'Importar metadados XML',
+    parsed: 'Lido como {standard}. Preenchemos o que foi possível; o resto é com você.',
+    notMetadata: 'O arquivo XML não parece ISO 19115, FGDC CSDGM nem Dublin Core. Ignorado.',
+    readFailed: 'Não foi possível ler esse arquivo.',
+    metadataOnly: 'Somente metadados. Isto não envia o conteúdo do item. Seu arquivo fica no navegador.',
   },
   layerBuilder: {
     tableName: 'Nome da tabela',
@@ -344,8 +351,7 @@ export const ptBR: Partial<CatalogShape> = {
     expandAria: 'Expand',
     allowEditing: 'Allow editing',
     allowAttachments: 'Allow attachments',
-    attachmentsSoon: '(storage soon)',
-    attachmentsTitle: 'Attachment storage is a Phase E backend change: the toggle persists so you can opt in now.',
+    attachmentsTitle: 'Lets editors attach photos and files to features in this layer. When off, attachment uploads are refused.',
     editorScope: 'Editor scope',
     editorScopeTitle: 'Limit editors to the rows they themselves created',
     allFeatures: 'All features',
@@ -580,6 +586,17 @@ export const ptBR: Partial<CatalogShape> = {
   exprErrorAt: '{message} (at position {pos})',
   contourSourceField: 'Source numeric field',
   pickNumericFieldOption: '(pick a numeric field)',
+  missingFieldOption: '{field} (não está nesta camada)',
+  measureLength: 'Comprimento',
+  measurePerimeter: 'Perímetro',
+  measureArea: 'Área',
+  predicateIntersects: 'Intersecta',
+  predicateWithin: 'Dentro de',
+  predicateNearest: 'Mais próximo',
+  predicateContains: 'Contém',
+  predicateTouches: 'Toca',
+  predicateNear: 'Perto',
+  loadDataLayersFailed: 'Não foi possível carregar as camadas de dados',
   contourNoNumeric: 'The source layer has no numeric fields. Add one (e.g. via Calculate field) earlier in the pipeline.',
   levels: 'Levels',
   contourAuto: 'Auto: walk by interval between min / max',
@@ -1798,6 +1815,7 @@ export const ptBR: Partial<CatalogShape> = {
       'As camadas estão somente para visualização. Ative "Editável em implantações de campo" em uma camada do mapa e confirme que a edição está habilitada na própria camada de dados.',
     nothingToCollectNoLayers:
       "O mapa não tem camadas às quais você possa adicionar.",
+    nothingToCollectSignIn: 'Entre para adicionar ou editar feições nesta implantação.',
     removeFromDevice: "Remover do dispositivo",
     confirmRemoveFromDevice: "Confirmar remoção do dispositivo",
     downloadLayers: "Camadas",
@@ -2094,6 +2112,9 @@ export const ptBR: Partial<CatalogShape> = {
     viewBody: 'Abra este aplicativo e use-o como seus leitores o veem.',
     viewAction: 'Abrir aplicativo',
   },
+  groupDetail: {
+    rosterHidden: 'Somente membros deste grupo podem ver quem faz parte dele.',
+  },
   groupItems: {
     title: 'Compartilhado com este grupo',
     empty:
@@ -2255,12 +2276,16 @@ export const ptBR: Partial<CatalogShape> = {
     autoZoomOff: 'Clique para ligar o zoom automático (cliques na linha aproximam a feição). Também aproxima a seleção atual uma vez.',
     useAsFilter: 'Usar como filtro',
     useAsFilterTitle: 'Filtrar a camada apenas para as feições selecionadas',
+    useAsFilterNoId: 'Nenhuma coluna distingue as linhas selecionadas das demais, então um filtro incluiria mais do que a seleção.',
+    useAsFilterTooMany: 'Selecione no máximo {max} linhas para usá-las como filtro.',
+    useAsFilterNotLoaded: 'Algumas linhas selecionadas não estão carregadas na tabela. Carregue-as ou reduza a seleção primeiro.',
     calculate: 'Calcular',
     calculateTitle: 'Definir o valor de uma coluna para muitas linhas de uma vez a partir de uma expressão',
     closeAria: 'Fechar',
     truncatedBanner: 'Mostrando 5.000+ linhas{extent}. Aproxime{extentHint} ou filtre para ver mais.',
     truncatedInExtent: ' nesta extensão',
     truncatedEnableExtent: ', ative "Na extensão",',
+    showSelectedCapped: 'Mostrando as primeiras {max} linhas selecionadas. Selecione menos para ver o restante.',
     noLayer: 'Nenhuma camada selecionada.',
     loadingFeatures: 'Carregando feições...',
     loadFailed: 'Falha ao carregar: {error}',
@@ -2292,6 +2317,8 @@ export const ptBR: Partial<CatalogShape> = {
     bundleLoadingSchema: 'Carregando esquema da camada…',
     bundleDone:
       'Concluído -- {layers} · {features} · {attachments} · {mb} MB',
+    bundleAttachmentsMissing:
+      '{count} anexos não puderam ser baixados e não estão no ZIP. Exporte novamente.',
     calculateModalTitle: 'Calcular campo',
     calculateUpdatesPrefix: 'Atualiza',
     calculateUpdatesSuffix: 'em todas as linhas do escopo.',
@@ -2410,6 +2437,7 @@ export const ptBR: Partial<CatalogShape> = {
       'Nenhum serviço corresponde. Envie dados vetoriais como serviço de feições ou salve uma URL REST do ArcGIS como item de serviço ArcGIS para escolher aqui.',
     portalFootnote:
       'Serviços de feições vêm do PostGIS; serviços ArcGIS consultam a origem ao vivo conforme você move e amplia.',
+    listTruncated: 'Mostrando os primeiros {count} de {total}. Pesquise para refinar a lista.',
     sublayerBadge: '+{count} camadas',
     sublayerBadgeTitle:
       'Este serviço expõe {count} subcamadas; ao clicar, todas são adicionadas.',
@@ -2524,6 +2552,7 @@ export const ptBR: Partial<CatalogShape> = {
     drawContinue:
       'Clique para adicionar pontos. Clique duplo (ou Enter) para terminar.',
     drawAgain: 'Desenhar de novo',
+    emptyHint: 'Desenhe uma linha no mapa para ver a elevação do terreno ao longo dela.',
     reading: 'Lendo a elevação do terreno...',
     fromSource: 'de {title}',
     distance: 'Distância',
@@ -2667,6 +2696,9 @@ export const ptBR: Partial<CatalogShape> = {
     addAndPrepare: 'Adicionar e preparar',
     saveFailed: 'Não foi possível salvar a área: {status}',
     buildStartFailed: 'Não foi possível iniciar a preparação: {status}',
+    loadFailed: 'Não foi possível carregar as áreas. Adicionar e excluir ficam desativados até que carreguem.',
+    retry: 'Tentar novamente',
+    buildNotStarted: 'A área foi salva, mas a preparação não pôde ser iniciada. Use Preparar agora para tentar de novo.',
   },
   offlineBasemap: {
     preparedMap: 'Mapa preparado',
@@ -2863,6 +2895,7 @@ export const ptBR: Partial<CatalogShape> = {
       'Qualquer pessoa na internet poderá ver os {count} itens selecionados sem fazer login. Use isto para links compartilháveis de mapas / visualizadores. Os itens referenciados pela seleção (camadas, mapas base, etc.) também precisam ser públicos; você será solicitado a aplicar em cascata ao concluir.',
     geographicScope: 'Escopo geográfico',
     noBoundaryItems: 'Ainda não há itens de limite nesta organização',
+    keepScope: 'Manter o escopo atual de cada item',
     noScope: 'Sem escopo (irrestrito)',
     geoScopeHint:
       'Quando definido, quem acessa estes itens via {via} vê apenas as feições dentro do limite. Aplicado na camada da API.',
@@ -2887,6 +2920,9 @@ export const ptBR: Partial<CatalogShape> = {
     summaryType: 'Tipo: {labels}',
     summaryTemplate: 'Modelo: {labels}',
     summaryArea: 'Área: {label}',
+    summaryOwner: 'Proprietário: {labels}',
+    summaryAccess: 'Acesso: {labels}',
+    summaryTags: 'Tags: {labels}',
     cardView: 'Visualização em cartões',
     cards: 'Cartões',
     listView: 'Visualização em lista',
@@ -2932,6 +2968,9 @@ export const ptBR: Partial<CatalogShape> = {
       'Nada em {scope} corresponde a "{query}". Tente outro termo ou limpe a pesquisa.',
     scopeYourItems: 'seus itens',
     scopeSharedWithYou: 'os itens compartilhados com você',
+    folderMissingTitle: 'Esta pasta não está disponível',
+    folderMissingDescription: 'Ela pode ter sido excluída ou não está mais compartilhada com você.',
+    backToItems: 'Voltar aos itens',
     emptyFolderTitle: '{folder} está vazia',
     emptyFolderDescription:
       'Adicione itens existentes, crie algo novo ou arraste itens para cá a partir da visualização de todos os itens.',
@@ -3139,6 +3178,9 @@ export const ptBR: Partial<CatalogShape> = {
     clearSelection: 'Limpar seleção',
   },
   mapLayerAccess: {
+    resetToInherit: "Reset to inherit",
+    customOnlyListed:
+      "Only the people and groups listed here see this layer. Org members and public viewers the map is not shared with do not.",
     title: 'Acesso às camadas',
     description:
       'Ajuste o que cada usuário ou grupo compartilhado vê neste mapa. A matriz restringe o acesso; um aviso aparece quando um principal não tem acesso em nível de item aos dados de origem de uma camada.',
@@ -3284,6 +3326,7 @@ export const ptBR: Partial<CatalogShape> = {
     done: 'Concluído',
   },
   sharing: {
+    networkError: "Não foi possível acessar o portal. Nada foi alterado.",
     sharing: 'Compartilhamento',
     dialogLabel: 'Compartilhamento de {title}',
     whoCanSee: 'Quem pode ver isto',
@@ -3857,7 +3900,6 @@ export const ptBR: Partial<CatalogShape> = {
     approxSuffix: 'approx',
     orphanBadge: 'orphan',
     expired: 'Expired',
-    expiryIn: 'In',
     pastDue: 'Past due',
     extendShare30Title: 'Extend by 30 days',
     extend30d: '+30d',
@@ -3875,7 +3917,7 @@ export const ptBR: Partial<CatalogShape> = {
     scheduleIntro: 'Have the portal tidy up on its own. Off until you turn it on. Pick which kind of cleanup you want, how long something has to sit around before it gets cleaned up, and when the portal should run the cleanup. The lists below keep showing the same things you can clean up by hand whenever you want.',
     scheduleAutoTrash: 'Trash items nobody is using',
     scheduleAutoTrashBefore:
-      'Move items to the trash if no one has edited or shared them in the last',
+      'Move private items to the trash if no one has edited or shared them in the last',
     scheduleAutoTrashAfter:
       'days. They aren\'t deleted right away: trashed items stay in Recently deleted and can be put back at any time.',
     scheduleAutoDisable: 'Pause sign-in for inactive accounts',
@@ -3900,6 +3942,9 @@ export const ptBR: Partial<CatalogShape> = {
     scheduleModeDaily: 'Every day',
     scheduleModeWeekly: 'Once a week',
     scheduleHour: 'Hour (0-23)',
+    scheduleServerTime: "horário do servidor, {zone}",
+    scheduleRunNowUnsaved:
+      "Salve suas alterações primeiro. A execução imediata usa as configurações salvas.",
     scheduleMinute: 'Minute (0-59)',
     scheduleDayOfWeek: 'Day of week',
     daySunday: 'Sunday',
@@ -4415,7 +4460,7 @@ export const ptBR: Partial<CatalogShape> = {
       defaultLookbackHint: "Pre-filter to N days back from now. Blank = show all.",
       hideSubmitter: "Hide submitter",
       hideSubmitterHint: "For anonymous-feedback workflows.",
-      persistNote: "Look-back and Hide submitter persist on the form schema; the runtime hooks land in a follow-up.",
+      persistNote: "Look-back and Hide submitter are not available yet. The Responses page does not read them, so it still shows every response and who submitted it.",
       tools: {
         select: "Select",
         selectHint: "Pick responses to inspect.",
@@ -4673,6 +4718,7 @@ export const ptBR: Partial<CatalogShape> = {
         in: "contains",
         between: "between",
         matches: "matches pattern",
+        notEmpty: "is not empty",
       },
     },
     dependents: {
@@ -4741,6 +4787,8 @@ export const ptBR: Partial<CatalogShape> = {
       matchAny: "any match",
       of: "of:",
       removeConditionAria: "Remove condition",
+      rawRule:
+        "This part of the expression can't be shown as a row. It is kept as it is when you save.",
       removeGroupAria: "Remove group",
       cancel: "Cancel",
       save: "Save",
@@ -4766,6 +4814,7 @@ export const ptBR: Partial<CatalogShape> = {
         in: "string or list contains a value",
         between: "value falls in a range",
         matches: "regex match",
+        notEmpty: "has an answer (text, a choice or a list)",
       },
       functionsIntro:
         "Reference for the calculate / default editor. Click a signature to copy it to the clipboard. The row-based editor on the left works in field-op-value form, so functions can't be inserted into rules directly.",
@@ -4978,6 +5027,8 @@ export const ptBR: Partial<CatalogShape> = {
     available: "Disponíveis",
     rankingEmpty: "Nenhum item classificado ainda. Toque em um item abaixo para adicionar.",
     removeFromRankingAria: "Remover da classificação",
+    rankUpAria: "Subir na classificação",
+    rankDownAria: "Descer na classificação",
     placeholders: {
       signature: "Signature pad",
       photo: "Photo capture",
@@ -5150,6 +5201,8 @@ export const ptBR: Partial<CatalogShape> = {
       noBoundMapTarget: "No bound map / target.",
       noEditableLayer: "No editable layer set. Add one in the app settings.",
       noFeaturesInViewport: "No features in the current viewport.",
+      exportNoFeatures: "This layer has no features to export.",
+      exportFailed: "Export failed: {message}",
       noFeaturesSelected: "No features selected on the bound map.",
       outlineAdded: "Outline added.",
       outlineReview: "Review the outline, then Save or Discard.",
@@ -5157,6 +5210,7 @@ export const ptBR: Partial<CatalogShape> = {
       outlining: "Outlining...",
       pickNumberField: "Pick a number field to {aggregate}.",
       printPopupBlocked: "Could not open the print preview window.  Allow popups for this site and try again.",
+      printSnapshotTooLarge: "The map snapshot was too large to pass to the print page, so the print shows a placeholder map. Try a smaller window.",
       savePrompt: "Save these features as a new data layer. Choose a name:",
       selectedNotInViewport: "Selected features are not in the current viewport.",
       submitFailed: "Submit failed",
@@ -5166,6 +5220,11 @@ export const ptBR: Partial<CatalogShape> = {
     export: {
       hint: "Exports the features currently loaded for this layer (the map viewport plus its surrounding tile cache).  For a full-layer dump including related tables + attachments, use the bundle export on the data layer's detail page.",
     },
+    legend: {
+      under: "under {value}",
+      andUp: "{value} and up",
+      range: "{lo} to {hi}",
+    },
     features: {
       addingTo: "Adding to",
       clickEditable: "Click an editable feature on the map to edit it. Click here again to exit edit mode.",
@@ -5173,6 +5232,7 @@ export const ptBR: Partial<CatalogShape> = {
       multiVertexNote: "(Note: only single-point placement is supported in this first cut; multi-vertex sketching for lines / polygons is queued as a follow-up.)",
       pickLayerToAdd: "Pick a layer to add to",
       placeOnMap: "click on the map to place the new {geometryType}.",
+      sketchUnsupported: "Adding a {geometryType} here is not supported yet: this widget can only place single points. Use the map editor to draw it.",
       reselectFeatures: "Reselect the features on the map, then try again.",
       selectOnMapFirst: "Select feature(s) on the bound map first.",
       timeTravelDisabled: "Editing is disabled while viewing a past snapshot. Reset the time slider to enable.",
@@ -5398,6 +5458,7 @@ export const ptBR: Partial<CatalogShape> = {
       'Criar camadas exige a funcao de colaborador ou administrador.',
     jobStartFailed: 'Nao foi possivel iniciar o trabalho.',
     intervalRequired: 'Informe uma altura entre as linhas.',
+    intervalTooSmall: "O intervalo deve ser de pelo menos {min}.",
     zoneRequired: 'Escolha uma camada de dados poligonal para as zonas.',
     labelContours: 'Curvas de nivel',
     labelSteepness: 'Mapa de inclinacao',
@@ -5428,6 +5489,8 @@ export const ptBR: Partial<CatalogShape> = {
       'That is {tiles} images totalling {bytes}. Building the mosaic would take {duration}, beyond what this server allows in one job. Split it into smaller mosaics.',
     errPartialUpload:
       '{failed} of {total} images did not upload ({names}).',
+    errNetwork: "Não foi possível acessar o portal. As imagens enviadas foram mantidas; tente novamente.",
+    errRetryHttp: "Não foi possível tentar a compilação novamente (HTTP {status}).",
     errMosaicStartHttp:
       'Could not start the mosaic build (HTTP {status}).',
     progressUploadingImages: 'Uploading {count} images...',
@@ -5906,6 +5969,8 @@ export const ptBR: Partial<CatalogShape> = {
   },
 
   serviceEditors: {
+    probeSaveUrlFirst:
+      "Este serviço precisa de senha, então Sondar lê a URL salva. Salve a nova URL primeiro e sonde novamente.",
     connection: "Conexão",
     serviceEndpoint: "Endpoint do serviço",
     probe: "Sondar",
@@ -5922,6 +5987,8 @@ export const ptBR: Partial<CatalogShape> = {
     saving: "Salvando...",
     saved: "Salvo",
     saveFailed: "Falha ao salvar.",
+    reprobeBeforeSave: "Sonde a nova URL antes de salvar. A lista de camadas vem da sondagem.",
+    pickAtLeastOneLayer: "Escolha pelo menos uma camada antes de salvar.",
     selectAll: "Selecionar tudo",
     selectAllShort: "Todas",
     selectNoneShort: "Nenhuma",

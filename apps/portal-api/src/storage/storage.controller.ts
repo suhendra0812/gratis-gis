@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
+import { hasCapability } from '../auth/capabilities.js';
+import { Prisma } from '@prisma/client';
 import {
   BadRequestException,
   Body,
@@ -33,7 +35,12 @@ import { publicTierGeoLimit } from '../public/public-geo-limit.js';
 import type { GeoJsonGeometry } from '@gratis-gis/engine';
 import type { AssetKind } from './storage.service.js';
 import { StorageService } from './storage.service.js';
-import { recordUploadGrant } from './key-ownership.js';
+import {
+  LARGE_UPLOAD_KINDS,
+  assertLargeGrantRoom,
+  recordUploadGrant,
+} from './key-ownership.js';
+import { contentDisposition } from '../common/content-disposition.js';
 
 // Kinds the browser may request a presigned PUT for. `map-icon` is
 // deliberately absent (its upload path sanitizes server-side and
@@ -80,11 +87,12 @@ const KEY_SHAPE =
 
 /**
  * Minting presigned URLs requires a valid auth token (the global JWT
- * guard handles that). Beyond auth, we don't gate by role here: any
- * authenticated user may upload imagery for entities they own, and the
- * PATCH endpoint that persists the URL is where we enforce ownership.
- * A leaked presigned URL just lets someone burn 5 MB of our storage,
- * which is a 60-second window and a clear abuse signal if it happens.
+ * guard handles that). Small kinds (avatars, thumbnails, attachments)
+ * are open to any signed-in user; the PATCH or attach that persists
+ * the key is where ownership is enforced. The large kinds (tile
+ * layers and point clouds, up to 8 GB per URL) need the publish
+ * capability, since only a contributor can create the item they
+ * belong to, and a user may hold only a few such URLs at once.
  */
 @ApiTags('storage')
 @ApiBearerAuth()
@@ -119,6 +127,12 @@ export class StorageController {
     @CurrentUser() user: AuthUser,
     @Body() dto: PresignUploadDto,
   ) {
+    if (LARGE_UPLOAD_KINDS.has(dto.kind) && !hasCapability(user, 'can_publish_items')) {
+      throw new ForbiddenException(
+        'Uploading tile layers and point clouds needs a contributor or admin role.',
+      );
+    }
+    await assertLargeGrantRoom(this.prisma, dto.kind, user.id);
     let signed;
     try {
       signed = await this.storage.presignUpload(
@@ -259,20 +273,18 @@ export class StorageController {
       // Both `item.data->>'storageKey'` and `item.storageRef` get
       // checked because different item types persist the key in
       // different places.
-      const item = await this.prisma.item.findFirst({
-        where: {
-          OR: [
-            { storageRef: storageKey },
-            { data: { path: ['storageKey'], equals: storageKey } },
-            { data: { path: ['pmtilesStorageKey'], equals: storageKey } },
-            { data: { path: ['cogStorageKey'], equals: storageKey } },
-          ],
-          deletedAt: null,
-        },
-        // Oldest row decides, as for attachments above.
-        orderBy: { createdAt: 'asc' },
-        select: { id: true, type: true, data: true, access: true },
-      });
+      //
+      // Containment (`@>`) is what the item_data_gin index serves, and
+      // storage_ref has its own index, so this is a pair of index
+      // probes. The JSON path equality used before matched the same
+      // rows but scanned and detoasted every item on each download.
+      const ownerId = await findItemIdOwningKey(this.prisma, storageKey);
+      const item = ownerId
+        ? await this.prisma.item.findUnique({
+            where: { id: ownerId },
+            select: { id: true, type: true, data: true, access: true },
+          })
+        : null;
       if (!item) throw new NotFoundException('File not found');
       // Pull the filename when present in item.data.
       const data = (item.data ?? {}) as Record<string, unknown>;
@@ -307,6 +319,14 @@ export class StorageController {
     // downloads like any other active type.  Unknown or missing
     // types default to attachment.
     const upstream = await this.storage.streamObject(storageKey, rangeHeader);
+    // Tear down the S3 read stream when the client disconnects (or the
+    // response finishes) so its socket returns to the pool instead of
+    // draining to the end. `pipe` does not destroy the source on a
+    // destination close, and range-read viewers abort constantly.
+    // destroy() is idempotent, so firing on a normal finish is safe.
+    // Registered before any header is set, so a throw below cannot
+    // leave the stream open until the SDK's idle timeout.
+    res.on('close', () => upstream.body.destroy());
     const servedType = (upstream.contentType ?? '')
       .split(';')[0]!
       .trim()
@@ -323,19 +343,35 @@ export class StorageController {
     res.setHeader('Accept-Ranges', upstream.acceptRanges ?? 'bytes');
     res.setHeader(
       'Content-Disposition',
-      `${inlineSafe ? 'inline' : 'attachment'}; filename="${filename.replace(/["\\\r\n]/g, '')}"`,
+      contentDisposition(inlineSafe ? 'inline' : 'attachment', filename),
     );
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('Cache-Control', 'private, max-age=60');
-
-    // Tear down the S3 read stream when the client disconnects (or the
-    // response finishes) so its socket returns to the pool instead of
-    // draining to the end. `pipe` does not destroy the source on a
-    // destination close, and range-read viewers abort constantly.
-    // destroy() is idempotent, so firing on a normal finish is safe.
-    res.on('close', () => upstream.body.destroy());
     upstream.body.pipe(res);
   }
+}
+
+/**
+ * The live item that references `storageKey`, oldest first, or null.
+ * Containment (`@>`) is what the item_data_gin index serves and
+ * storage_ref has its own index, so this is a set of index probes.
+ */
+export async function findItemIdOwningKey(
+  prisma: { $queryRaw: <T>(q: Prisma.Sql) => Promise<T> },
+  storageKey: string,
+): Promise<string | null> {
+  const rows = await prisma.$queryRaw<Array<{ id: string }>>(Prisma.sql`
+    SELECT id FROM "item"
+    WHERE deleted_at IS NULL
+      AND (
+        storage_ref = ${storageKey}
+        OR data_json @> jsonb_build_object('storageKey', ${storageKey}::text)
+        OR data_json @> jsonb_build_object('pmtilesStorageKey', ${storageKey}::text)
+        OR data_json @> jsonb_build_object('cogStorageKey', ${storageKey}::text)
+      )
+    ORDER BY created_at ASC
+    LIMIT 1`);
+  return rows[0]?.id ?? null;
 }
 
 /** The v3 layer an attachment hangs off, for its policy and type. */

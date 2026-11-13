@@ -295,7 +295,7 @@ export default async function FieldRuntimePage(props: Props) {
     // field PWA's Add picker should not offer it as an Add target.
     // Without this gate, the picker shows every map data-layer
     // regardless of editability and the worker can attempt an Add
-    // that the API would reject anyway.
+    // that the API does not refuse on its own.
     // Editability gate (data_layer + per-map). The layer always
     // makes it into editableLayers so the LayerVisibilityPanel can
     // look up its geometry type and surface a toggle row in the
@@ -403,6 +403,9 @@ export default async function FieldRuntimePage(props: Props) {
         geometryType: sub.geometryType,
         fields: sub.fields,
         editingPolicy: sub.editingPolicy ?? 'all-rows',
+        // A related table marked not editable is still listed so its
+        // rows show, but the popup must not offer Add or Edit on it.
+        addable: sub.editingEnabled !== false && parent.addable !== false,
         ...(binding ? { boundFormItemId: binding.formItemId } : {}),
       });
       seenLayerKey.add(key);
@@ -459,18 +462,26 @@ export default async function FieldRuntimePage(props: Props) {
     .filter((b): b is CustomBasemap => b !== null);
 
   return (
-    <FieldRuntime
-      dataCollectionId={dcItem.id}
-      title={dcItem.title}
-      mapData={mapData}
-      mapId={mapItem.id}
-      mapTitle={mapItem.title}
-      basemaps={basemaps}
-      editableLayers={editableLayers}
-      pickLists={pickLists}
-      boundForms={boundForms}
-      currentUserId={me.id}
-    />
+    <>
+      {/* Tells the service worker this copy was rendered for a
+          signed-in user, so an anonymous read-only render (public
+          deployment, expired session) does not replace it as the
+          offline page. Lockstep with FIELD_SIGNED_IN_MARKER in
+          public/sw.js. */}
+      {me.id ? <meta name="gg-field-signed-in" content="1" /> : null}
+      <FieldRuntime
+        dataCollectionId={dcItem.id}
+        title={dcItem.title}
+        mapData={mapData}
+        mapId={mapItem.id}
+        mapTitle={mapItem.title}
+        basemaps={basemaps}
+        editableLayers={editableLayers}
+        pickLists={pickLists}
+        boundForms={boundForms}
+        currentUserId={me.id}
+      />
+    </>
   );
 }
 

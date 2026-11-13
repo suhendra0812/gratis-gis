@@ -31,6 +31,7 @@ function user(
 function service(opts: {
   users?: Array<{ id: string; orgId: string; deletedAt: Date | null; orgRole?: string }>;
   groups?: Array<{ id: string; orgId: string; deletedAt: Date | null }>;
+  canAdmin?: boolean;
 }) {
   const svc = Object.create(ItemsService.prototype) as ItemsService;
   const item = { id: 'item-1', orgId: ORG, ownerId: 'owner-1', access: 'private', shares: [] };
@@ -49,9 +50,13 @@ function service(opts: {
   const upsert = jest.fn(async () => ({}));
   Object.assign(svc, {
     get: jest.fn(async () => item),
-    sharing: { canAdmin: () => true, canEdit: () => true },
+    sharing: { canAdmin: () => opts.canAdmin ?? true, canEdit: () => true },
     prisma: {
-      itemShare: { upsert, findMany: jest.fn(async () => []) },
+      itemShare: {
+        upsert,
+        findMany: jest.fn(async () => []),
+        findUnique: jest.fn(async () => ({ itemId: 'item-1' })),
+      },
       user: {
         findFirst: jest.fn(async ({ where }: { where: { id: string; orgId?: string } }) =>
           match(users, where),
@@ -90,6 +95,43 @@ describe('ItemsService sharing gates', () => {
         access: 'public',
       } as never),
     ).rejects.toBeInstanceOf(ForbiddenException);
+  });
+
+  // An edit share must not let its holder change who can see the item
+  // or lift a tier's geographic limit: share() needs owner or admin.
+  it('refuses an access change from an editor who is not owner or admin', async () => {
+    const { svc } = service({ canAdmin: false });
+    await expect(
+      svc.update(user('contributor'), 'item-1', { access: 'public' } as never),
+    ).rejects.toThrow('Only the owner or an org admin');
+  });
+
+  it('refuses a tier boundary change from an editor who is not owner or admin', async () => {
+    const { svc } = service({ canAdmin: false });
+    await expect(
+      svc.update(user('contributor'), 'item-1', {
+        publicGeoBoundaryId: null,
+        orgGeoBoundaryId: '00000000-0000-0000-0000-000000000001',
+      } as never),
+    ).rejects.toThrow('Only the owner or an org admin');
+  });
+
+  it('keeps the stored permission when an update omits it', async () => {
+    const { svc, upsert } = service({
+      users: [{ id: 'u-2', orgId: ORG, deletedAt: null, orgRole: 'contributor' }],
+    });
+    await svc
+      .share(user('contributor'), 'item-1', {
+        principalType: 'user',
+        principalId: 'u-2',
+        expiresAt: '2030-01-01T00:00:00.000Z',
+      } as never)
+      .catch(() => undefined);
+    const args = (upsert.mock.calls[0] as unknown as [
+      { update: Record<string, unknown>; create: Record<string, unknown> },
+    ])[0];
+    expect(args.update).not.toHaveProperty('permission');
+    expect(args.create.permission).toBe('view');
   });
 
   it('refuses a user principal from another org', async () => {

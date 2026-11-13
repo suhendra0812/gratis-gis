@@ -70,6 +70,10 @@ describe('form mirror reconciliation', () => {
       (c) => ((c as unknown[])[0] as { submissionId: string }).submissionId,
     );
     expect(new Set(tried)).toEqual(new Set(['good-1']));
+    // The waiting rows are left out by the query itself, before its
+    // LIMIT, so they cannot fill the scan.
+    const params = prisma.$queryRaw.mock.calls[1].slice(1) as unknown[];
+    expect(params).toContainEqual(ids);
   });
 
   it('repairs nothing when the leader finds no gap', async () => {
@@ -134,7 +138,8 @@ describe('form mirror repair re-registers photos after the presign grant expires
       featureAttachment: {
         create: jest.fn(async (a: unknown) => {
           created.push(a);
-          return { id: 'a1', createdAt: new Date(0) };
+          const data = (a as { data: { storageKey: string } }).data;
+          return { id: 'a1', createdAt: new Date(0), storageKey: data.storageKey };
         }),
       },
     };

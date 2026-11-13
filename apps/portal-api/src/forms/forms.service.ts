@@ -11,7 +11,7 @@ import {
 } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import type { Item } from '@prisma/client';
-import { validate } from '@gratis-gis/form-schema';
+import { validate, withEvaluationClock } from '@gratis-gis/form-schema';
 import type { FormSchema, Response as FormResponse } from '@gratis-gis/form-schema';
 
 import { PrismaService } from '../prisma/prisma.service.js';
@@ -30,6 +30,7 @@ import {
 } from './submission-pdf.js';
 import { cleanSubmission } from './submission-clean.js';
 import { isPlainEmailAddress } from '../notifications/email-address.js';
+import { formExtraRecipients } from './form-notify-limits.js';
 
 /**
  * Persistence and access control for form submissions (#131).
@@ -157,6 +158,7 @@ export class FormsService implements OnApplicationBootstrap, OnModuleDestroy {
       schemaVersion: number;
       response: Record<string, unknown>;
       capturedAt: string;
+      utcOffsetMinutes?: number;
     },
   ): Promise<{ id: string; created: boolean }> {
     const form = await this.getVisibleForm(formId, user);
@@ -209,8 +211,24 @@ export class FormsService implements OnApplicationBootstrap, OnModuleDestroy {
     // the raw body would let a stale tab or a hand-crafted POST put
     // unchecked values into the submission, the paired layer and the
     // receipt email. The browser runtime does the same before it posts.
-    const response = cleanSubmission(schema, dto.response as FormResponse);
-    const validation = validate(schema, response);
+    // today() and now() mean the moment of capture, in the
+    // respondent's time zone when the client says it. With this
+    // server's clock (UTC, at upload time) a valid "not before
+    // today" answer failed, and every offline capture synced after
+    // midnight failed again on each retry.
+    const offset =
+      typeof dto.utcOffsetMinutes === 'number' &&
+      Number.isInteger(dto.utcOffsetMinutes) &&
+      Math.abs(dto.utcOffsetMinutes) <= 14 * 60
+        ? dto.utcOffsetMinutes
+        : 0;
+    const { response, validation } = withEvaluationClock(
+      { now: captured, utcOffsetMinutes: offset },
+      () => {
+        const cleaned = cleanSubmission(schema, dto.response as FormResponse);
+        return { response: cleaned, validation: validate(schema, cleaned) };
+      },
+    );
     if (!validation.ok) {
       const details = validation.errors
         .map((e) => `${e.questionId}: ${e.message}`)
@@ -225,65 +243,73 @@ export class FormsService implements OnApplicationBootstrap, OnModuleDestroy {
       });
     }
 
-    const result = await this.prisma.formSubmission.upsert({
-      where: { formId_clientId: { formId: form.id, clientId: dto.clientId } },
-      create: {
-        formId: form.id,
-        orgId: form.orgId,
-        clientId: dto.clientId,
-        schemaVersion: dto.schemaVersion,
-        response: response as Prisma.InputJsonValue,
-        submittedBy: user.id,
-        capturedAt: captured,
-      },
-      update: {}, // idempotent on re-drain; never overwrite a stored row
-      select: { id: true, createdAt: true },
-    });
-    // `created` is true only when the row didn't already exist -- we
-    // proxy it via createdAt being equal to "right now" within
-    // tolerance, which is good enough for the UI and avoids a second
-    // query. Phase 2 may switch to a tx-level WAS-CREATED flag.
-    const justCreated =
-      Date.now() - result.createdAt.getTime() < 5_000;
+    // Plain insert, so only the request that actually wrote the row
+    // counts as created. Two copies of one capture racing (two tabs
+    // draining the same outbox, or a retry after a timeout) used to
+    // both pass the check above and both look "just created", which
+    // sent every notification twice. The loser now hits the unique
+    // key and answers like an idempotent re-drain.
+    let result: { id: string };
+    try {
+      result = await this.prisma.formSubmission.create({
+        data: {
+          formId: form.id,
+          orgId: form.orgId,
+          clientId: dto.clientId,
+          schemaVersion: dto.schemaVersion,
+          response: response as Prisma.InputJsonValue,
+          submittedBy: user.id,
+          capturedAt: captured,
+        },
+        select: { id: true },
+      });
+    } catch (err) {
+      if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
+        const winner = await this.prisma.formSubmission.findUnique({
+          where: { formId_clientId: { formId: form.id, clientId: dto.clientId } },
+          select: { id: true },
+        });
+        if (winner) return { id: winner.id, created: false };
+      }
+      throw err;
+    }
     // form_submission_received fan-out (#229). Only fire on real
     // first-write so a re-drained offline queue doesn't re-spam the
     // form owner. Recipient for v1 is the form item's owner; per-
     // recipient lists land with the Phase B template editor. Fire-
     // and-forget so an SMTP outage never rolls back the submission
     // the user just made.
-    if (justCreated) {
-      void this.notifyFormSubmissionReceived({
-        formId: form.id,
-        formTitle: form.title ?? 'Form',
-        formOwnerId: form.ownerId,
-        formData: form.data,
-        submissionId: result.id,
-        submitter: user,
-        response,
-      });
-      // Mirror the submission into the paired data_layer (#281e).
-      // V1 stores everything under `properties` on the layer's
-      // submissions sublayer (one row per submission). This gives
-      // the form a real, queryable, map-friendly home immediately;
-      // the schema-mutation API in #281b will later split the
-      // properties JSONB into typed columns per question.
-      //
-      // Only on first-write so an offline re-drain doesn't duplicate
-      // the layer row. Failures are non-fatal: form_submission is
-      // the durable source of truth; a missed mirror just means the
-      // layer is out of date until a backfill pass.
-      void this.mirrorWithRetry({
-        form,
-        clientId: dto.clientId,
-        submissionId: result.id,
-        schemaVersion: dto.schemaVersion,
-        response,
-        submittedBy: user.id,
-        capturedAt: captured,
-        user,
-      });
-    }
-    return { id: result.id, created: justCreated };
+    void this.notifyFormSubmissionReceived({
+      formId: form.id,
+      formTitle: form.title ?? 'Form',
+      formOwnerId: form.ownerId,
+      formData: form.data,
+      submissionId: result.id,
+      submitter: user,
+      response,
+    });
+    // Mirror the submission into the paired data_layer (#281e).
+    // V1 stores everything under `properties` on the layer's
+    // submissions sublayer (one row per submission). This gives
+    // the form a real, queryable, map-friendly home immediately;
+    // the schema-mutation API in #281b will later split the
+    // properties JSONB into typed columns per question.
+    //
+    // Only on first-write so an offline re-drain doesn't duplicate
+    // the layer row. Failures are non-fatal: form_submission is
+    // the durable source of truth; a missed mirror just means the
+    // layer is out of date until a backfill pass.
+    void this.mirrorWithRetry({
+      form,
+      clientId: dto.clientId,
+      submissionId: result.id,
+      schemaVersion: dto.schemaVersion,
+      response,
+      submittedBy: user.id,
+      capturedAt: captured,
+      user,
+    });
+    return { id: result.id, created: true };
   }
 
   /**
@@ -342,6 +368,12 @@ export class FormsService implements OnApplicationBootstrap, OnModuleDestroy {
    */
   async reconcileFormMirrors(now: number = Date.now()): Promise<number> {
     if (!this.leader?.shouldRun()) return 0;
+    // Leave out rows still backing off inside the query, before the
+    // LIMIT. Filtering them afterwards let 200 old rows that can never
+    // mirror fill every scan and hide newer misses on other forms.
+    const waiting = [...this.repairBackoff]
+      .filter(([, b]) => b.nextAt > now)
+      .map(([id]) => id);
     const rows = await this.prisma.$queryRaw<
       Array<{ id: string }>
     >`
@@ -353,6 +385,7 @@ export class FormsService implements OnApplicationBootstrap, OnModuleDestroy {
         AND l.deleted_at IS NULL
       WHERE jsonb_typeof(f.data_json->'linkedLayerId') = 'string'
         AND s.created_at > now() - make_interval(days => ${MIRROR_REPAIR_WINDOW_DAYS})
+        AND NOT (s.id = ANY(${waiting}::uuid[]))
         AND NOT EXISTS (
           SELECT 1
           FROM observation o
@@ -369,9 +402,11 @@ export class FormsService implements OnApplicationBootstrap, OnModuleDestroy {
       throw new Error('form mirror scope drifted from dataLayerScope');
     }
     const pending = new Set(rows.map((r) => r.id));
+    const stillWaiting = new Set(waiting);
     for (const id of [...this.repairBackoff.keys()]) {
       // Mirrored by someone else, aged out of the window, or trashed.
-      if (!pending.has(id)) this.repairBackoff.delete(id);
+      // Rows left out of the scan because they are waiting stay.
+      if (!pending.has(id) && !stillWaiting.has(id)) this.repairBackoff.delete(id);
     }
     const due = rows
       .filter((r) => (this.repairBackoff.get(r.id)?.nextAt ?? 0) <= now)
@@ -944,12 +979,10 @@ export class FormsService implements OnApplicationBootstrap, OnModuleDestroy {
               | undefined)
           : undefined;
       const notifyOwner = notifyCfg?.notifyOwner !== false;
-      const extras = Array.isArray(notifyCfg?.extraRecipients)
-        ? (notifyCfg!.extraRecipients as unknown[])
-            .filter((e): e is string => typeof e === 'string')
-            .map((e) => e.trim())
-            .filter((e) => isPlainEmailAddress(e))
-        : [];
+      const extras = formExtraRecipients(
+        notifyCfg?.extraRecipients,
+        isPlainEmailAddress,
+      );
 
       // Resolve the owner's email up front so we can de-dup against
       // extras: an author who lists themselves in extraRecipients
@@ -995,7 +1028,7 @@ export class FormsService implements OnApplicationBootstrap, OnModuleDestroy {
   async list(
     formId: string,
     user: AuthUser,
-    opts: { limit?: number } = {},
+    opts: { limit?: number; before?: string } = {},
   ): Promise<
     Array<{
       id: string;
@@ -1013,10 +1046,23 @@ export class FormsService implements OnApplicationBootstrap, OnModuleDestroy {
         'Only the form owner or an org admin can view submissions.',
       );
     }
+    // Page with a cursor on the last id seen. The cursor row must be a
+    // submission of this form; ordering adds id so ties on createdAt
+    // still give every row exactly once.
+    if (opts.before !== undefined) {
+      const cursorRow = await this.prisma.formSubmission.findFirst({
+        where: { id: opts.before, formId: form.id },
+        select: { id: true },
+      });
+      if (!cursorRow) {
+        throw new BadRequestException('before must be the id of a submission of this form.');
+      }
+    }
     const rows = await this.prisma.formSubmission.findMany({
       where: { formId: form.id },
-      orderBy: { createdAt: 'desc' },
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
       take: Math.max(1, Math.min(opts.limit ?? 100, 500)),
+      ...(opts.before !== undefined ? { cursor: { id: opts.before }, skip: 1 } : {}),
       select: {
         id: true,
         clientId: true,

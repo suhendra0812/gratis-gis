@@ -67,6 +67,11 @@ export class DataLayerTablesService {
    * extent: the caller stores that as `bbox = []` so the area
    * filter correctly excludes the item from "what's in this area?"
    * results until features land.
+   *
+   * A failed query throws instead of counting as "no features".
+   * Returning null on a timeout or a dropped connection made callers
+   * overwrite a good stored extent with `[]`, and the next write
+   * then reran the same full scan because nothing was stored.
    */
   async aggregateBbox(
     itemId: string,
@@ -80,52 +85,44 @@ export class DataLayerTablesService {
     for (const layer of layers) {
       if (layer.geometryType === null) continue;
       const scope = `data_layer:${itemId}:${layer.id}`;
-      try {
-        // Phase 2.4: aggregate over the engine's current-truth
-        // projection (latest observation per entity, not deleted)
-        // instead of the legacy fs_ table. After Phase 2.2 stopped
-        // populating fs_ tables, the old query returned stale data.
-        const rows = await this.prisma.$queryRawUnsafe<
-          Array<{
-            minx: number | null;
-            miny: number | null;
-            maxx: number | null;
-            maxy: number | null;
-          }>
-        >(
-          `SELECT
-             ST_XMin(ST_Extent(geom))::float8 AS minx,
-             ST_YMin(ST_Extent(geom))::float8 AS miny,
-             ST_XMax(ST_Extent(geom))::float8 AS maxx,
-             ST_YMax(ST_Extent(geom))::float8 AS maxy
-           FROM (
-             SELECT DISTINCT ON (entity) entity, geom, kind
-             FROM observation
-             WHERE scope = $1
-             ORDER BY entity, valid_from DESC, tx_time DESC, id DESC
-           ) latest
-           WHERE kind <> 'delete' AND geom IS NOT NULL`,
-          scope,
-        );
-        const r = rows[0];
-        if (
-          r?.minx != null &&
-          r.miny != null &&
-          r.maxx != null &&
-          r.maxy != null
-        ) {
-          w = Math.min(w, r.minx);
-          s = Math.min(s, r.miny);
-          e = Math.max(e, r.maxx);
-          n = Math.max(n, r.maxy);
-          any = true;
-        }
-      } catch (err) {
-        this.log.debug(
-          `aggregateBbox: could not read scope ${scope}: ${
-            err instanceof Error ? err.message : err
-          }`,
-        );
+      // Phase 2.4: aggregate over the engine's current-truth
+      // projection (latest observation per entity, not deleted)
+      // instead of the legacy fs_ table. After Phase 2.2 stopped
+      // populating fs_ tables, the old query returned stale data.
+      const rows = await this.prisma.$queryRawUnsafe<
+        Array<{
+          minx: number | null;
+          miny: number | null;
+          maxx: number | null;
+          maxy: number | null;
+        }>
+      >(
+        `SELECT
+           ST_XMin(ST_Extent(geom))::float8 AS minx,
+           ST_YMin(ST_Extent(geom))::float8 AS miny,
+           ST_XMax(ST_Extent(geom))::float8 AS maxx,
+           ST_YMax(ST_Extent(geom))::float8 AS maxy
+         FROM (
+           SELECT DISTINCT ON (entity) entity, geom, kind
+           FROM observation
+           WHERE scope = $1
+           ORDER BY entity, valid_from DESC, tx_time DESC, id DESC
+         ) latest
+         WHERE kind <> 'delete' AND geom IS NOT NULL`,
+        scope,
+      );
+      const r = rows[0];
+      if (
+        r?.minx != null &&
+        r.miny != null &&
+        r.maxx != null &&
+        r.maxy != null
+      ) {
+        w = Math.min(w, r.minx);
+        s = Math.min(s, r.miny);
+        e = Math.max(e, r.maxx);
+        n = Math.max(n, r.maxy);
+        any = true;
       }
     }
     return any ? [w, s, e, n] : null;
@@ -205,8 +202,13 @@ export class DataLayerTablesService {
     for (const layer of data.layers) {
       const layerId = (layer as { id?: unknown }).id;
       if (typeof layerId !== 'string' || layerId === '') continue;
-      counts.set(layerId, await this.countLiveEntities(itemId, layerId));
+      // A failed count is left out, so the layer keeps its last known
+      // featureCount. Writing 0 would tell the QGIS plugin a huge
+      // layer is empty and safe to download whole.
+      const count = await this.readLiveCount(itemId, layerId);
+      if (count !== null) counts.set(layerId, count);
     }
+    if (counts.size === 0) return false;
     // Then write only featureCount, against the row as it is now and
     // under the same row lock commitLayerSync takes. Writing back the
     // `data` read above would put a stale syncVersion back if an edit
@@ -246,6 +248,14 @@ export class DataLayerTablesService {
     itemId: string,
     layerId: string,
   ): Promise<number> {
+    return (await this.readLiveCount(itemId, layerId)) ?? 0;
+  }
+
+  /** Live entity count, or null when the count query failed. */
+  private async readLiveCount(
+    itemId: string,
+    layerId: string,
+  ): Promise<number | null> {
     const scope = `data_layer:${itemId}:${layerId}`;
     try {
       const rows = await this.prisma.$queryRawUnsafe<
@@ -268,7 +278,7 @@ export class DataLayerTablesService {
           err instanceof Error ? err.message : err
         }`,
       );
-      return 0;
+      return null;
     }
   }
 }

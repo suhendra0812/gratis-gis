@@ -362,6 +362,15 @@ export const en = {
     term: 'metadata XML',
     importTitle:
       'Import a metadata XML file exported by ArcGIS, QGIS or a data catalogue (ISO 19115, FGDC CSDGM or Dublin Core) to pre-fill the fields below',
+    sectionAria: 'Optional metadata XML import',
+    optional: 'Optional',
+    importButton: 'Import metadata XML',
+    parsed: 'Parsed as {standard}. Filled what we could; the rest is yours.',
+    notMetadata:
+      'Got an XML file but it does not look like ISO 19115, FGDC CSDGM, or Dublin Core. Skipping.',
+    readFailed: 'Could not read that file.',
+    metadataOnly:
+      'Metadata only. This does not upload the item\u2019s content. Your file stays in the browser.',
   },
   // The data_layer builder on the new item wizard.
   layerBuilder: {
@@ -390,8 +399,7 @@ export const en = {
     expandAria: 'Expand',
     allowEditing: 'Allow editing',
     allowAttachments: 'Allow attachments',
-    attachmentsSoon: '(storage soon)',
-    attachmentsTitle: 'Attachment storage is a Phase E backend change: the toggle persists so you can opt in now.',
+    attachmentsTitle: 'Lets editors attach photos and files to features in this layer. When off, attachment uploads are refused.',
     editorScope: 'Editor scope',
     editorScopeTitle: 'Limit editors to the rows they themselves created',
     allFeatures: 'All features',
@@ -626,6 +634,17 @@ export const en = {
   exprErrorAt: '{message} (at position {pos})',
   contourSourceField: 'Source numeric field',
   pickNumericFieldOption: '(pick a numeric field)',
+  missingFieldOption: '{field} (not on this layer)',
+  measureLength: 'Length',
+  measurePerimeter: 'Perimeter',
+  measureArea: 'Area',
+  predicateIntersects: 'Intersects',
+  predicateWithin: 'Within',
+  predicateNearest: 'Nearest',
+  predicateContains: 'Contains',
+  predicateTouches: 'Touches',
+  predicateNear: 'Near',
+  loadDataLayersFailed: 'Could not load data layers',
   contourNoNumeric: 'The source layer has no numeric fields. Add one (e.g. via Calculate field) earlier in the pipeline.',
   levels: 'Levels',
   contourAuto: 'Auto: walk by interval between min / max',
@@ -1869,6 +1888,7 @@ export const en = {
     nothingToCollectViewOnly:
       'Its layers are set to view-only. Turn on "Editable in field deployments" for a layer on the map, and make sure editing is enabled on the data layer itself.',
     nothingToCollectNoLayers: 'Its map has no layers you can add to.',
+    nothingToCollectSignIn: 'Sign in to add or edit features in this deployment.',
     removeFromDevice: 'Remove from device',
     confirmRemoveFromDevice: 'Confirm remove from device',
     downloadLayers: 'Layers',
@@ -2229,6 +2249,9 @@ export const en = {
     viewAction: 'Open app',
   },
   // #76: items shared with a group, on the group detail page.
+  groupDetail: {
+    rosterHidden: 'Only members of this group can see who is in it.',
+  },
   groupItems: {
     title: 'Shared with this group',
     empty: 'Nothing is shared with this group yet. Share an item to the group from its Share tab and it will show up here.',
@@ -2402,12 +2425,16 @@ export const en = {
     autoZoomOff: 'Click to turn on auto-zoom (row clicks zoom to the feature). Also zooms to the current selection once.',
     useAsFilter: 'Use as filter',
     useAsFilterTitle: 'Filter the layer to only the selected features',
+    useAsFilterNoId: 'No column tells the selected rows apart from the others, so a filter would match more than the selection.',
+    useAsFilterTooMany: 'Select at most {max} rows to use them as a filter.',
+    useAsFilterNotLoaded: 'Some selected rows are not loaded in the table. Load them or narrow the selection first.',
     calculate: 'Calculate',
     calculateTitle: "Set a column's value for many rows at once from an expression",
     closeAria: 'Close',
     truncatedBanner: 'Showing 5,000+ rows{extent}. Zoom in{extentHint} or filter to see more.',
     truncatedInExtent: ' in this extent',
     truncatedEnableExtent: ', enable "In extent",',
+    showSelectedCapped: 'Showing the first {max} selected rows. Select fewer to see the rest.',
     noLayer: 'No layer selected.',
     loadingFeatures: 'Loading features...',
     loadFailed: 'Failed to load: {error}',
@@ -2439,6 +2466,8 @@ export const en = {
     bundleLoadingSchema: 'Loading layer schema…',
     bundleDone:
       'Done -- {layers} · {features} · {attachments} · {mb} MB',
+    bundleAttachmentsMissing:
+      '{count} attachments could not be downloaded and are not in the ZIP. Try the export again.',
     calculateModalTitle: 'Calculate Field',
     calculateUpdatesPrefix: 'Updates',
     calculateUpdatesSuffix: 'across every row in scope.',
@@ -2560,6 +2589,7 @@ export const en = {
       'No services match. Upload vector data as a feature service, or save an ArcGIS REST URL as an ArcGIS service item to pick it here.',
     portalFootnote:
       'Feature services stream from PostGIS; ArcGIS services query the origin live as you pan and zoom.',
+    listTruncated: 'Showing the first {count} of {total}. Search to narrow the list.',
     sublayerBadge: '+{count} layers',
     sublayerBadgeTitle:
       'This service exposes {count} sublayers; clicking adds them all.',
@@ -2675,6 +2705,7 @@ export const en = {
     drawContinue:
       'Click to add points. Double-click (or press Enter) to finish.',
     drawAgain: 'Draw again',
+    emptyHint: 'Draw a line on the map to see the ground elevation along it.',
     reading: 'Reading the ground elevation...',
     fromSource: 'from {title}',
     distance: 'Distance',
@@ -2819,6 +2850,9 @@ export const en = {
     addAndPrepare: 'Add and prepare',
     saveFailed: 'Could not save the area: {status}',
     buildStartFailed: 'Could not start the build: {status}',
+    loadFailed: 'Could not load the areas. Adding and deleting are off until they load.',
+    retry: 'Try again',
+    buildNotStarted: 'The area was saved, but the build could not be started. Use Prepare now to try again.',
   },
   offlineBasemap: {
     preparedMap: 'Prepared map',
@@ -2999,6 +3033,7 @@ export const en = {
       "Anyone on the internet will be able to see the {count, plural, one {# selected item} other {# selected items}} without signing in. Use this for shareable map / viewer links. Items referenced by the selection (layers, basemaps, etc.) need to be public too; you'll be prompted to cascade after this completes.",
     geographicScope: 'Geographic scope',
     noBoundaryItems: 'No boundary items in this org yet',
+    keepScope: "Keep each item's current scope",
     noScope: 'No scope (unrestricted)',
     geoScopeHint:
       'When set, viewers reaching these items via {via} only see features inside the boundary. Enforced at the API layer.',
@@ -3023,6 +3058,9 @@ export const en = {
     summaryType: 'Type: {labels}',
     summaryTemplate: 'Template: {labels}',
     summaryArea: 'Area: {label}',
+    summaryOwner: 'Owner: {labels}',
+    summaryAccess: 'Access: {labels}',
+    summaryTags: 'Tags: {labels}',
     cardView: 'Card view',
     cards: 'Cards',
     listView: 'List view',
@@ -3072,6 +3110,9 @@ export const en = {
       'Nothing in {scope} matches "{query}". Try a different term or clear the search.',
     scopeYourItems: 'your items',
     scopeSharedWithYou: 'items shared with you',
+    folderMissingTitle: 'This folder is not available',
+    folderMissingDescription: 'It may have been deleted, or it is no longer shared with you.',
+    backToItems: 'Back to items',
     emptyFolderTitle: '{folder} is empty',
     emptyFolderDescription:
       'Add existing items, create something new, or drag items here from the all-items view.',
@@ -3275,6 +3316,9 @@ export const en = {
     clearSelection: 'Clear selection',
   },
   mapLayerAccess: {
+    resetToInherit: "Reset to inherit",
+    customOnlyListed:
+      "Only the people and groups listed here see this layer. Org members and public viewers the map is not shared with do not.",
     title: 'Layer access',
     description:
       'Refine what each shared user or group sees on this map. The matrix narrows access; a warning badge appears when a principal has no item-level access to a layer\'s source data.',
@@ -3420,6 +3464,7 @@ export const en = {
     done: 'Done',
   },
   sharing: {
+    networkError: "Could not reach the portal. Nothing was changed.",
     sharing: 'Sharing',
     dialogLabel: 'Sharing for {title}',
     whoCanSee: 'Who can see this',
@@ -4004,7 +4049,6 @@ export const en = {
     approxSuffix: 'approx',
     orphanBadge: 'orphan',
     expired: 'Expired',
-    expiryIn: 'In',
     pastDue: 'Past due',
     extendShare30Title: 'Extend by 30 days',
     extend30d: '+30d',
@@ -4022,7 +4066,7 @@ export const en = {
     scheduleIntro: 'Have the portal tidy up on its own. Off until you turn it on. Pick which kind of cleanup you want, how long something has to sit around before it gets cleaned up, and when the portal should run the cleanup. The lists below keep showing the same things you can clean up by hand whenever you want.',
     scheduleAutoTrash: 'Trash items nobody is using',
     scheduleAutoTrashBefore:
-      'Move items to the trash if no one has edited or shared them in the last',
+      'Move private items to the trash if no one has edited or shared them in the last',
     scheduleAutoTrashAfter:
       'days. They aren\'t deleted right away: trashed items stay in Recently deleted and can be put back at any time.',
     scheduleAutoDisable: 'Pause sign-in for inactive accounts',
@@ -4047,6 +4091,9 @@ export const en = {
     scheduleModeDaily: 'Every day',
     scheduleModeWeekly: 'Once a week',
     scheduleHour: 'Hour (0-23)',
+    scheduleServerTime: "server time, {zone}",
+    scheduleRunNowUnsaved:
+      "Save your changes first. Run now uses the saved settings.",
     scheduleMinute: 'Minute (0-59)',
     scheduleDayOfWeek: 'Day of week',
     daySunday: 'Sunday',
@@ -4563,7 +4610,7 @@ export const en = {
       defaultLookbackHint: "Pre-filter to N days back from now. Blank = show all.",
       hideSubmitter: "Hide submitter",
       hideSubmitterHint: "For anonymous-feedback workflows.",
-      persistNote: "Look-back and Hide submitter persist on the form schema; the runtime hooks land in a follow-up.",
+      persistNote: "Look-back and Hide submitter are not available yet. The Responses page does not read them, so it still shows every response and who submitted it.",
       tools: {
         select: "Select",
         selectHint: "Pick responses to inspect.",
@@ -4821,6 +4868,7 @@ export const en = {
         in: "contains",
         between: "between",
         matches: "matches pattern",
+        notEmpty: "is not empty",
       },
     },
     dependents: {
@@ -4889,6 +4937,8 @@ export const en = {
       matchAny: "any match",
       of: "of:",
       removeConditionAria: "Remove condition",
+      rawRule:
+        "This part of the expression can't be shown as a row. It is kept as it is when you save.",
       removeGroupAria: "Remove group",
       cancel: "Cancel",
       save: "Save",
@@ -4914,6 +4964,7 @@ export const en = {
         in: "string or list contains a value",
         between: "value falls in a range",
         matches: "regex match",
+        notEmpty: "has an answer (text, a choice or a list)",
       },
       functionsIntro:
         "Reference for the calculate / default editor. Click a signature to copy it to the clipboard. The row-based editor on the left works in field-op-value form, so functions can't be inserted into rules directly.",
@@ -5126,6 +5177,8 @@ export const en = {
     available: "Available",
     rankingEmpty: "No items ranked yet. Tap an item below to add it.",
     removeFromRankingAria: "Remove from ranking",
+    rankUpAria: "Move up in the ranking",
+    rankDownAria: "Move down in the ranking",
     placeholders: {
       signature: "Signature pad",
       photo: "Photo capture",
@@ -5298,6 +5351,8 @@ export const en = {
       noBoundMapTarget: "No bound map / target.",
       noEditableLayer: "No editable layer set. Add one in the app settings.",
       noFeaturesInViewport: "No features in the current viewport.",
+      exportNoFeatures: "This layer has no features to export.",
+      exportFailed: "Export failed: {message}",
       noFeaturesSelected: "No features selected on the bound map.",
       outlineAdded: "Outline added.",
       outlineReview: "Review the outline, then Save or Discard.",
@@ -5305,6 +5360,7 @@ export const en = {
       outlining: "Outlining...",
       pickNumberField: "Pick a number field to {aggregate}.",
       printPopupBlocked: "Could not open the print preview window.  Allow popups for this site and try again.",
+      printSnapshotTooLarge: "The map snapshot was too large to pass to the print page, so the print shows a placeholder map. Try a smaller window.",
       savePrompt: "Save these features as a new data layer. Choose a name:",
       selectedNotInViewport: "Selected features are not in the current viewport.",
       submitFailed: "Submit failed",
@@ -5314,6 +5370,11 @@ export const en = {
     export: {
       hint: "Exports the features currently loaded for this layer (the map viewport plus its surrounding tile cache).  For a full-layer dump including related tables + attachments, use the bundle export on the data layer's detail page.",
     },
+    legend: {
+      under: "under {value}",
+      andUp: "{value} and up",
+      range: "{lo} to {hi}",
+    },
     features: {
       addingTo: "Adding to",
       clickEditable: "Click an editable feature on the map to edit it. Click here again to exit edit mode.",
@@ -5321,6 +5382,7 @@ export const en = {
       multiVertexNote: "(Note: only single-point placement is supported in this first cut; multi-vertex sketching for lines / polygons is queued as a follow-up.)",
       pickLayerToAdd: "Pick a layer to add to",
       placeOnMap: "click on the map to place the new {geometryType}.",
+      sketchUnsupported: "Adding a {geometryType} here is not supported yet: this widget can only place single points. Use the map editor to draw it.",
       reselectFeatures: "Reselect the features on the map, then try again.",
       selectOnMapFirst: "Select feature(s) on the bound map first.",
       timeTravelDisabled: "Editing is disabled while viewing a past snapshot. Reset the time slider to enable.",
@@ -5549,6 +5611,7 @@ export const en = {
       'Creating layers requires the contributor or admin role.',
     jobStartFailed: 'The job could not be started.',
     intervalRequired: 'Enter a height between lines.',
+    intervalTooSmall: "The interval must be at least {min}.",
     zoneRequired: 'Pick a polygon data layer for the zones.',
     labelContours: 'Contour lines',
     labelSteepness: 'Steepness map',
@@ -5579,6 +5642,8 @@ export const en = {
       'That is {tiles} images totalling {bytes}. Building the mosaic would take {duration}, beyond what this server allows in one job. Split it into smaller mosaics.',
     errPartialUpload:
       '{failed} of {total} images did not upload ({names}).',
+    errNetwork: "Could not reach the portal. Your uploaded images are kept; try again.",
+    errRetryHttp: "Could not retry the build (HTTP {status}).",
     errMosaicStartHttp:
       'Could not start the mosaic build (HTTP {status}).',
     progressUploadingImages: 'Uploading {count} images...',
@@ -6074,6 +6139,8 @@ export const en = {
    * save footer strings; leave upstream probe error payloads alone.
    */
   serviceEditors: {
+    probeSaveUrlFirst:
+      "This service needs a password, so Probe reads the saved URL. Save the new URL first, then probe again.",
     connection: 'Connection',
     serviceEndpoint: 'Service endpoint',
     probe: 'Probe',
@@ -6090,6 +6157,8 @@ export const en = {
     saving: 'Saving...',
     saved: 'Saved',
     saveFailed: 'Save failed.',
+    reprobeBeforeSave: "Probe the new URL before saving. Its layer list comes from the probe.",
+    pickAtLeastOneLayer: "Pick at least one layer before saving.",
     selectAll: 'Select all',
     selectAllShort: 'All',
     selectNoneShort: 'None',

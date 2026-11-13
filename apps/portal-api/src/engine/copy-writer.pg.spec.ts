@@ -209,6 +209,73 @@ d('CopyWriter on PostGIS', () => {
     expect(outcome).toMatch(/^rejected: .*(too long|character)/i);
   });
 
+  it('fails the import, not the process, when the backend is terminated mid-COPY', async () => {
+    // pg emits 'error' on the checked-out client when its connection
+    // drops. With no listener that was an uncaught exception, and the
+    // worker process (no process-level handler) died with every job.
+    const uncaught: unknown[] = [];
+    const onUncaught = (err: unknown) => uncaught.push(err);
+    process.on('uncaughtException', onUncaught);
+    try {
+      const writer = new CopyWriter(DB_URL);
+      await writer.begin();
+      const pidRes = await writer.query<{ pid: number }>('SELECT pg_backend_pid() AS pid');
+      const pid = pidRes.rows[0]!.pid;
+      writer.beginCopy();
+      const t0 = new Date('2026-06-01T00:00:00Z');
+      await writer.writeBatch([
+        row('55555555-5555-5555-5555-555555555555', 'eeeeeeee-eeee-eeee-eeee-eeeeeeeeeee1', t0),
+      ]);
+      await pool.query('SELECT pg_terminate_backend($1)', [pid]);
+      await new Promise((r) => setTimeout(r, 300));
+      const outcome = await (async () => {
+        for (let i = 0; i < 5; i += 1) {
+          await writer.writeBatch([
+            row('55555555-5555-5555-5555-555555555555', `eeeeeeee-eeee-eeee-eeee-${String(i).padStart(12, '0')}`, t0),
+          ]);
+        }
+        await writer.sealCopy();
+        return 'finished';
+      })().catch(() => 'rejected');
+      await writer.abort();
+      await writer.close();
+      expect(outcome).toBe('rejected');
+      expect(uncaught).toEqual([]);
+    } finally {
+      process.off('uncaughtException', onUncaught);
+    }
+  });
+
+  it('stores empty geometries instead of failing the import', async () => {
+    // GDAL writes an empty geometry as `"coordinates": []`. The encoder
+    // used to emit `POLYGON()`, which is not valid EWKT, so one empty
+    // row rolled back the whole COPY.
+    const writer = new CopyWriter(DB_URL);
+    await writer.begin();
+    writer.beginCopy();
+    const t0 = new Date('2026-06-01T00:00:00Z');
+    const geoms: unknown[] = [
+      { type: 'Polygon', coordinates: [] },
+      { type: 'Point', coordinates: [] },
+      { type: 'GeometryCollection', geometries: [] },
+      { type: 'LineString', coordinates: [[0, 0], [1, 1]] },
+    ];
+    await writer.writeBatch(
+      geoms.map((geom, i) => ({
+        ...row('77777777-7777-7777-7777-77777777777' + i, `abababab-abab-abab-abab-ababababab0${i}`, t0),
+        geom,
+      })) as Observation[],
+    );
+    await writer.sealCopy();
+    await writer.commit();
+    await writer.close();
+    const r = await pool.query<{ e: boolean }>(
+      `SELECT ST_IsEmpty(geom) AS e FROM observation
+       WHERE entity::text LIKE '77777777-%' ORDER BY entity`,
+    );
+    expect(r.rows.map((x) => x.e)).toEqual([true, true, true, false]);
+  });
+
   it('stores text and attributes that contain NUL characters', async () => {
     // DBF fields padded with NUL are common. Postgres refuses U+0000
     // in text and in jsonb, so the encoder drops it.

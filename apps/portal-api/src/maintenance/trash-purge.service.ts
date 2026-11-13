@@ -6,7 +6,7 @@ import { Cron, CronExpression } from '@nestjs/schedule';
 import type { ItemType } from '@prisma/client';
 
 import { PrismaService } from '../prisma/prisma.service.js';
-import { textEnv } from '../common/env.js';
+import { trashRetentionDays } from './trash-retention.js';
 import { LeaderElectionService } from '../cron/leader-election.service.js';
 import { ItemsService } from '../items/items.service.js';
 import { purgeGroups } from '../groups/groups.service.js';
@@ -41,7 +41,7 @@ export class TrashPurgeService {
 
   // 3am UTC keeps it off peak traffic for most deployments. Cron syntax
   // from @nestjs/schedule: "second minute hour day-of-month month day-of-week".
-  @Cron(CronExpression.EVERY_DAY_AT_3AM, { name: 'purge-trash' })
+  @Cron(CronExpression.EVERY_DAY_AT_3AM, { name: 'purge-trash', timeZone: 'UTC' })
   async handleCron() {
     // Multi-replica safety: only the leader runs this. Otherwise N
     // replicas would each fire deleteMany at 3am.
@@ -54,12 +54,11 @@ export class TrashPurgeService {
    * invoke the same code path the cron uses.
    */
   async purgeExpired() {
-    const retentionDays = Number(
-      textEnv(this.cfg.get<string>('RECYCLE_BIN_RETENTION_DAYS'), '30'),
-    );
-    if (!Number.isFinite(retentionDays) || retentionDays < 1) {
+    const raw = this.cfg.get<string>('RECYCLE_BIN_RETENTION_DAYS');
+    const retentionDays = trashRetentionDays(raw);
+    if (retentionDays === null) {
       this.log.warn(
-        `RECYCLE_BIN_RETENTION_DAYS=${retentionDays} is invalid, skipping purge`,
+        `RECYCLE_BIN_RETENTION_DAYS=${raw} is invalid, skipping purge`,
       );
       return { items: 0, groups: 0 };
     }
@@ -72,9 +71,14 @@ export class TrashPurgeService {
     // not budging after admins emptied the trash. Iterating items is
     // the slow path; for typical retention windows the candidate set
     // is tens-to-hundreds of rows, not thousands.
+    //
+    // Ids only: the teardown needs each item's type and data, but
+    // reading every expired blob at once (v1 layers keep all their
+    // features inline) pulled hundreds of MB into the heap. Each row
+    // is read under its lock below instead.
     const expiredItems = await this.prisma.item.findMany({
       where: { deletedAt: { lt: cutoff } },
-      select: { id: true, type: true, data: true },
+      select: { id: true },
     });
     let itemsPurged = 0;
     for (const it of expiredItems) {
@@ -101,10 +105,15 @@ export class TrashPurgeService {
               WHERE id = ${it.id}::uuid AND deleted_at < ${cutoff}
               FOR UPDATE SKIP LOCKED`;
             if (claimed.length === 0) return false;
+            const row = await tx.item.findUnique({
+              where: { id: it.id },
+              select: { type: true, data: true },
+            });
+            if (!row) return false;
             await this.items.tearDownItemBackingStorage(
               it.id,
-              it.type as ItemType,
-              it.data,
+              row.type as ItemType,
+              row.data,
             );
             // #238: the interactive purge path has always spliced the id
             // out of the lists that name it; this sweep did not, so an

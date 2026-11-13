@@ -179,6 +179,37 @@ describe('derived layers honour the reader scope on their inputs', () => {
     expect(limited).not.toBeNull();
   });
 
+  it('a trashed leaf under a shared parent is refused, not skipped', async () => {
+    // C over P over D. The reader holds P and C but never D. Once D is
+    // in the trash the walk used to skip it and call the chain clean.
+    const PARENT = '00000000-0000-4000-8000-0000000000d1';
+    const { svc, derivedGetGeoJson } = service({
+      [PARENT]: {
+        id: PARENT,
+        type: 'derived_layer',
+        orgId: 'org-1',
+        ownerId: 'owner',
+        access: 'private',
+        deletedAt: null,
+        shares: [viewShare()],
+        data: {
+          version: 1,
+          source: { kind: 'data_layer', itemId: SOURCE, layerKey: 'l' },
+          pipeline: [],
+        },
+      },
+      [SOURCE]: { ...dataLayer(SOURCE, []), deletedAt: new Date() },
+    });
+    const limited = await (svc as unknown as {
+      derivedInputScopeLimit: (u: unknown, d: unknown) => Promise<string | null>;
+    }).derivedInputScopeLimit(reader, {
+      source: { kind: 'derived_layer', itemId: PARENT },
+      pipeline: [],
+    });
+    expect(limited).toBe(SOURCE);
+    expect(derivedGetGeoJson).not.toHaveBeenCalled();
+  });
+
   it('a limited reader does not see the derived extent or buffer cap', async () => {
     const stored = {
       ...derivedItem([
@@ -213,5 +244,27 @@ describe('derived layers honour the reader scope on their inputs', () => {
       { id: DERIVED, type: 'derived_layer', bbox: [10, 10, 20, 20] },
     ])) as Array<{ bbox: unknown }>;
     expect(rows[0]!.bbox).toEqual([]);
+  });
+});
+
+describe('derived redaction on a list page', () => {
+  it('reads a shared input once for the whole page', async () => {
+    const { svc } = service({
+      [SOURCE]: dataLayer(SOURCE, [viewShare({ geoLimit: POLY })]),
+    });
+    const prisma = (svc as unknown as {
+      prisma: { item: { findUnique: jest.Mock; findMany: jest.Mock } };
+    }).prisma;
+    const rows = [
+      { id: 'd1', type: 'derived_layer', bbox: [0, 0, 1, 1], data: derivedItem().data },
+      { id: 'd2', type: 'derived_layer', bbox: [0, 0, 1, 1], data: derivedItem().data },
+    ];
+    const out = (await (svc as unknown as {
+      redactLimitedDerivedRows: (u: unknown, r: unknown[]) => Promise<unknown[]>;
+    }).redactLimitedDerivedRows(reader, rows)) as Array<{ data: { bbox?: unknown } }>;
+    expect(prisma.item.findUnique).toHaveBeenCalledTimes(1);
+    // Full rows carry their recipe, so no recipe re-read either.
+    expect(prisma.item.findMany).not.toHaveBeenCalled();
+    expect(out).toHaveLength(2);
   });
 });

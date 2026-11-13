@@ -8,6 +8,7 @@ import {
   CreateMultipartUploadCommand,
   GetObjectCommand,
   HeadBucketCommand,
+  ListMultipartUploadsCommand,
   ListObjectsV2Command,
   PutBucketCorsCommand,
   PutBucketPolicyCommand,
@@ -120,14 +121,16 @@ export interface PresignResult {
 
 /**
  * Wraps the MinIO client. Responsibilities:
- *   - Make sure the target bucket exists + has anonymous-read + browser CORS.
+ *   - Make sure the target bucket exists, with anonymous read on the
+ *     public prefixes only, plus browser CORS.
  *   - Mint short-lived presigned PUT URLs the browser uses for direct upload.
- *   - Construct the stable public URL we persist on the owning entity.
+ *   - Construct the URL we persist on the owning entity: a direct MinIO
+ *     URL for a public prefix, an API path for a private one.
  *
- * The bucket policy is deliberately public-read because thumbnails are,
- * by nature, shown to anyone who can see the entity. Sensitive payloads
- * (feature data, form submissions) will live in separate buckets with
- * per-request signed reads; we do NOT co-mingle them here.
+ * Only images that are, by nature, shown to anyone who can see the
+ * entity (thumbnails, avatars, hero images, map icons) are
+ * public-read. Every other prefix (PRIVATE_KINDS) is read by key
+ * through the SDK behind a sharing check in the API.
  */
 @Injectable()
 export class StorageService implements OnModuleInit {
@@ -174,7 +177,7 @@ export class StorageService implements OnModuleInit {
     this.s3SecretAccessKey = secretAccessKey;
 
     // Browsers hit MinIO directly for both upload (presigned PUT) and
-    // read (public bucket), so the public base URL has to be something
+    // read (public prefixes), so the public base URL has to be something
     // the browser can reach. In dev that's the same localhost endpoint;
     // in prod this should be a CDN / reverse-proxied hostname.
     this.publicBase = cfg.get<string>('MINIO_PUBLIC_BASE', endpoint);
@@ -255,7 +258,10 @@ export class StorageService implements OnModuleInit {
     }
 
     // Anonymous GET only on the prefixes that are public by design:
-    // thumbnails + avatars + hero images.  Private prefixes
+    // thumbnails + avatars + hero images + map icons. Map icons are
+    // fetched by the map renderer straight from their stored MinIO
+    // URL, for anonymous viewers of a public map too, so without
+    // this entry every uploaded icon was refused. Private prefixes
     // (feature-attachment, item-file, item-tile-layer) are NOT
     // listed and therefore require AWS-signed reads via the SDK.
     // Portal-api mediates those via /api/storage/private/* with a
@@ -277,6 +283,7 @@ export class StorageService implements OnModuleInit {
                 `arn:aws:s3:::${this.bucket}/group-thumb/*`,
                 `arn:aws:s3:::${this.bucket}/user-avatar/*`,
                 `arn:aws:s3:::${this.bucket}/org-hero/*`,
+                `arn:aws:s3:::${this.bucket}/map-icon/*`,
               ],
             },
           ],
@@ -386,7 +393,16 @@ export class StorageService implements OnModuleInit {
     // run multi-GB on slow uplinks, so they get the longer 600s
     // window.
     const expiresIn = isTileLayer || isPointCloud ? 600 : anyMime ? 180 : 60;
-    const uploadUrl = await getSignedUrl(this.presignClient, cmd, { expiresIn });
+    // Sign the Content-Type as well as the size. The presigner leaves
+    // content-type out of the signed headers by default, so the
+    // image-only rule on the public prefixes was advice: a PUT could
+    // send text/html to a URL presigned for image/png and the bucket
+    // would serve it as HTML. Signed, a different type fails the
+    // signature check. Every client sends the type it presigned.
+    const uploadUrl = await getSignedUrl(this.presignClient, cmd, {
+      expiresIn,
+      signableHeaders: new Set(['content-type']),
+    });
     // Private-kind objects are served back through the api with a
     // sharing check (the bucket policy no longer permits anonymous
     // GET on those prefixes).  Public-kind objects (thumbnails,
@@ -522,6 +538,31 @@ export class StorageService implements OnModuleInit {
    * Drop an unfinished multipart upload and the parts stored for it.
    * A missing upload counts as done, so a repeated abort is harmless.
    */
+  /** Keys of multipart uploads started under `prefix` and not yet
+   *  completed or aborted. */
+  async listMultipartUploadsUnder(prefix: string): Promise<string[]> {
+    await this.ensureReady();
+    const out: string[] = [];
+    let keyMarker: string | undefined;
+    let uploadIdMarker: string | undefined;
+    for (let page = 0; page < 100; page += 1) {
+      const res = await this.client.send(
+        new ListMultipartUploadsCommand({
+          Bucket: this.bucket,
+          Prefix: prefix,
+          ...(keyMarker ? { KeyMarker: keyMarker } : {}),
+          ...(uploadIdMarker ? { UploadIdMarker: uploadIdMarker } : {}),
+        }),
+      );
+      for (const u of res.Uploads ?? []) if (u.Key) out.push(u.Key);
+      if (!res.IsTruncated) break;
+      keyMarker = res.NextKeyMarker;
+      uploadIdMarker = res.NextUploadIdMarker;
+      if (!keyMarker && !uploadIdMarker) break;
+    }
+    return out;
+  }
+
   async abortMultipartUpload(key: string, uploadId: string): Promise<void> {
     try {
       await this.client.send(
@@ -643,6 +684,11 @@ export class StorageService implements OnModuleInit {
    * resolves it against the current origin.
    */
   private apiUrlFor(kind: AssetKind, key: string): string {
+    return StorageService.privateApiUrl(kind, key);
+  }
+
+  /** The api route that serves a private-kind key, with a sharing check. */
+  static privateApiUrl(kind: AssetKind, key: string): string {
     // Strip the kind prefix off the key for the api-side URL since
     // the route segment already implies it.  E.g.
     // `feature-attachment/abc...` -> `/api/portal/storage/private/feature-attachment/abc...`.
@@ -654,7 +700,7 @@ export class StorageService implements OnModuleInit {
    * Asset kinds whose objects are NOT publicly readable from the
    * bucket policy.  Callers must go through the api with a sharing
    * check.  The corresponding public prefixes (`item-thumb`,
-   * `group-thumb`, `user-avatar`, `org-hero`) keep their direct
+   * `group-thumb`, `user-avatar`, `org-hero`, `map-icon`) keep their direct
    * MinIO URLs and are fetched without an auth round-trip.
    */
   static readonly PRIVATE_KINDS: ReadonlySet<AssetKind> = new Set<AssetKind>([

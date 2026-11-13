@@ -25,8 +25,11 @@ import {
 } from './offline-download';
 import { estimateTileCount, WARMER_MAX_TILES } from './offline-tile-warmer';
 import {
+  enqueueEdit,
   getDeployment,
   listFeaturesForLayer,
+  listQueueAllOwners,
+  purgeCachedReadData,
   putDeployment,
   putFeatures,
   type CachedDeployment,
@@ -151,6 +154,15 @@ describe('buildFeatureUrl / buildDeltaUrl', () => {
     expect(buildDeltaUrl('dl-1', 'main', 4, 10, 'obs-9')).toBe(
       '/api/portal/items/dl-1/layers/main/delta?since=4&after=obs-9&limit=10',
     );
+  });
+
+  it('carries the cached area on delta so the server sends only its changes', () => {
+    const url = new URL(
+      buildDeltaUrl('dl-1', 'main', 4, 10, undefined, [-117.5, 33.5, -117, 34]),
+      'https://example.test',
+    );
+    expect(url.searchParams.get('bbox')).toBe('-117.5,33.5,-117,34');
+    expect(new URL(buildDeltaUrl('dl-1', 'main', 4), 'https://example.test').searchParams.has('bbox')).toBe(false);
   });
 
   it('adds keyset paging to the GeoJSON pull', () => {
@@ -384,6 +396,45 @@ describe('downloadDeployment delta refresh', () => {
     expect(urls.filter((u) => u.includes('/geojson'))).toHaveLength(2);
   });
 
+  it('fails the layer when a page is the service worker cache fallback', async () => {
+    const fetchMock = jest.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes('/delta?since=0&limit=1')) {
+        return jsonResponse({ syncVersion: 42, since: 0, changes: [], truncated: false });
+      }
+      const params = new URL(url, 'https://example.test').searchParams;
+      if (!params.get('cursor')) {
+        return jsonResponse({
+          type: 'FeatureCollection',
+          features: [
+            {
+              type: 'Feature',
+              id: 'f1',
+              geometry: { type: 'Point', coordinates: [0, 0] },
+              properties: { _global_id: 'f1' },
+            },
+          ],
+          nextCursor: 'f1',
+          asOf: '2026-11-08T00:00:00.000Z',
+        });
+      }
+      // Signal dropped: the worker answered from an older cached copy.
+      return new Response(
+        JSON.stringify({ type: 'FeatureCollection', features: [], nextCursor: null }),
+        { status: 200, headers: { 'x-gg-sw-fallback': '1' } },
+      );
+    });
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    const result = await downloadDeployment(
+      { dataCollectionId: DC, title: 'Delta Test', mapId: 'map-1', layers: [LAYER], pickListIds: [] },
+      () => {},
+    );
+    // Not recorded as complete, so the next download starts over
+    // instead of syncing forward from a head it never reached.
+    expect(result.layerSchemas['dl-1:main']?.syncVersion).toBeUndefined();
+  });
+
   it('pages through one syncVersion that spans pages without skipping rows', async () => {
     await putDeployment(manifest(10));
     const row = (i: number) => ({
@@ -540,5 +591,220 @@ describe('downloadDeployment delta refresh', () => {
       .toBe(true);
     const stored = await getDeployment(DC);
     expect(stored?.layerSchemas['dl-1:main']?.syncVersion).toBe(15);
+  });
+});
+
+describe('downloadDeployment: what a refresh can trust its cursor for', () => {
+  // A small stand-in for the portal: features at site A and site B, a
+  // head version, and changes since a version. GeoJSON reads honour
+  // `bbox`, the delta read cannot (as on the real server).
+  const DC = 'dc-area-1';
+  const LAYER = {
+    dataLayerId: 'dl-1',
+    layerKey: 'main',
+    layerLabel: 'Sites',
+    fields: [] as import('@gratis-gis/shared-types').FeatureField[],
+  };
+  const SITE_A: [number, number, number, number] = [0, 0, 1, 1];
+  const SITE_B: [number, number, number, number] = [10, 10, 11, 11];
+  type Row = { id: string; x: number; y: number };
+  let server: { rows: Row[]; head: number; changes: Array<{ v: number; row: Row }> };
+  let fetchMock: jest.Mock;
+
+  const feature = (r: Row) => ({
+    type: 'Feature',
+    id: r.id,
+    geometry: { type: 'Point', coordinates: [r.x, r.y] },
+    properties: { _global_id: r.id },
+  });
+  const json = (body: unknown) =>
+    new Response(JSON.stringify(body), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    });
+
+  beforeEach(() => {
+    globalThis.indexedDB = new IDBFactory();
+    server = {
+      rows: [
+        { id: 'a1', x: 0.5, y: 0.5 },
+        { id: 'a2', x: 0.6, y: 0.6 },
+        { id: 'b1', x: 10.5, y: 10.5 },
+      ],
+      head: 800,
+      changes: [],
+    };
+    fetchMock = jest.fn(async (input: RequestInfo | URL) => {
+      const url = new URL(String(input), 'https://example.test');
+      const q = url.searchParams;
+      if (url.pathname.endsWith('/delta')) {
+        const since = Number(q.get('since'));
+        const changes = server.changes
+          .filter((c) => c.v > since)
+          .map((c) => ({
+            observationId: `o${c.v}`,
+            entity: c.row.id,
+            kind: 'update',
+            syncVersion: c.v,
+            geometry: { type: 'Point', coordinates: [c.row.x, c.row.y] },
+            properties: {},
+          }));
+        return json({ syncVersion: server.head, since, changes, truncated: false });
+      }
+      if (url.pathname.endsWith('/geojson')) {
+        const b = (q.get('bbox') ?? '-180,-90,180,90').split(',').map(Number);
+        const inside = server.rows.filter(
+          (r) => r.x >= b[0]! && r.x <= b[2]! && r.y >= b[1]! && r.y <= b[3]!,
+        );
+        return json({ type: 'FeatureCollection', features: inside.map(feature), nextCursor: null });
+      }
+      throw new Error(`unexpected fetch ${url.pathname}`);
+    });
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+  });
+
+  const run = (bbox: [number, number, number, number] | undefined, signal?: AbortSignal) =>
+    downloadDeployment(
+      {
+        dataCollectionId: DC,
+        title: 'Area Test',
+        mapId: 'map-1',
+        layers: [LAYER],
+        pickListIds: [],
+        ...(bbox ? { bbox } : {}),
+      },
+      () => {},
+      signal,
+    );
+  const cachedIds = async () =>
+    (await listFeaturesForLayer(DC, 'dl-1', 'main')).map((f) => String(f.id)).sort();
+  const geojsonCalls = () =>
+    fetchMock.mock.calls.filter((c) => String(c[0]).includes('/geojson')).length;
+
+  /** One queued edit, so every case can show the download never
+   *  touches the write queue: nothing lost, nothing added. */
+  async function queueOneEdit(): Promise<void> {
+    await enqueueEdit({
+      dataCollectionId: DC,
+      op: 'update',
+      dataLayerId: 'dl-1',
+      layerKey: 'main',
+      globalId: 'a1',
+      geometry: null,
+      properties: { name: 'fixed offline' },
+      schemaHash: 'h',
+      ownerUserId: 'u1',
+    });
+  }
+  async function expectQueueIntact(): Promise<void> {
+    const rows = await listQueueAllOwners(DC);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      globalId: 'a1',
+      syncStatus: 'pending',
+      properties: { name: 'fixed offline' },
+    });
+  }
+
+  it('does a full pull after sign-out emptied the features store (53-1)', async () => {
+    await run(SITE_A);
+    await queueOneEdit();
+    await purgeCachedReadData();
+    expect(await cachedIds()).toEqual([]);
+    expect((await getDeployment(DC))!.layerSchemas['dl-1:main']!.syncVersion).toBeUndefined();
+
+    server.changes.push({ v: 801, row: { id: 'a2', x: 0.61, y: 0.6 } });
+    server.head = 801;
+    fetchMock.mockClear();
+    await run(SITE_A);
+
+    expect(geojsonCalls()).toBe(1);
+    expect(await cachedIds()).toEqual(['a1', 'a2']);
+    await expectQueueIntact();
+  });
+
+  it('pulls the new area in full when the refresh is for somewhere else (53-2)', async () => {
+    await run(SITE_A);
+    await queueOneEdit();
+    fetchMock.mockClear();
+
+    await run(SITE_B);
+    expect(geojsonCalls()).toBe(1);
+    // Site B arrived and site A was kept.
+    expect(await cachedIds()).toEqual(['a1', 'a2', 'b1']);
+    const schema = (await getDeployment(DC))!.layerSchemas['dl-1:main']!;
+    expect(schema.syncBbox).toEqual([0, 0, 11, 11]);
+
+    // Back at site A: inside what is cached, so a delta is enough.
+    fetchMock.mockClear();
+    await run(SITE_A);
+    expect(geojsonCalls()).toBe(0);
+    await expectQueueIntact();
+  });
+
+  it('needs a full pull for the whole layer after an area download', async () => {
+    await run(SITE_A);
+    fetchMock.mockClear();
+    await run(undefined);
+    expect(geojsonCalls()).toBe(1);
+    expect(await cachedIds()).toEqual(['a1', 'a2', 'b1']);
+    expect((await getDeployment(DC))!.layerSchemas['dl-1:main']!.syncBbox).toBeNull();
+  });
+
+  it('does not store delta rows far outside the cached area', async () => {
+    await run(SITE_A);
+    server.changes.push(
+      { v: 801, row: { id: 'far', x: 50, y: 50 } },
+      { v: 802, row: { id: 'a1', x: 0.55, y: 0.5 } },
+    );
+    server.head = 802;
+    fetchMock.mockClear();
+    await run(SITE_A);
+    expect(await cachedIds()).toEqual(['a1', 'a2']);
+    // The delta asked the server for the cached area only.
+    const deltaUrls = fetchMock.mock.calls
+      .map((c) => String(c[0]))
+      .filter((u) => u.includes('/delta?') && !u.includes('limit=1&') && !u.endsWith('limit=1'));
+    expect(deltaUrls.length).toBeGreaterThan(0);
+    for (const u of deltaUrls) {
+      expect(new URL(u, 'https://example.test').searchParams.get('bbox')).toBe(SITE_A.join(','));
+    }
+  });
+
+  it('keeps the cached size across an incremental refresh (53-4)', async () => {
+    const first = await run(SITE_A);
+    expect(first.estimatedSize).toBeGreaterThan(0);
+    const second = await run(SITE_A);
+    // Nothing changed on the server, and nothing left the device.
+    expect(second.estimatedSize).toBeGreaterThanOrEqual(first.estimatedSize);
+  });
+
+  it('stops at the next request once cancelled (53-5)', async () => {
+    const controller = new AbortController();
+    const base = fetchMock.getMockImplementation()!;
+    fetchMock.mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const res = await base(input, init);
+      // Cancel as soon as the first request of the run has answered.
+      controller.abort();
+      return res;
+    });
+    await queueOneEdit();
+    await expect(
+      downloadDeployment(
+        {
+          dataCollectionId: DC,
+          title: 'Area Test',
+          mapId: 'map-1',
+          layers: [LAYER, { ...LAYER, layerKey: 'second' }],
+          pickListIds: ['pl-1'],
+          bbox: SITE_A,
+        },
+        () => {},
+        controller.signal,
+      ),
+    ).rejects.toMatchObject({ name: 'AbortError' });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(await getDeployment(DC)).toBeNull();
+    await expectQueueIntact();
   });
 });

@@ -100,6 +100,11 @@ interface OfflineIdentityRow {
    *  stamps into `submitted_by`). */
   userId: string;
   updatedAt: string;
+  /** Set when the identity changed from another account and that
+   *  account's cached reads have not been purged yet. Written in the
+   *  same put as the new identity and cleared only after the purge, so
+   *  a purge that fails is run again on the next load. */
+  purgePending?: boolean;
 }
 
 /** Cached feature row stored in the `features` object store. */
@@ -150,6 +155,19 @@ export interface CachedLayerSchema {
    * a full pull once, then start tracking.
    */
   syncVersion?: number;
+  /**
+   * The area `syncVersion` is good for: [west, south, east, north],
+   * or null for the whole layer. The delta endpoint has no area
+   * filter, so a cursor only says "every feature inside this area is
+   * cached as of version N". A refresh for an area outside it has to
+   * pull those features in full first. Absent on caches written
+   * before this field; those fall back to the manifest's `bbox`.
+   */
+  syncBbox?: [number, number, number, number] | null;
+  /** Approximate bytes of this layer's cached features, carried from
+   *  run to run so an incremental refresh does not report only the
+   *  size of the changes it fetched. */
+  bytes?: number;
 }
 
 /** Top-level manifest entry for one cached deployment. */
@@ -689,6 +707,37 @@ export async function purgeCachedReadData(): Promise<void> {
   await clearStore(STORES.features);
   await clearStore(STORES.forms);
   await clearStore(STORES.pickLists);
+  await forgetFeatureCursors();
+}
+
+/**
+ * Drop every manifest's per-layer sync cursor, in step with emptying
+ * the features store. A cursor means "the features store already holds
+ * this layer as of version N"; left behind after a purge, the next
+ * refresh fetched only the changes since N and reported a nearly
+ * empty cache as ready. Without a cursor that refresh does a full pull.
+ */
+async function forgetFeatureCursors(): Promise<void> {
+  await withStore(STORES.deployments, 'readwrite', async (s) => {
+    const rows =
+      ((await reqAsPromise(s.getAll())) as CachedDeployment[] | undefined) ?? [];
+    for (const row of rows) {
+      const layerSchemas: Record<string, CachedLayerSchema> = {};
+      for (const [key, schema] of Object.entries(row.layerSchemas ?? {})) {
+        const {
+          syncVersion: _cursor,
+          syncBbox: _area,
+          bytes: _bytes,
+          ...rest
+        } = schema;
+        void _cursor;
+        void _area;
+        void _bytes;
+        layerSchemas[key] = rest;
+      }
+      s.put({ ...row, layerSchemas });
+    }
+  });
 }
 
 /** Empty one store, tolerating a database that does not exist yet. */
@@ -745,11 +794,32 @@ export async function getOfflineIdentity(): Promise<string | null> {
   });
 }
 
-export async function setOfflineIdentity(userId: string): Promise<void> {
+/** The device identity and whether a purge of the previous account's
+ *  cached reads is still owed. */
+export async function getOfflineIdentityState(): Promise<{
+  userId: string | null;
+  purgePending: boolean;
+}> {
+  return withStore(STORES.meta, 'readonly', async (s) => {
+    const r = (await reqAsPromise(s.get(OFFLINE_IDENTITY_KEY))) as
+      | OfflineIdentityRow
+      | undefined;
+    return {
+      userId: typeof r?.userId === 'string' && r.userId ? r.userId : null,
+      purgePending: r?.purgePending === true,
+    };
+  });
+}
+
+export async function setOfflineIdentity(
+  userId: string,
+  opts: { purgePending?: boolean } = {},
+): Promise<void> {
   const row: OfflineIdentityRow = {
     key: OFFLINE_IDENTITY_KEY,
     userId,
     updatedAt: new Date().toISOString(),
+    ...(opts.purgePending ? { purgePending: true } : {}),
   };
   await withStore(STORES.meta, 'readwrite', (s) => {
     s.put(row);

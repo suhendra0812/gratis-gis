@@ -37,6 +37,7 @@ import {
   putForm,
   putPickList,
 } from './offline-store';
+import { geometryBbox } from './geo-bbox';
 import {
   estimateTileCount,
   warmTiles,
@@ -364,10 +365,18 @@ export async function downloadDeployment(
       schemaHash,
       fields: l.fields,
     };
-    const priorCursor = prior?.layerSchemas[key]?.syncVersion;
+    const priorSchema = prior?.layerSchemas[key];
+    const priorCursor = priorSchema?.syncVersion;
     if (typeof priorCursor === 'number' && Number.isFinite(priorCursor)) {
       schema.syncVersion = priorCursor;
+      // Caches written before syncBbox existed were seeded for the
+      // manifest's area (or the whole layer when it had none).
+      schema.syncBbox =
+        priorSchema!.syncBbox !== undefined
+          ? priorSchema!.syncBbox
+          : (prior?.bbox ?? null);
     }
+    if (typeof priorSchema?.bytes === 'number') schema.bytes = priorSchema.bytes;
     layerSchemas[key] = schema;
   }
 
@@ -382,17 +391,30 @@ export async function downloadDeployment(
       params: { layer: layer.layerLabel },
     };
     onProgress({ ...progress });
+    throwIfAborted(signal);
     const schemaKey = `${layer.dataLayerId}:${layer.layerKey}`;
     const schema = layerSchemas[schemaKey]!;
     const cursor = schema.syncVersion;
+    // The area the cursor is good for. A delta only reports changes,
+    // so a cursor seeded for site A says nothing about the unchanged
+    // features at site B. When the area asked for now is not inside
+    // it, pull the new area in full first.
+    const covered = cursor !== undefined ? (schema.syncBbox ?? null) : undefined;
+    const useDelta =
+      typeof cursor === 'number' &&
+      covered !== undefined &&
+      bboxCovers(covered, input.bbox);
     try {
-      if (typeof cursor === 'number') {
+      if (useDelta) {
         const deltaResult = await pullLayerDelta({
           dataCollectionId: input.dataCollectionId,
           layer,
           since: cursor,
+          area: covered,
+          signal,
         });
         totalFeatureBytes += deltaResult.bytes;
+        schema.bytes = (schema.bytes ?? 0) + deltaResult.bytes;
         progress.featuresFetched += deltaResult.applied;
         schema.syncVersion = deltaResult.syncVersion;
         if (!deltaResult.stalled) {
@@ -411,6 +433,7 @@ export async function downloadDeployment(
         dataCollectionId: input.dataCollectionId,
         layer,
         bbox: input.bbox,
+        signal,
       });
       totalFeatureBytes += full.bytes;
       if (full.kind === 'failed') {
@@ -423,13 +446,35 @@ export async function downloadDeployment(
         continue;
       }
       progress.featuresFetched += full.count;
-      if (full.cursor !== null) schema.syncVersion = full.cursor;
+      if (full.cursor !== null) {
+        // A full pull keeps the rows already cached, so a cursor that
+        // was good for another area is now good for both. The delta
+        // after this one keeps all of them current.
+        const area =
+          useDelta || covered === undefined
+            ? (input.bbox ?? null)
+            : bboxUnion(covered, input.bbox ?? null);
+        // Rows from the earlier area stay on the device, so they still
+        // count towards the size (overlap is counted twice; it is an
+        // estimate).
+        schema.bytes =
+          covered === undefined || useDelta
+            ? full.bytes
+            : (schema.bytes ?? 0) + full.bytes;
+        schema.syncVersion = full.cursor;
+        schema.syncBbox = area;
+      } else {
+        delete schema.syncVersion;
+        delete schema.syncBbox;
+        schema.bytes = full.bytes;
+      }
       progress.message = {
         code: 'download.layerCached',
         params: { layer: layer.layerLabel, count: full.count },
       };
       onProgress({ ...progress });
     } catch (err) {
+      if (signal?.aborted) throw err;
       // A single layer failing shouldn't take the whole download down.
       // Surface a warning and move on; the deployment manifest will
       // still record what we did manage to cache.
@@ -451,6 +496,8 @@ export async function downloadDeployment(
     }
   }
 
+  const fetchedFeatureBytes = totalFeatureBytes;
+
   // Fetch bound forms.
   progress.phase = 'fetching-forms';
   const boundFormIds = Array.from(
@@ -461,11 +508,12 @@ export async function downloadDeployment(
     ),
   );
   for (const formId of boundFormIds) {
+    throwIfAborted(signal);
     const form = formId.slice(0, 8);
     progress.message = { code: 'download.fetchingForm', params: { form } };
     onProgress({ ...progress });
     try {
-      const res = await fetch(`/api/portal/items/${formId}`);
+      const res = await fetch(`/api/portal/items/${formId}`, { signal: signal ?? null });
       if (!res.ok) {
         noteShortfall({
           code: 'download.formHttpError',
@@ -490,6 +538,7 @@ export async function downloadDeployment(
       // the missing bindings, so this is a shortfall rather than a
       // failure. It is not nothing, though: the collector gets a
       // different form offline than online, which is worth recording.
+      if (signal?.aborted) throw err;
       noteShortfall({ code: 'download.formFailed', params: { form } }, err);
     }
   }
@@ -497,6 +546,7 @@ export async function downloadDeployment(
   // Fetch pick lists.
   progress.phase = 'fetching-picklists';
   for (const pickListId of input.pickListIds) {
+    throwIfAborted(signal);
     const pickList = pickListId.slice(0, 8);
     progress.message = {
       code: 'download.fetchingPickList',
@@ -504,7 +554,7 @@ export async function downloadDeployment(
     };
     onProgress({ ...progress });
     try {
-      const res = await fetch(`/api/portal/items/${pickListId}`);
+      const res = await fetch(`/api/portal/items/${pickListId}`, { signal: signal ?? null });
       if (!res.ok) {
         noteShortfall({
           code: 'download.pickListHttpError',
@@ -528,6 +578,7 @@ export async function downloadDeployment(
       });
       progress.pickListsFetched += 1;
     } catch (err) {
+      if (signal?.aborted) throw err;
       // A missing pick list means a choice field offline renders with
       // no choices, which stops a collector mid-form. Recorded.
       noteShortfall(
@@ -732,7 +783,10 @@ export async function downloadDeployment(
     mapId: input.mapId,
     layerSchemas,
     cachedAt: new Date().toISOString(),
-    estimatedSize: totalFeatureBytes,
+    // Feature bytes come from the per-layer totals, which survive an
+    // incremental refresh; `totalFeatureBytes` counts only what this
+    // run fetched. Tile and basemap bytes are this run's.
+    estimatedSize: totalFeatureBytes - fetchedFeatureBytes + cachedFeatureBytes(layerSchemas),
   };
   if (input.bbox !== undefined) manifest.bbox = input.bbox;
   // Record the holes. Everything cached above stays, because a
@@ -774,7 +828,7 @@ export async function downloadDeployment(
   } else {
     progress.message = { code: 'download.done', params: counts };
   }
-  progress.estimatedSize = totalFeatureBytes;
+  progress.estimatedSize = manifest.estimatedSize;
   onProgress({ ...progress });
 
   return manifest;
@@ -786,6 +840,13 @@ export async function downloadDeployment(
  * legacy item-level route (which now routes server-side to the
  * first spatial sublayer for v3 items per #194).
  */
+/**
+ * Header the service worker sets on a response served from its cache
+ * (or made up) because the network failed. Lockstep with
+ * SW_FALLBACK_HEADER in public/sw.js.
+ */
+export const SW_FALLBACK_HEADER = 'x-gg-sw-fallback';
+
 export function buildFeatureUrl(
   dataLayerId: string,
   layerKey: string,
@@ -814,10 +875,15 @@ export function buildDeltaUrl(
   since: number,
   limit?: number,
   after?: string,
+  bbox?: [number, number, number, number],
 ): string {
   const qs = new URLSearchParams({ since: String(since) });
   if (after) qs.set('after', after);
   if (limit !== undefined) qs.set('limit', String(limit));
+  // The cached area, so the server sends only the changes inside it
+  // (and deletes for rows that left it). A server too old to know
+  // the parameter ignores it, and keepInsideArea still trims.
+  if (bbox) qs.set('bbox', bbox.join(','));
   return `/api/portal/items/${dataLayerId}/layers/${encodeURIComponent(layerKey)}/delta?${qs.toString()}`;
 }
 
@@ -896,6 +962,9 @@ async function pullLayerDelta(args: {
   dataCollectionId: string;
   layer: DownloadLayer;
   since: number;
+  /** The area the cache covers, or null for the whole layer. */
+  area: [number, number, number, number] | null;
+  signal?: AbortSignal | undefined;
 }): Promise<{
   applied: number;
   syncVersion: number;
@@ -910,15 +979,17 @@ async function pullLayerDelta(args: {
   // Cap the number of pages so a stuck truncated response cannot
   // spin forever. Stopping early stores `safe`, never a cursor past
   // rows not yet applied, so the next refresh picks up from there.
-  for (let page = 0; page < 100; page += 1) {
+  for (let page = 0; page < DELTA_MAX_PAGES; page += 1) {
+    throwIfAborted(args.signal);
     const url = buildDeltaUrl(
       args.layer.dataLayerId,
       args.layer.layerKey,
       since,
       DELTA_PAGE_LIMIT,
       after,
+      args.area ?? undefined,
     );
-    const res = await fetch(url);
+    const res = await fetch(url, { signal: args.signal ?? null });
     if (!res.ok) {
       throw new Error(
         `delta HTTP ${res.status} for layer ${args.layer.layerLabel}`,
@@ -936,12 +1007,13 @@ async function pullLayerDelta(args: {
       throw new Error(`delta missing changes for layer ${args.layer.layerLabel}`);
     }
     const cachedAt = new Date().toISOString();
-    const { upserts, deletes } = applyDeltaChanges(body.changes, {
+    const page = applyDeltaChanges(body.changes, {
       dataCollectionId: args.dataCollectionId,
       dataLayerId: args.layer.dataLayerId,
       layerKey: args.layer.layerKey,
       cachedAt,
     });
+    const { upserts, deletes } = keepInsideArea(page, args.area);
     await putFeatures(upserts);
     await deleteFeatures(
       args.dataCollectionId,
@@ -962,7 +1034,76 @@ async function pullLayerDelta(args: {
     since = step.since;
     after = step.after;
   }
-  return { applied, syncVersion: safe, bytes, stalled: false };
+  // Out of pages with the head still ahead. Reported as stalled so the
+  // caller re-seeds with a full pull for its area; reporting it as done
+  // would leave the layer short of the head and call it cached.
+  return { applied, syncVersion: safe, bytes, stalled: true };
+}
+
+/** Pages one refresh will walk before giving up on the delta path. */
+const DELTA_MAX_PAGES = 100;
+
+/**
+ * Turn upserts outside the cached area into deletes. The delta request
+ * carries the area, but a server older than that parameter ignores it,
+ * and a bulk rewrite of a statewide layer would then land every row of
+ * the state on the device. A row
+ * that has moved out of the area is dropped, as a full pull of the
+ * area would drop it. Rows with no geometry (tables) are kept.
+ */
+function keepInsideArea(
+  page: { upserts: CachedFeature[]; deletes: string[] },
+  area: [number, number, number, number] | null,
+): { upserts: CachedFeature[]; deletes: string[] } {
+  if (area === null) return page;
+  const upserts: CachedFeature[] = [];
+  const deletes = [...page.deletes];
+  for (const row of page.upserts) {
+    const box = geometryBbox(row.feature.geometry);
+    if (box === null || bboxIntersects(box, area)) upserts.push(row);
+    else deletes.push(row.globalId);
+  }
+  return { upserts, deletes };
+}
+
+type Box = [number, number, number, number];
+
+function bboxIntersects(a: Box, b: Box): boolean {
+  return a[0] <= b[2] && a[2] >= b[0] && a[1] <= b[3] && a[3] >= b[1];
+}
+
+/** Whether a cache covering `have` (null: the whole layer) already
+ *  holds everything a download for `want` (undefined: the whole
+ *  layer) would fetch. */
+export function bboxCovers(have: Box | null, want: Box | undefined): boolean {
+  if (have === null) return true;
+  if (want === undefined) return false;
+  return (
+    have[0] <= want[0] && have[1] <= want[1] && have[2] >= want[2] && have[3] >= want[3]
+  );
+}
+
+/** Smallest area holding both; null (whole layer) absorbs anything. */
+function bboxUnion(a: Box | null, b: Box | null): Box | null {
+  if (a === null || b === null) return null;
+  return [
+    Math.min(a[0], b[0]),
+    Math.min(a[1], b[1]),
+    Math.max(a[2], b[2]),
+    Math.max(a[3], b[3]),
+  ];
+}
+
+function cachedFeatureBytes(schemas: Record<string, CachedLayerSchema>): number {
+  let total = 0;
+  for (const s of Object.values(schemas)) total += s.bytes ?? 0;
+  return total;
+}
+
+/** Cancel is checked between layers, pages, forms and pick lists, so
+ *  a tap on Cancel stops the download within one request. */
+function throwIfAborted(signal: AbortSignal | undefined): void {
+  if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
 }
 
 /**
@@ -978,16 +1119,18 @@ async function pullLayerDelta(args: {
 async function readSyncVersionHead(
   dataLayerId: string,
   layerKey: string,
+  signal?: AbortSignal,
 ): Promise<number | null> {
   try {
-    const res = await fetch(buildDeltaUrl(dataLayerId, layerKey, 0, 1));
+    const res = await fetch(buildDeltaUrl(dataLayerId, layerKey, 0, 1), { signal: signal ?? null });
     if (!res.ok) return null;
     const body = (await res.json()) as { syncVersion?: unknown };
     return typeof body.syncVersion === 'number' &&
       Number.isFinite(body.syncVersion)
       ? body.syncVersion
       : null;
-  } catch {
+  } catch (err) {
+    if (signal?.aborted) throw err;
     return null;
   }
 }
@@ -1004,24 +1147,30 @@ async function pullLayerFull(args: {
   dataCollectionId: string;
   layer: DownloadLayer;
   bbox: [number, number, number, number] | undefined;
+  signal?: AbortSignal | undefined;
 }): Promise<
   | { kind: 'ok'; count: number; bytes: number; cursor: number | null }
   | { kind: 'failed'; failure: OfflineMessage; bytes: number }
 > {
   const { layer } = args;
-  const head = await readSyncVersionHead(layer.dataLayerId, layer.layerKey);
+  const head = await readSyncVersionHead(
+    layer.dataLayerId,
+    layer.layerKey,
+    args.signal,
+  );
   let count = 0;
   let bytes = 0;
   let cursor: string | undefined;
   let at: string | undefined;
   const seen = new Set<string>();
   for (;;) {
+    throwIfAborted(args.signal);
     const url = buildFeatureUrl(layer.dataLayerId, layer.layerKey, args.bbox, {
       limit: FULL_PAGE_LIMIT,
       ...(cursor ? { cursor } : {}),
       ...(at ? { at } : {}),
     });
-    const res = await fetch(url);
+    const res = await fetch(url, { signal: args.signal ?? null });
     if (!res.ok) {
       return {
         kind: 'failed',
@@ -1029,6 +1178,19 @@ async function pullLayerFull(args: {
         failure: {
           code: 'download.layerHttpError',
           params: { layer: layer.layerLabel, status: res.status },
+        },
+      };
+    }
+    // The service worker answers a failed request from its cache when
+    // it can. That copy is an older snapshot whose cursor does not
+    // belong to this walk, so it cannot be used for a download.
+    if (res.headers.get(SW_FALLBACK_HEADER)) {
+      return {
+        kind: 'failed',
+        bytes,
+        failure: {
+          code: 'download.layerHttpError',
+          params: { layer: layer.layerLabel, status: 504 },
         },
       };
     }

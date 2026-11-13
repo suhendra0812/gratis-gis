@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
+import { isUuidShape, UuidPathPipe } from '../common/uuid-shape.js';
 import {
   BadRequestException,
   Body,
@@ -53,6 +54,8 @@ import { safeFetch } from '../common/net-guards.js';
  */
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+/** Every `:id` here names an item row (uuid column). */
+const ITEM_ID = new UuidPathPipe('Item not found');
 /**
  * Cap on the batch permissions route. Each id costs one authorized
  * item resolution, so an uncapped list is an invitation to walk the
@@ -124,7 +127,7 @@ class UpdateItemDto {
   @IsOptional() @IsString() @MaxLength(500) license?: string | null;
   // #80: tier-level geo limits. UUID of a geo_boundary item, or null
   // to clear. The read path treats a missing / wrong-typed target
-  // as "no clip" so a broken ref cannot widen access; this DTO does
+  // as a closed clip so a broken ref cannot widen access; this DTO does
   // not validate the target is actually a geo_boundary -- the read-
   // time dereference is the source of truth.
   @IsOptional() @IsUUID('loose') publicGeoBoundaryId?: string | null;
@@ -225,7 +228,7 @@ class ShareDto {
    * exclusive with `geoLimit`. Caller is responsible for ensuring
    * the referenced item is a `geo_boundary` and visible to the
    * grantee; the sharing service does not validate at write time
-   * but a missing / wrong-typed target is treated as "no clip" at
+   * but a missing / wrong-typed target closes this share's path at
    * read time so a deleted boundary cannot silently expand access.
    */
   @IsOptional() @IsUUID('loose') geoBoundaryId?: string | null;
@@ -301,6 +304,7 @@ export class ItemsController {
     @Query('limit') limit?: string,
     @Query('offset') offset?: string,
     @Query('sharedWithGroupId') sharedWithGroupId?: string,
+    @Query('sourceItemId') sourceItemId?: string,
   ) {
     // Build opts without explicit-undefined keys so `exactOptionalPropertyTypes`
     // is satisfied. Passing `{ type: undefined }` is not the same as omitting it.
@@ -313,6 +317,7 @@ export class ItemsController {
       bufferKm?: number;
       lite?: boolean;
       sharedWithGroupId?: string;
+      sourceItemId?: string;
       limit?: number;
       offset?: number;
     } = {};
@@ -337,7 +342,13 @@ export class ItemsController {
       // unfiltered list back, which matches the no-?type behaviour.
     }
     if (q !== undefined) opts.q = q;
-    if (ownerId !== undefined) opts.ownerId = ownerId;
+    if (ownerId !== undefined) {
+      // A non-uuid reaches a uuid column and Prisma throws (500).
+      if (!isUuidShape(ownerId)) {
+        throw new BadRequestException('ownerId must be a uuid');
+      }
+      opts.ownerId = ownerId;
+    }
     // Narrow-by-default: the list strips the heavy data_json blob
     // unless the caller explicitly asks for it with ?full=1. The old
     // ?lite=1 flag keeps working (it now matches the default), and a
@@ -352,11 +363,18 @@ export class ItemsController {
     // The service layer would error on a malformed group id at query
     // time anyway, but a quick reject here keeps that error surface
     // off the public list endpoint.
-    if (
-      sharedWithGroupId !== undefined &&
-      /^[0-9a-f-]{32,40}$/i.test(sharedWithGroupId)
-    ) {
+    if (sharedWithGroupId !== undefined && isUuidShape(sharedWithGroupId)) {
       opts.sharedWithGroupId = sharedWithGroupId;
+    }
+    // sourceItemId: derived layers whose recipe reads this item. The
+    // Analyze past runs shelf used to fetch the caller's 50 newest
+    // derived layers and filter in the browser, so older runs for a
+    // layer never showed.
+    if (sourceItemId !== undefined) {
+      if (!isUuidShape(sourceItemId)) {
+        throw new BadRequestException('sourceItemId must be a uuid');
+      }
+      opts.sourceItemId = sourceItemId;
     }
     if (bbox !== undefined) {
       const parts = bbox.split(',').map(Number);
@@ -469,7 +487,7 @@ export class ItemsController {
   }
 
   @Get(':id')
-  async get(@CurrentUser() user: AuthUser, @Param('id') id: string) {
+  async get(@CurrentUser() user: AuthUser, @Param('id', ITEM_ID) id: string) {
     const item = await this.items.getForReader(user, id);
     // Stamp lastUsageAt on direct item-detail GET (#99). Covers
     // map opens, pick_list browses, dashboard views -- anything
@@ -481,7 +499,9 @@ export class ItemsController {
     // system reads correctly don't bump the counter.
     // The write goes through LastUsageStamp, not prisma.item.update,
     // so it cannot drag `updatedAt` along with it. See that file.
-    this.lastUsage.stamp(id);
+    // Keyed on the row's own id: the path spelling can vary (letter
+    // case), and each spelling would otherwise get its own window.
+    this.lastUsage.stamp(item.id);
     const boundaryId = (item as { publicGeoBoundaryId?: string | null })
       .publicGeoBoundaryId;
     const canFix =
@@ -533,7 +553,7 @@ export class ItemsController {
   @Get(':id/thumbnail.svg')
   async thumbnailSvg(
     @CurrentUser() user: AuthUser | null,
-    @Param('id') id: string,
+    @Param('id', ITEM_ID) id: string,
     @Res({ passthrough: false }) res: Response,
   ): Promise<void> {
     let item: Awaited<ReturnType<ItemsService['get']>>;
@@ -617,8 +637,10 @@ export class ItemsController {
   private async toDataUrl(
     href: string | null | undefined,
   ): Promise<string | null | undefined> {
-    // href is falsy here (null / undefined / empty string).
-    if (!href) return null;
+    // href is falsy here (null / undefined / empty string). The design
+    // blob is unchecked JSON, so a non-string is treated as absent
+    // rather than throwing a 500 on a public route.
+    if (!href || typeof href !== 'string') return null;
     if (href.startsWith('data:')) return rasterDataUrl(href);
     try {
       // safeFetch, not fetch: the URL comes straight out of user-
@@ -628,17 +650,7 @@ export class ItemsController {
       // guard's rejection lands in the catch below, so a blocked
       // URL degrades the same way a broken one does: the SVG just
       // renders without that layer.
-      const res = await safeFetch(href, {
-        signal: AbortSignal.timeout(10_000),
-      });
-      if (!res.ok) return null;
-      const contentType =
-        res.headers.get('content-type') ?? 'application/octet-stream';
-      const buf = Buffer.from(await res.arrayBuffer());
-      if (buf.length > 5 * 1024 * 1024) return null;
-      const media = contentType.split(';')[0]?.trim().toLowerCase() ?? '';
-      if (!RASTER_MEDIA.has(media)) return null;
-      return `data:${media};base64,${buf.toString('base64')}`;
+      return await remoteRasterDataUrl(href);
     } catch {
       return null;
     }
@@ -647,7 +659,7 @@ export class ItemsController {
   @Get(':id/permissions')
   async permissions(
     @CurrentUser() user: AuthUser,
-    @Param('id') id: string,
+    @Param('id', ITEM_ID) id: string,
   ) {
     // get() throws 404 when the user can't see the item at all, which
     // is the right behavior here -- if you can't read it, the answer
@@ -682,7 +694,7 @@ export class ItemsController {
   @Get(':id/dependencies')
   dependencies(
     @CurrentUser() user: AuthUser,
-    @Param('id') id: string,
+    @Param('id', ITEM_ID) id: string,
     @Query('transitive') transitive?: string,
   ) {
     return this.items.listDependencies(user, id, {
@@ -701,7 +713,7 @@ export class ItemsController {
   @Get(':id/folder-contents')
   folderContents(
     @CurrentUser() user: AuthUser,
-    @Param('id') id: string,
+    @Param('id', ITEM_ID) id: string,
   ) {
     return this.items.listFolderContents(user, id);
   }
@@ -711,7 +723,7 @@ export class ItemsController {
   @Get(':id/dependents')
   dependents(
     @CurrentUser() user: AuthUser,
-    @Param('id') id: string,
+    @Param('id', ITEM_ID) id: string,
     @Query('transitive') transitive?: string,
   ) {
     return this.items.listDependents(user, id, {
@@ -733,7 +745,7 @@ export class ItemsController {
   @Get(':id/cascade-revert-candidates')
   cascadeRevertCandidates(
     @CurrentUser() user: AuthUser,
-    @Param('id') id: string,
+    @Param('id', ITEM_ID) id: string,
   ) {
     return this.items.listCascadeRevertCandidates(user, id);
   }
@@ -750,10 +762,11 @@ export class ItemsController {
   @Get(':id/geojson')
   async geojson(
     @CurrentUser() user: AuthUser,
-    @Param('id') id: string,
+    @Param('id', ITEM_ID) id: string,
     @Query('bbox') bbox?: string,
     @Query('at') at?: string,
     @Query('clip') clip?: string,
+    @Query('limit') limit?: string,
   ) {
     // Use conditional spread (not `undefined` values) to play nicely
     // with exactOptionalPropertyTypes; the destructure also narrows
@@ -763,7 +776,11 @@ export class ItemsController {
       bbox?: [number, number, number, number];
       at?: string;
       boundaryClipId?: string;
+      limit?: number;
     } = {};
+    // Optional row cap; the service bounds it to its own maximum.
+    const parsedLimit = Number.parseInt(limit ?? '', 10);
+    if (Number.isFinite(parsedLimit) && parsedLimit > 0) opts.limit = parsedLimit;
     if (bbox) {
       const parts = bbox.split(',').map(Number);
       if (parts.length === 4 && parts.every((n) => !isNaN(n))) {
@@ -797,7 +814,7 @@ export class ItemsController {
   @Get(':id/web-map.json')
   async webMapJson(
     @CurrentUser() user: AuthUser,
-    @Param('id') id: string,
+    @Param('id', ITEM_ID) id: string,
     @Headers('host') host?: string,
     @Headers('x-forwarded-host') forwardedHost?: string,
     @Headers('x-forwarded-proto') forwardedProto?: string,
@@ -904,7 +921,7 @@ export class ItemsController {
   @Patch(':id')
   update(
     @CurrentUser() user: AuthUser,
-    @Param('id') id: string,
+    @Param('id', ITEM_ID) id: string,
     @Body() dto: UpdateItemDto,
   ) {
     return this.items.update(user, id, dto, { clientKeys: true });
@@ -913,7 +930,7 @@ export class ItemsController {
   @Delete(':id')
   remove(
     @CurrentUser() user: AuthUser,
-    @Param('id') id: string,
+    @Param('id', ITEM_ID) id: string,
     @Query('cascade') cascade?: string,
   ) {
     // ?cascade=true acknowledges the folder-cascade preview (#156)
@@ -941,13 +958,13 @@ export class ItemsController {
   @Get(':id/delete-cascade')
   previewDeleteCascade(
     @CurrentUser() user: AuthUser,
-    @Param('id') id: string,
+    @Param('id', ITEM_ID) id: string,
   ) {
     return this.items.previewFolderDeleteCascade(user, id);
   }
 
   @Post(':id/restore')
-  restore(@CurrentUser() user: AuthUser, @Param('id') id: string) {
+  restore(@CurrentUser() user: AuthUser, @Param('id', ITEM_ID) id: string) {
     return this.items.restore(user, id);
   }
 
@@ -956,14 +973,14 @@ export class ItemsController {
    * retrying a DELETE can't accidentally skip the trash step.
    */
   @Delete(':id/purge')
-  purge(@CurrentUser() user: AuthUser, @Param('id') id: string) {
+  purge(@CurrentUser() user: AuthUser, @Param('id', ITEM_ID) id: string) {
     return this.items.purge(user, id);
   }
 
   @Post(':id/share')
   share(
     @CurrentUser() user: AuthUser,
-    @Param('id') id: string,
+    @Param('id', ITEM_ID) id: string,
     @Body() dto: ShareDto,
   ) {
     return this.items.share(user, id, dto);
@@ -972,7 +989,7 @@ export class ItemsController {
   @Delete(':id/share')
   unshare(
     @CurrentUser() user: AuthUser,
-    @Param('id') id: string,
+    @Param('id', ITEM_ID) id: string,
     @Body() dto: ShareDto,
   ) {
     return this.items.unshare(user, id, dto);
@@ -981,7 +998,7 @@ export class ItemsController {
   @Patch(':id/owner')
   reassignOwner(
     @CurrentUser() user: AuthUser,
-    @Param('id') id: string,
+    @Param('id', ITEM_ID) id: string,
     @Body() dto: ReassignOwnerDto,
   ) {
     const patch: {
@@ -1003,16 +1020,16 @@ export class ItemsController {
   @Get(':id/snapshots')
   async listSnapshots(
     @CurrentUser() user: AuthUser,
-    @Param('id') id: string,
+    @Param('id', ITEM_ID) id: string,
   ) {
     await this.items.assertCanEdit(user, id);
     return this.snapshots.list(id);
   }
 
   /**
-   * Revert an item's data to a prior snapshot. Captures the current
-   * state as a fresh snapshot first, so un-revert is possible for
-   * the retention window. Caller must have edit access.
+   * Revert an item's data to a prior snapshot. Runs as a normal data
+   * save, which snapshots the current state first, so un-revert is
+   * possible for the retention window. Caller must have edit access.
    *
    * The snapshotId must belong to the item in the URL: we don't want
    * /items/A/snapshots/{snap-from-B}/revert to quietly mutate B just
@@ -1021,17 +1038,11 @@ export class ItemsController {
   @Post(':id/snapshots/:snapshotId/revert')
   async revertSnapshot(
     @CurrentUser() user: AuthUser,
-    @Param('id') id: string,
-    @Param('snapshotId') snapshotId: string,
+    @Param('id', ITEM_ID) id: string,
+    @Param('snapshotId', new UuidPathPipe('Snapshot not found')) snapshotId: string,
   ) {
     await this.items.assertCanEdit(user, id);
-    const snap = await this.snapshots.get(snapshotId);
-    if (snap.itemId !== id) {
-      throw new BadRequestException(
-        'Snapshot does not belong to this item',
-      );
-    }
-    return this.snapshots.revert(snapshotId, user.id);
+    return this.items.revertToSnapshot(user, id, snapshotId);
   }
 
   @Post('bulk/reassign-owner')
@@ -1126,6 +1137,34 @@ const RASTER_MEDIA = new Set([
   'image/webp',
   'image/gif',
 ]);
+
+/** Largest remote image the thumbnail SVG will inline. */
+const MAX_THUMBNAIL_IMAGE_BYTES = 5 * 1024 * 1024;
+
+/**
+ * Fetch a remote image and return it as a raster data URL, or null.
+ * The size cap goes to safeFetch so it stops reading at 5 MB. Before,
+ * the body was read in full (up to safeFetch's 1 GiB default) and
+ * only then checked, on a route anyone can call.
+ */
+export async function remoteRasterDataUrl(
+  href: string,
+  fetcher: typeof safeFetch = safeFetch,
+): Promise<string | null> {
+  const res = await fetcher(
+    href,
+    { signal: AbortSignal.timeout(10_000) },
+    { maxBytes: MAX_THUMBNAIL_IMAGE_BYTES },
+  );
+  if (!res.ok) return null;
+  const contentType =
+    res.headers.get('content-type') ?? 'application/octet-stream';
+  const buf = Buffer.from(await res.arrayBuffer());
+  if (buf.length > MAX_THUMBNAIL_IMAGE_BYTES) return null;
+  const media = contentType.split(';')[0]?.trim().toLowerCase() ?? '';
+  if (!RASTER_MEDIA.has(media)) return null;
+  return `data:${media};base64,${buf.toString('base64')}`;
+}
 
 /** Keep a caller-supplied data URL only when it is a raster image.
  *  SVG and HTML data URLs are dropped: this response is an SVG
