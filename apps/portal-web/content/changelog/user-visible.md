@@ -30,6 +30,11 @@ A date or time question in a form can start with the current date and time alrea
 ## 2026-11-06 - Edit and delete features in the field app
 In the field app, tap a feature to zoom to, edit, copy or delete it. Drag its shape on the map, place a point by hand or by GPS, and add, edit or delete its related records without leaving the form. It all works offline and syncs later. The compass can turn the map with the way you face.
 
+## [1.4.3] - 2026-11-12
+
+## 2026-11-12 - Safer editing and a security update
+Clicking a second feature while an edit form is open now shows that feature's own values instead of saving the first one's onto it, and table edits always land on the row you changed. Offline edits keep the feature's real shape. This release also closes several security gaps found in a full review.
+
 ## [1.4.2] - 2026-11-11
 
 ## 2026-11-11 - Permanently deleting large layers works

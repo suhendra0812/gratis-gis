@@ -630,6 +630,7 @@ export function useFeatureEditing({
             </DialogHeader>
             {pendingCreate ? (
               <AttributeForm
+                key={`${pendingCreate.layerId}:${pendingCreate.sketchId}`}
                 fields={layerInfo[pendingCreate.layerId]?.fields ?? []}
                 editableFieldNames={null}
                 pickLists={pickLists}
