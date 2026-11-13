@@ -140,6 +140,77 @@ versioning policy is in [docs/VERSIONING.md](./docs/VERSIONING.md).
   spatial layer of the data layer, so one asset's inspections showed
   up under unrelated layers.
 
+## [1.4.3] - 2026-11-12
+
+Security and data-safety release, from a full review of the code.
+Upgrade every install. Two changes need attention:
+
+- Rows of user data layers may have been deleted by the hourly OSM
+  cache cleanup on earlier versions (see Fixed). Those rows can only
+  come back from a backup taken before the cleanup ran.
+- A form whose format pattern uses lookahead, lookbehind or
+  backreferences can no longer be saved; change the pattern before
+  editing that form.
+
+### Security
+
+- Analysis tools check the caller's access to every layer they read,
+  not only the target layer, and refuse layers shared with a row or
+  area limit. Parameters a tool author fixed can no longer be changed
+  by the request, and tool runs that query OpenStreetMap use the same
+  area, preset and feature caps as the OSM query page.
+- Folder contents and the trash list hide the same item settings the
+  item list hides from people who cannot edit an item.
+- Item references saved in maps and apps must be plain ids. Pages that
+  build API addresses from saved item data check those ids before any
+  request is sent, and the API refuses to store a reference that is
+  not a plain id.
+- GDAL in portal-api no longer loads the drivers that read other files
+  or URLs named inside a file (VRT, tile index, web service
+  descriptions), so an upload cannot make the server fetch anything.
+  Raster tile uploads must be real GeoTIFF or JPEG 2000 files, checked
+  by their first bytes, and every GDAL command reads them with that
+  one driver.
+- Form format patterns are matched with a linear-time engine
+  everywhere forms run, so one answer can no longer stall the server.
+  URL cleanup, county matching in CSV imports and the SVG icon cleaner
+  no longer slow down sharply on long or crafted input.
+- One request can no longer exhaust the API's memory or hold its
+  database. Opening a file in the browser (Import into editor) accepts
+  files up to 100 MB and 250,000 features, and the API yields to other
+  requests while it reads. Large KML text, crafted PMTiles archives
+  and very large edits that end in a sync conflict are all bounded.
+  Derived-layer previews obey the same 10 step limit as saved recipes,
+  and a fishnet refuses to build more than a million cells wherever it
+  runs.
+- Server-rendered pages pass the visitor's address to the API, so the
+  per-address rate limit counts each visitor separately instead of all
+  of them together.
+
+### Fixed
+
+- The hourly OSM cache cleanup no longer deletes rows of user data
+  layers. It removed expired cache rows by physical row position,
+  which is only unique inside one monthly partition of the feature
+  log, so each cleanup also deleted the rows at the same positions in
+  older months. It now matches rows by key and scope and refuses any
+  scope that is not an OSM cache scope.
+- Clicking another feature while an attribute form is open opens that
+  feature's own values. The form kept the first feature's values and
+  saved them onto the second, in the Editor app, the custom app Edit
+  widget and the field app's related records.
+- Inline edits in the attribute table save to the record that was
+  double-clicked, even when the table refreshes while you type, and
+  send only the changed field, so they no longer undo another editor's
+  changes or fail on layers that allow only some fields.
+- The custom app Edit widget loads the full feature before editing
+  instead of the trimmed map tile copy.
+- An attribute edit made in the field app while offline (or when the
+  connection dropped) no longer replaces the feature's shape with the
+  clipped, simplified copy drawn on the map.
+- A correction made to a field capture after the app had already sent
+  it, but before the sync finished, is no longer lost.
+
 ## [1.4.2] - 2026-11-11
 
 Patch release. Purging a data layer works again for layers of any
@@ -4674,6 +4745,7 @@ Everything is new in a first release. What ships, briefly:
   4.24.15, sharp, fast-uri, postcss, brace-expansion, tar, and the
   `@hono/node-server` override.
 
+[1.4.3]: https://github.com/palavido-dev/gratis-gis/releases/tag/v1.4.3
 [1.4.2]: https://github.com/palavido-dev/gratis-gis/releases/tag/v1.4.2
 [1.4.1]: https://github.com/palavido-dev/gratis-gis/releases/tag/v1.4.1
 [1.4.0]: https://github.com/palavido-dev/gratis-gis/releases/tag/v1.4.0

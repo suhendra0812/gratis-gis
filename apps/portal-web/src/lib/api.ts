@@ -1,9 +1,11 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { getServerSession } from 'next-auth';
+import { headers as requestHeaders } from 'next/headers';
 import { redirect } from 'next/navigation';
 import { authOptions, type SessionWithToken } from './auth';
 import { apiErrorMessage } from './api-error';
 import { isSessionStale } from './session-state';
+import { assertSafeApiUrl } from './api-path-guard';
 
 const API_BASE = process.env.PORTAL_API_URL ?? 'http://localhost:4000';
 
@@ -16,6 +18,26 @@ const API_BASE = process.env.PORTAL_API_URL ?? 'http://localhost:4000';
  * so in practice we expect a session here, but this is a defense-in-depth
  * backstop.
  */
+/**
+ * The browser's address as Caddy recorded it, for server-side calls.
+ *
+ * portal-api rate-limits per client address (trust proxy 1: the last
+ * X-Forwarded-For entry). The BFF forwards the header; server-rendered
+ * pages called portal-api directly without it, so every visitor of the
+ * whole install shared the portal-web container's address and one
+ * rate-limit bucket. One person reloading a public page could then get
+ * every other public viewer refused. Outside a request (build time)
+ * there is nothing to forward.
+ */
+export async function forwardedForHeader(): Promise<Record<string, string>> {
+  try {
+    const xff = (await requestHeaders()).get('x-forwarded-for');
+    return xff ? { 'x-forwarded-for': xff } : {};
+  } catch {
+    return {};
+  }
+}
+
 export async function apiFetch<T>(path: string, init: RequestInit = {}): Promise<T> {
   // Per-call timing log behind the API_FETCH_TIMING flag. The slow
   // page-mount path on map items has 7+ sequential apiFetch awaits;
@@ -42,11 +64,15 @@ export async function apiFetch<T>(path: string, init: RequestInit = {}): Promise
     // default provider picker (we have only one provider).
     redirect('/signin');
   }
+  // Server-side fetch normalizes dot segments too, with the user's
+  // bearer attached. See lib/api-path-guard.ts.
+  assertSafeApiUrl(path);
   const res = await fetch(`${API_BASE}${path}`, {
     ...init,
     headers: {
       'content-type': 'application/json',
       authorization: `Bearer ${session.accessToken}`,
+      ...(await forwardedForHeader()),
       ...(init.headers ?? {}),
     },
     cache: 'no-store',
@@ -90,10 +116,12 @@ export async function publicApiFetch<T>(
   path: string,
   init: RequestInit = {},
 ): Promise<T> {
+  assertSafeApiUrl(path);
   const res = await fetch(`${API_BASE}${path}`, {
     ...init,
     headers: {
       'content-type': 'application/json',
+      ...(await forwardedForHeader()),
       ...(init.headers ?? {}),
     },
     cache: 'no-store',

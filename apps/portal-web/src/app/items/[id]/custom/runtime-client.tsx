@@ -2382,7 +2382,7 @@ function LayerListWidgetRender({ widget }: { widget: CustomWidget }) {
       const safe =
         layer.title
           .replace(/[^A-Za-z0-9._-]+/g, '_')
-          .replace(/^_+|_+$/g, '')
+          .replace(/^_+|(?<!_)_+$/g, '')
           .slice(0, 80) || 'layer';
       // GeoJSON.Feature['id'] is string | number | undefined; the
       // exporter's ExportFeature uses an optional `id?: string` with
@@ -4236,7 +4236,7 @@ function ExportWidgetRender({ widget }: { widget: CustomWidget }) {
 
 function sanitizeExportFilename(raw: string): string {
   const s = raw.trim().replace(/[^\w.\- ]+/g, '_').replace(/\s+/g, '_');
-  return (s.slice(0, 60) || 'export').replace(/^_+|_+$/g, '');
+  return (s.slice(0, 60) || 'export').replace(/^_+|(?<!_)_+$/g, '');
 }
 
 // ---- Splash Screen widget (#111) ------------------------------------------
@@ -9091,6 +9091,7 @@ function CreateFeatureWidgetRender({ widget }: { widget: CustomWidget }) {
             </div>
           ) : (
             <AttributeForm
+              key={`${phase.target.dataLayerId}:${phase.target.layerKey}`}
               fields={schema.fields}
               editableFieldNames={null}
               layerTitle={phase.target.title}
@@ -9169,6 +9170,8 @@ function EditFeatureWidgetRender({ widget }: { widget: CustomWidget }) {
     return out;
   }, [mut?.targets]);
 
+  const editClickSeq = useRef(0);
+
   // Schema for whichever target is in editing state.
   const schema = useLayerSchema(
     editing?.target.dataLayerId ?? '',
@@ -9190,13 +9193,19 @@ function EditFeatureWidgetRender({ widget }: { widget: CustomWidget }) {
         // Refetch the canonical feature so the form is filled with
         // the full row (the tile-side properties can be partial).
         const fid = String(info.featureId);
+        // Only the latest click may open the form: a slow lookup for an
+        // earlier click must not land last and swap the record back.
+        const seq = ++editClickSeq.current;
         fetch(
           `/api/portal/items/${target.dataLayerId}/layers/${encodeURIComponent(
             target.layerKey,
-          )}/features/${encodeURIComponent(fid)}`,
+          )}/features?entity=${encodeURIComponent(fid)}`,
+          { cache: 'no-store' },
         )
           .then((r) => (r.ok ? r.json() : null))
-          .then((row: { properties?: Record<string, unknown> } | null) => {
+          .then((fc: { features?: Array<{ properties?: Record<string, unknown> }> } | null) => {
+            if (seq !== editClickSeq.current) return;
+            const row = fc?.features?.[0] ?? null;
             setEditing({
               target,
               featureId: fid,
@@ -9205,6 +9214,7 @@ function EditFeatureWidgetRender({ widget }: { widget: CustomWidget }) {
             setBusy({ state: 'idle' });
           })
           .catch(() => {
+            if (seq !== editClickSeq.current) return;
             setEditing({
               target,
               featureId: fid,
@@ -9292,6 +9302,10 @@ function EditFeatureWidgetRender({ widget }: { widget: CustomWidget }) {
         <p className="p-3 text-xs text-[hsl(var(--app-danger))]">{schema.error}</p>
       ) : (
         <AttributeForm
+          // One form per record: AttributeForm seeds its values once,
+          // so switching features without a new key saved feature A's
+          // values onto feature B.
+          key={`${editing.target.dataLayerId}:${editing.target.layerKey}:${editing.featureId}`}
           fields={schema.fields}
           editableFieldNames={null}
           initial={editing.properties}

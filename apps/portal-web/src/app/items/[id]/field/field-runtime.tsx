@@ -87,6 +87,7 @@ import { removeDeploymentFromDevice } from '@/lib/offline-remove';
 import {
   deleteFeatures,
   enqueueEdit,
+  getCachedFeature,
   getDeployment,
   hashLayerSchema,
   listFeaturesForLayer,
@@ -3294,9 +3295,11 @@ export function FieldRuntime({
 
       {bottomSheet === 'form' && formModal ? (
         <FormModal
-          // A different record is a fresh form: its view, dirty flags
-          // and errors must not carry over from the last one.
-          key={`${formModal.mode}:${formModal.featureId}`}
+          // One form per record. "Open" and "Add related" swap the
+          // modal in place; without a key the child record kept the
+          // parent's answers and saved them. Update Point keeps the
+          // same record and so the same key (no remount).
+          key={`${formModal.mode}:${formModal.layer.dataLayerId}:${formModal.layer.layerKey}:${formModal.featureId}`}
           dataCollectionId={dataCollectionId}
           modal={formModal}
           pickLists={effectivePickLists}
@@ -5115,15 +5118,16 @@ function FeatureForm({
     // unsynced edits). Enqueues the operation, writes the feature into
     // IndexedDB so the map shows it immediately, and bumps the
     // runtime's refresh counter via the callback.
-    const applyLocally = async (): Promise<void> => {
+    const applyLocally = async (opts: { afterSend?: boolean } = {}): Promise<void> => {
       // enqueueEdit, not a raw put. The queue can hold an earlier
       // unsynced edit for this same feature, and folding the two
       // inside one transaction is what keeps an offline capture that
       // the user then corrects from being replaced by an update
       // against a globalId the server has never seen.
+      const isEdit = modal.mode !== 'add';
       const enqueued = await enqueueEdit({
         dataCollectionId,
-        op: modal.mode === 'add' ? 'insert' : 'update',
+        op: isEdit ? 'update' : 'insert',
         dataLayerId: modal.layer.dataLayerId,
         layerKey: modal.layer.layerKey,
         globalId: featureId,
@@ -5134,6 +5138,7 @@ function FeatureForm({
         // it. The server stamps submitted_by from the caller.
         ownerUserId: currentUserId,
         ...(baseObservationId ? { baseObservationId } : {}),
+        ...(opts.afterSend ? { mayHaveReachedServer: true } : {}),
       });
       // The fold keeps the original capture time, so the cached
       // feature's timestamps come from the surviving row.
@@ -5142,6 +5147,18 @@ function FeatureForm({
           ? new Date().toISOString()
           : enqueued.record.queuedAt;
       const before = modal.mode === 'edit' ? modal.properties : {};
+      // An edited feature keeps the shape already on the device
+      // unless this edit moved it; modal.geometry is the tapped
+      // tile copy (clipped and simplified), the last resort.
+      const prior =
+        isEdit && !writeGeometry
+          ? await getCachedFeature(
+              dataCollectionId,
+              modal.layer.dataLayerId,
+              modal.layer.layerKey,
+              featureId,
+            )
+          : null;
       const cachedFeature: CachedFeature = {
         dataCollectionId,
         dataLayerId: modal.layer.dataLayerId,
@@ -5150,7 +5167,9 @@ function FeatureForm({
         feature: {
           type: 'Feature',
           id: featureId,
-          geometry: (writeGeometry ?? modal.geometry) as GeoJSON.Geometry,
+          geometry: (writeGeometry ??
+            prior?.feature.geometry ??
+            modal.geometry) as GeoJSON.Geometry,
           properties: {
             ...before,
             ...writeProps,
@@ -5239,8 +5258,9 @@ function FeatureForm({
       } catch {
         // Network failure during a transient blip. Stash it in the
         // queue so it is not lost; auto-sync retries when the radio
-        // comes back.
-        await applyLocally();
+        // comes back. The request may have landed with only the
+        // answer lost.
+        await applyLocally({ afterSend: true });
         onSaved('local');
         return;
       }

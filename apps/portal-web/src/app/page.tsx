@@ -7,6 +7,7 @@ import { serializeJsonLd } from '@/lib/json-ld';
 import { isSessionStale } from '@/lib/session-state';
 import { loadWhatsNewEntries } from '@/lib/whats-new';
 import { PublicLanding } from './public-landing';
+import { forwardedForHeader } from '@/lib/api';
 
 /**
  * SoftwareApplication JSON-LD for the landing page (#SEO).  Makes
@@ -31,7 +32,7 @@ function landingJsonLd() {
     applicationSubCategory: 'Geographic Information System',
     operatingSystem: 'Web, Linux server',
     license: 'https://www.gnu.org/licenses/agpl-3.0.html',
-    softwareVersion: '1.4.2',
+    softwareVersion: '1.4.3',
     offers: {
       '@type': 'Offer',
       price: '0',
@@ -129,6 +130,9 @@ async function loadLandingData(): Promise<
       // Server-to-server call; always fresh data (no Next cache)
       // since the admin might have just flipped a toggle.
       cache: 'no-store',
+      // The visitor's address, so the per-address rate limit counts
+      // this visitor and not every visitor at once.
+      headers: await forwardedForHeader(),
     });
     if (!res.ok) throw new Error(`landing fetch ${res.status}`);
     return (await res.json()) as React.ComponentProps<
