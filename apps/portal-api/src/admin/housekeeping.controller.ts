@@ -25,6 +25,7 @@ import { OperatorOrgGuard } from '../backup/operator-org.js';
 import { CurrentUser } from '../auth/current-user.decorator.js';
 import type { AuthUser } from '../auth/auth-sync.service.js';
 import { HousekeepingService } from './housekeeping.service.js';
+import { KeycloakAdminService } from './keycloak-admin.service.js';
 import {
   HousekeepingScheduleService,
   type HousekeepingScheduleMode,
@@ -71,7 +72,30 @@ export class HousekeepingController {
     private readonly housekeeping: HousekeepingService,
     private readonly schedule: HousekeepingScheduleService,
     @Optional() private readonly audit?: AdminAuditService,
+    @Optional() private readonly keycloak?: KeycloakAdminService,
   ) {}
+
+  /**
+   * Add each user's Keycloak id. The rows carry the portal's own id,
+   * which is what `items?ownerId=` needs, but PATCH /admin/users/:id
+   * takes the Keycloak id, and the two differ for seeded accounts
+   * and for a username re-created in Keycloak. Looked up by username,
+   * as the scheduled auto-disable does. Falls back to the local id
+   * when Keycloak is not set up or the lookup fails.
+   */
+  private async withKeycloakIds<T extends { id: string; username: string }>(
+    rows: T[],
+  ): Promise<Array<T & { keycloakId: string }>> {
+    const kc = this.keycloak;
+    if (!kc?.isConfigured()) return rows.map((r) => ({ ...r, keycloakId: r.id }));
+    return Promise.all(
+      rows.map(async (r) => ({
+        ...r,
+        keycloakId:
+          (await kc.findUserIdByUsername(r.username).catch(() => null)) ?? r.id,
+      })),
+    );
+  }
 
   @Get('summary')
   summary(@CurrentUser() user: AuthUser) {
@@ -94,8 +118,8 @@ export class HousekeepingController {
   }
 
   @Get('stale-users')
-  staleUsers(@CurrentUser() user: AuthUser) {
-    return this.housekeeping.staleUsers(user.orgId);
+  async staleUsers(@CurrentUser() user: AuthUser) {
+    return this.withKeycloakIds(await this.housekeeping.staleUsers(user.orgId));
   }
 
   @Get('large-items')
@@ -133,8 +157,13 @@ export class HousekeepingController {
    * handful of monthly partitions and stops being useful for
    * "which dataset is eating disk?". This drills down to
    * data_layer:itemId:layerId.
+   *
+   * The scope list is install-wide (top 50 over the whole observation
+   * table), so it is an operator view like its two neighbours. An
+   * admin of another org saw other orgs' layer ids and row counts.
    */
   @Get('largest-data-layers')
+  @UseGuards(OperatorOrgGuard)
   largestDataLayers(@CurrentUser() user: AuthUser) {
     return this.housekeeping.largestDataLayers(user.orgId);
   }
@@ -161,12 +190,14 @@ export class HousekeepingController {
    * before the schedule fires.
    */
   @Get('expiring-users')
-  expiringUsers(
+  async expiringUsers(
     @CurrentUser() user: AuthUser,
     @Query('within') within?: string,
   ) {
     const days = parseWithin(within, 30);
-    return this.housekeeping.expiringUsers(user.orgId, days);
+    return this.withKeycloakIds(
+      await this.housekeeping.expiringUsers(user.orgId, days),
+    );
   }
 
   // -------------------------------------------------------------
@@ -207,18 +238,27 @@ export class HousekeepingController {
   @Post('run')
   @UseGuards(OperatorOrgGuard)
   async runNow(@CurrentUser() user: AuthUser) {
-    void this.audit?.record({
-      orgId: user.orgId,
-      actorUserId: user.id,
-      action: 'housekeeping.run',
-      targetType: 'housekeeping',
-      targetId: 'schedule',
-      outcome: 'succeeded',
-    });
-    return this.schedule.runOnce({
-      trigger: 'manual',
-      startedBy: user.id,
-    });
+    // Audited after the run with its real outcome. Recording
+    // "succeeded" up front logged refused (409) and failed runs as
+    // successes.
+    let outcome: 'succeeded' | 'failed' = 'failed';
+    try {
+      const result = await this.schedule.runOnce({
+        trigger: 'manual',
+        startedBy: user.id,
+      });
+      outcome = result.status === 'succeeded' ? 'succeeded' : 'failed';
+      return result;
+    } finally {
+      void this.audit?.record({
+        orgId: user.orgId,
+        actorUserId: user.id,
+        action: 'housekeeping.run',
+        targetType: 'housekeeping',
+        targetId: 'schedule',
+        outcome,
+      });
+    }
   }
 
   /**

@@ -2,6 +2,7 @@
 'use client';
 
 import { FileUp, Loader2, XCircle } from 'lucide-react';
+import { apiErrorMessage } from '@/lib/api-error';
 import { formatBytes } from '@/lib/format-bytes';
 import { useT } from '@/lib/i18n/locale-context';
 
@@ -162,6 +163,11 @@ export async function uploadWithProgress<T>(
     bytesUploaded: number;
   }) => void,
   ref: { current: XMLHttpRequest | null } = { current: null },
+  // The response is one JSON document unless the caller says
+  // otherwise. The layer import endpoint streams NDJSON, so its
+  // caller passes a parser that reads the terminal event instead.
+  parse: (text: string) => T = (text) => JSON.parse(text) as T,
+  errorText?: (status: number, text: string) => string,
 ): Promise<T> {
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
@@ -183,22 +189,30 @@ export async function uploadWithProgress<T>(
     xhr.onload = () => {
       if (xhr.status >= 200 && xhr.status < 300) {
         try {
-          resolve(JSON.parse(xhr.responseText) as T);
+          resolve(parse(xhr.responseText));
         } catch (err) {
-          reject(
-            new Error(
-              `Server response was not JSON: ${(err as Error).message}`,
-            ),
-          );
+          if (err instanceof SyntaxError) {
+            reject(
+              new Error(`Server response was not JSON: ${err.message}`),
+            );
+          } else {
+            reject(err as Error);
+          }
         }
+      } else if (errorText) {
+        reject(new Error(errorText(xhr.status, xhr.responseText)));
+      } else if (xhr.status >= 400 && xhr.status <= 599) {
+        // Read the body the way every fetch caller does, so a portal
+        // refusal shows its sentence rather than the JSON wrapper, and
+        // a proxy's HTML error page is not dumped into the message.
+        void apiErrorMessage(
+          new Response(xhr.responseText, { status: xhr.status }),
+          'Upload failed',
+        )
+          .catch(() => `Upload failed (${xhr.status}).`)
+          .then((message) => reject(new Error(message)));
       } else {
-        reject(
-          new Error(
-            `Upload failed (${xhr.status}): ${
-              xhr.responseText || xhr.statusText || 'no body'
-            }`,
-          ),
-        );
+        reject(new Error(`Upload failed (${xhr.status}).`));
       }
     };
     xhr.onerror = () => reject(new Error('Network error during upload.'));

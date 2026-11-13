@@ -12,6 +12,7 @@ import {
   S3Client,
 } from '@aws-sdk/client-s3';
 import {
+  BadRequestException,
   ConflictException,
   Injectable,
   Logger,
@@ -20,6 +21,7 @@ import {
   Optional,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { validateCronExpression } from 'cron';
 import { Prisma } from '@prisma/client';
 
 import { PrismaService } from '../prisma/prisma.service.js';
@@ -183,6 +185,28 @@ interface BackupManifest {
  *   - Incremental / differential backups: out of scope. Full dump
  *     every run keeps restore simple; retention handles the space.
  */
+/** Archive member with per-object metadata, written after the objects. */
+export const MINIO_META_MEMBER = 'minio-meta.json';
+
+export interface MinioArchiveMeta {
+  version: 1;
+  /** Object key to its stored Content-Type. */
+  contentTypes: Record<string, string>;
+  /** Keys in the listing that were deleted before they were read. */
+  skipped: string[];
+}
+
+/** S3 says the object is gone (deleted after the listing). */
+export function isNoSuchKey(err: unknown): boolean {
+  if (typeof err !== 'object' || err === null) return false;
+  const e = err as { name?: unknown; Code?: unknown; $metadata?: { httpStatusCode?: unknown } };
+  return (
+    e.name === 'NoSuchKey' ||
+    e.Code === 'NoSuchKey' ||
+    e.$metadata?.httpStatusCode === 404
+  );
+}
+
 @Injectable()
 export class BackupService implements OnModuleInit {
   private readonly log = new Logger(BackupService.name);
@@ -299,9 +323,11 @@ export class BackupService implements OnModuleInit {
    */
   async updateConfig(patch: BackupConfigPatch, updatedBy: string | null) {
     // Validate before we touch the DB: nothing worse than committing
-    // half a change and then bailing.
+    // half a change and then bailing. Every refusal here is the
+    // admin's input, so it is a 400 with the sentence shown in the
+    // form, not a plain Error that Nest reports as a 500.
     if (patch.scheduleMode && !this.isScheduleMode(patch.scheduleMode)) {
-      throw new Error(`Unknown scheduleMode: ${patch.scheduleMode}`);
+      throw new BadRequestException(`Unknown scheduleMode: ${patch.scheduleMode}`);
     }
     if (patch.scheduleHour !== undefined) {
       this.requireRange('scheduleHour', patch.scheduleHour, 0, 23);
@@ -322,13 +348,39 @@ export class BackupService implements OnModuleInit {
       // Bare minimum shape check; the cron library is authoritative.
       // We just want to reject obviously-wrong input before saving.
       if (!/^(\S+\s+){4}\S+$/.test(patch.customCron.trim())) {
-        throw new Error(
+        throw new BadRequestException(
           'Custom schedule must be a 5-field cron expression (e.g. "0 2 * * *")',
+        );
+      }
+      // The scheduler builds a CronJob from it later and only logs a
+      // rejection, so a bad value was saved and shown as active while
+      // nothing ever ran. Ask the same library now.
+      const check = validateCronExpression(patch.customCron.trim());
+      if (!check.valid) {
+        throw new BadRequestException(
+          `Custom schedule is not a valid cron expression: ${check.error?.message ?? 'rejected by the scheduler'}`,
         );
       }
     }
 
+    if (typeof patch.archiveDirectory === 'string' && patch.archiveDirectory.trim()) {
+      patch = {
+        ...patch,
+        archiveDirectory: this.allowedArchiveDirectory(patch.archiveDirectory.trim()),
+      };
+    }
+
     const row = await this.ensureConfigRow();
+    // Custom mode with no expression saved fine and then scheduled
+    // nothing, so automatic backups silently stopped. Check the mode
+    // and expression the row will end up with, not just the patch.
+    const nextMode = patch.scheduleMode ?? row.scheduleMode;
+    const nextCron = patch.customCron !== undefined ? patch.customCron : row.customCron;
+    if (nextMode === 'custom' && !nextCron?.trim()) {
+      throw new BadRequestException(
+        'Custom schedule must be a 5-field cron expression (e.g. "0 2 * * *")',
+      );
+    }
     const updated = await this.prisma.backupConfig.update({
       where: { id: row.id },
       data: {
@@ -486,8 +538,39 @@ export class BackupService implements OnModuleInit {
 
   private requireRange(field: string, v: number, lo: number, hi: number) {
     if (!Number.isInteger(v) || v < lo || v > hi) {
-      throw new Error(`${field} must be an integer between ${lo} and ${hi}`);
+      throw new BadRequestException(`${field} must be an integer between ${lo} and ${hi}`);
     }
+  }
+
+  /**
+   * The archive directory an admin may pick: BACKUP_DIR or a folder
+   * inside it, or inside one of BACKUP_ALLOWED_DIRS (a list separated
+   * by the platform's path delimiter, for an operator who mounts a
+   * second volume). Backups create, fill and prune whatever folder is
+   * set here, so it cannot be an arbitrary path in the container.
+   * Returns the resolved absolute path.
+   */
+  private allowedArchiveDirectory(raw: string): string {
+    const roots = [
+      this.envBackupDir(),
+      ...(this.cfg.get<string>('BACKUP_ALLOWED_DIRS', '') ?? '')
+        .split(path.delimiter)
+        .map((d) => d.trim())
+        .filter(Boolean)
+        .map((d) => path.resolve(d)),
+    ];
+    const dir = path.resolve(raw);
+    const inside = roots.some((root) => {
+      const rel = path.relative(root, dir);
+      return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
+    });
+    if (!inside) {
+      throw new BadRequestException(
+        `Backups can only be saved in ${roots.join(' or ')}, or a folder inside it. ` +
+          'Ask whoever runs the server to add another location with BACKUP_ALLOWED_DIRS.',
+      );
+    }
+    return dir;
   }
 
   private envBackupDir(): string {
@@ -1136,14 +1219,33 @@ export class BackupService implements OnModuleInit {
       open: () => createReadStream(dumpPath),
     };
 
+    // Per-object metadata the tar member cannot carry. Restore puts
+    // each object back with its Content-Type; without it every file
+    // came back as application/octet-stream.
+    const contentTypes: Record<string, string> = {};
+    const skipped: string[] = [];
     for (const { key } of keys) {
       // Clean exit point between members. A cancel landing mid-body is
       // handled by the signal itself, which aborts the in-flight GET.
       checkCancelled();
-      const get = await this.s3.send(
-        new GetObjectCommand({ Bucket: this.bucket, Key: key }),
-        { abortSignal: signal },
-      );
+      let get;
+      try {
+        get = await this.s3.send(
+          new GetObjectCommand({ Bucket: this.bucket, Key: key }),
+          { abortSignal: signal },
+        );
+      } catch (err) {
+        // The portal keeps serving while a backup runs, so an object
+        // listed at the start can be deleted before its turn. That is
+        // not a reason to lose the whole night's backup: leave it out
+        // and say so. Every other error still fails the run.
+        if (isNoSuchKey(err)) {
+          skipped.push(key);
+          continue;
+        }
+        throw err;
+      }
+      if (get.ContentType) contentTypes[key] = get.ContentType;
       const body = get.Body;
       if (!body) {
         // Previously a bare `continue`, which dropped the object from
@@ -1165,6 +1267,23 @@ export class BackupService implements OnModuleInit {
           body instanceof Readable ? body : Readable.fromWeb(body as never),
       };
     }
+
+    if (skipped.length > 0) {
+      this.log.warn(
+        `Backup left out ${skipped.length} object(s) deleted while it ran: ${skipped
+          .slice(0, 20)
+          .join(', ')}${skipped.length > 20 ? ', ...' : ''}`,
+      );
+    }
+    // Last, because it is only known once every GET has answered. The
+    // manifest's counts were taken from the listing before that, so
+    // the skipped keys are recorded here as well.
+    const meta: MinioArchiveMeta = { version: 1, contentTypes, skipped };
+    yield {
+      kind: 'buffer',
+      name: MINIO_META_MEMBER,
+      body: Buffer.from(JSON.stringify(meta), 'utf8'),
+    };
   }
 
   // ---------------------------------------------------------------
@@ -1271,14 +1390,21 @@ export class BackupService implements OnModuleInit {
         if (!newest || st.mtime > newest) newest = st.mtime;
       }
     } catch (err) {
+      // The raw error names the path and tells "missing" from "no
+      // permission", which turns this into a probe of the server's
+      // file system. The detail goes to the log only.
+      this.log.warn(
+        `Backup health could not read ${cfg.archiveDirectory}: ${
+          err instanceof Error ? err.message : err
+        }`,
+      );
       return {
         lastArchiveAt: null,
         ageHours: null,
         archiveCount: 0,
         overdue: true,
-        reason: `Could not read the archive directory: ${
-          err instanceof Error ? err.message : err
-        }`,
+        reason:
+          'Could not read the archive directory. Check that it exists and the portal can read it; the server log has the details.',
       };
     }
     if (!newest) {

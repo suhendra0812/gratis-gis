@@ -13,7 +13,10 @@ import { IsBoolean, IsOptional } from 'class-validator';
 
 import { CurrentUser } from '../auth/current-user.decorator.js';
 import type { AuthUser } from '../auth/auth-sync.service.js';
-import { MaintenanceModeService } from '../backup/maintenance-mode.service.js';
+import {
+  MaintenanceModeService,
+  failedRestore,
+} from '../backup/maintenance-mode.service.js';
 import { OperatorOrgGuard } from '../backup/operator-org.js';
 import { AdminAuditService } from './admin-audit.service.js';
 import { AdminGuard } from './admin.guard.js';
@@ -28,10 +31,9 @@ class MaintenanceDto {
   acknowledgeFailure?: boolean;
 }
 
-export function failedRestore(reason: string | null): boolean {
-  if (!reason) return false;
-  return /restore/i.test(reason) && /fail|inconsistent/i.test(reason);
-}
+// Lives with the maintenance service so the backup controller can use
+// it too; re-exported here for existing callers.
+export { failedRestore } from '../backup/maintenance-mode.service.js';
 
 @ApiTags('admin', 'maintenance')
 @ApiBearerAuth()
@@ -59,7 +61,10 @@ export class MaintenanceAdminController {
   @HttpCode(200)
   async set(@CurrentUser() user: AuthUser, @Body() body: MaintenanceDto) {
     const before = this.mode.snapshot();
-    if (!body.active && failedRestore(before.reason)) {
+    // Both directions are refused under a failed-restore hold. Turning
+    // it "on" replaced the stored failure reason, after which "off"
+    // no longer saw the hold and cleared the flag.
+    if (failedRestore(before.reason)) {
       await this.audit.record({
         orgId: user.orgId,
         actorUserId: user.id,
@@ -67,7 +72,7 @@ export class MaintenanceAdminController {
         targetType: 'maintenance',
         targetId: user.orgId,
         outcome: 'failed',
-        detail: { active: false, held: true },
+        detail: { active: body.active, held: true },
       });
       throw new ConflictException(
         'A failed restore is holding maintenance. It stays on until a restore finishes. The portal will not serve a partial database.',

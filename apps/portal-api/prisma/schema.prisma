@@ -627,6 +627,9 @@ model Item {
   /// references forever.
   offlinePackages OfflinePackage[]
   formSubmissions FormSubmission[]    @relation("FormSubmissionForm")
+  /// Run history of a script item. Cascade: a purged script takes its
+  /// logs, source snapshots and notebooks with it.
+  scriptRuns      ScriptRun[]
 
   @@index([orgId, access])
   @@index([ownerId])
@@ -642,6 +645,7 @@ model Item {
   @@index([publicGeoBoundaryId], map: "item_public_geo_boundary_id_idx")
   @@index([orgGeoBoundaryId], map: "item_org_geo_boundary_id_idx")
   @@index([data(ops: JsonbPathOps)], type: Gin, map: "item_data_gin")
+  @@index([storageRef], map: "item_storage_ref_idx")
   @@map("item")
 }
 
@@ -677,11 +681,6 @@ model ItemCredential {
   @@map("item_credential")
 }
 
-/// A share row grants access to an item for a single principal (either a
-/// user or a group). We use (principalType, principalId) rather than two
-/// nullable FK columns so the composite primary key is always valid.
-/// Enforcement that the principalId actually references the correct table
-/// is handled by a CHECK constraint + trigger in an SQL migration.
 /// Point-in-time snapshot of an Item's `data` blob. Written every
 /// time someone replaces the data (upload / paste / bulk import) so
 /// an admin can revert to a prior state if the new data was wrong
@@ -948,6 +947,11 @@ model HousekeepingRun {
   @@map("housekeeping_run")
 }
 
+/// A share row grants access to an item for a single principal (either a
+/// user or a group). We use (principalType, principalId) rather than two
+/// nullable FK columns so the composite primary key is always valid.
+/// Enforcement that the principalId actually references the correct table
+/// is handled by a CHECK constraint + trigger in an SQL migration.
 model ItemShare {
   itemId        String          @map("item_id") @db.Uuid
   principalType PrincipalType   @map("principal_type")
@@ -1046,6 +1050,7 @@ model FeatureAttachment {
   item Item @relation(fields: [itemId], references: [id], onDelete: Cascade)
 
   @@index([itemId, layerId, featureId])
+  @@index([storageKey], map: "feature_attachment_storage_key_idx")
   @@map("feature_attachment")
 }
 
@@ -1393,10 +1398,10 @@ enum ImportJobStatus {
 ///
 /// Worker model: a single in-process Nest worker polls every 1s
 /// for status='queued', claims one row at a time with an UPDATE...
-/// RETURNING transaction, and runs the existing GDAL stream
-/// against the COPY-based write path. Single-replica safe (only
-/// one portal-api today). Future scale-out can swap in PG NOTIFY
-/// or a real queue without touching this row's shape.
+/// RETURNING transaction (FOR UPDATE SKIP LOCKED), and runs the
+/// existing GDAL stream against the COPY-based write path. Prod runs
+/// more than one portal-api replica, so the claim must stay safe
+/// for concurrent workers.
 model ImportJob {
   id                String          @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   /// Item the import targets. data_layer items only today.
@@ -1509,8 +1514,9 @@ enum AgoImportJobStatus {
 /// This row decouples the import wall-clock from the user's
 /// attention. The controller's /run/start endpoint creates an
 /// AgoImportJob row in status='queued' and returns the id; the
-/// background runner (the same node process the controller runs
-/// in -- single replica today) picks it up immediately and writes
+/// background runner (the same node process the controller ran
+/// in; prod runs more than one replica, and only that process holds
+/// the job's token) picks it up immediately and writes
 /// progress as it goes. The wizard polls /run/:id every second
 /// and renders a progress bar; refresh / close / reopen are safe
 /// because the row carries everything needed to render the
@@ -1800,6 +1806,8 @@ model ScriptRun {
   /// fails rows whose beat goes stale instead of leaving the UI to
   /// spin forever.
   heartbeatAt DateTime? @map("heartbeat_at") @db.Timestamptz(6)
+
+  script Item @relation(fields: [scriptId], references: [id], onDelete: Cascade, onUpdate: Cascade)
 
   /// Worker poll: oldest queued row first.
   @@index([state, createdAt])

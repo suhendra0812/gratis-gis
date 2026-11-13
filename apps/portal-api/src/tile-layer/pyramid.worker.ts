@@ -38,16 +38,17 @@ import { isOwnStorageUrl, storageBasesFromEnv } from './pyramid-storage-url.js';
  * Build pipeline:
  *
  *   1. Download the COG from MinIO to a local temp file.
- *   2. `gdal2tiles.py -z 0-N` writes a {z}/{x}/{y}.png tree
- *      under workDir/tiles/.
- *   3. `pmtiles convert workDir/tiles workDir/out.pmtiles` packs
- *      the tree into a PMTiles archive.
- *   4. Upload the PMTiles to MinIO under a fresh storage key.
- *   5. Patch the item: set format='pmtiles', point storageKey/
+ *   2. `gdalwarp` to web mercator when the source is not already
+ *      in it (MBTiles requires 3857).
+ *   3. `gdal_translate -of MBTILES` writes the base zoom, then
+ *      `gdaladdo` builds the overview levels down to z0.
+ *   4. `pmtiles convert tiles.mbtiles out.pmtiles` packs it.
+ *   5. Upload the PMTiles to MinIO under a fresh storage key.
+ *   6. Patch the item: set format='pmtiles', point storageKey/
  *      storageUrl at the new PMTiles, populate pmtilesStorageKey/
  *      pmtilesStorageUrl/pmtilesSizeBytes, flip tileUrl from
  *      cog:// to pmtiles://, mark processingState='pmtiles-ready'.
- *   6. The original COG stays in MinIO (referenced by
+ *   7. The original COG stays in MinIO (referenced by
  *      cogStorageKey/Url/SizeBytes) as the archival source.
  *
  * Failure handling: a thrown error during the build flips the
@@ -151,7 +152,9 @@ export class TileLayerPyramidWorker implements OnModuleInit {
     try {
       const staleBefore = new Date(Date.now() - STALE_HEARTBEAT_MS);
       // Fail-out first so the re-arm pass only touches under-budget
-      // rows. Heartbeat age uses COALESCE(tilingHeartbeatAt,
+      // rows. The gg_try_* casts return NULL for a value that does not
+      // parse: these fields sit in owner-writable item data, and one
+      // bad value used to fail the whole statement for every org. Heartbeat age uses COALESCE(tilingHeartbeatAt,
       // tilingStartedAt) so pre-heartbeat claims still reclaim.
       const failed = await this.prisma.$executeRaw`
         UPDATE "item"
@@ -164,23 +167,23 @@ export class TileLayerPyramidWorker implements OnModuleInit {
         WHERE type = 'tile-layer'::"ItemType"
           AND "data_json"->>'processingState' = 'tiling'
           AND COALESCE(
-            ("data_json"->>'tilingHeartbeatAt')::timestamptz,
-            ("data_json"->>'tilingStartedAt')::timestamptz
+            gg_try_timestamptz("data_json"->>'tilingHeartbeatAt'),
+            gg_try_timestamptz("data_json"->>'tilingStartedAt')
           ) < ${staleBefore}
-          AND COALESCE(("data_json"->>'tilingAttempts')::int, 0) >= ${MAX_TILING_ATTEMPTS - 1}
+          AND COALESCE(gg_try_int("data_json"->>'tilingAttempts'), 0) >= ${MAX_TILING_ATTEMPTS - 1}
       `;
       const rearmed = await this.prisma.$executeRaw`
         UPDATE "item"
         SET "updated_at" = NOW(),
         "data_json" = ("data_json" - 'tilingHeartbeatAt') || jsonb_build_object(
           'processingState', 'cog-ready',
-          'tilingAttempts', COALESCE(("data_json"->>'tilingAttempts')::int, 0) + 1
+          'tilingAttempts', COALESCE(gg_try_int("data_json"->>'tilingAttempts'), 0) + 1
         )
         WHERE type = 'tile-layer'::"ItemType"
           AND "data_json"->>'processingState' = 'tiling'
           AND COALESCE(
-            ("data_json"->>'tilingHeartbeatAt')::timestamptz,
-            ("data_json"->>'tilingStartedAt')::timestamptz
+            gg_try_timestamptz("data_json"->>'tilingHeartbeatAt'),
+            gg_try_timestamptz("data_json"->>'tilingStartedAt')
           ) < ${staleBefore}
       `;
       if (failed > 0 || rearmed > 0) {
@@ -280,7 +283,25 @@ export class TileLayerPyramidWorker implements OnModuleInit {
       );
       return;
     }
-    const maxZoom = data.maxZoom ?? 18;
+    // item.data is owner-writable through older paths; a huge value
+    // here built a billion-entry argument list and crashed the worker.
+    // #186: elevation (DEM) layers never get a PNG pyramid; the
+    // re-encode would destroy the float elevation values. Their
+    // web-tiled COG serves directly through /file.cog. The claim has
+    // already flipped the row to 'tiling', so a bare return would
+    // leave it there until reclaim re-arms it and, after three
+    // rounds, reports a crash. Put it straight back to 'ready'
+    // without downloading anything.
+    if ((data as { dem?: boolean }).dem) {
+      const applied = await this.applyPatch(
+        itemId,
+        { processingState: 'ready' } as Partial<TileLayerData>,
+        claimedCogKey,
+      );
+      if (applied) await this.clearTilingError(itemId, claimedCogKey);
+      return;
+    }
+    const maxZoom = clampMaxZoom(data.maxZoom);
     const onBeat = () => this.beatHeartbeat(itemId);
 
     const workDir = await mkdtemp(join(tmpdir(), 'tile-pyramid-'));
@@ -292,7 +313,7 @@ export class TileLayerPyramidWorker implements OnModuleInit {
         `Building pyramid for item ${itemId} (zoom 0-${maxZoom})`,
       );
 
-      // Download the COG to local scratch.  gdal2tiles needs a
+      // Download the COG to local scratch.  The GDAL steps need a
       // local input path.  Prefer the storage KEY through the S3
       // SDK: since item-tile-layer became a private kind, the
       // persisted cogStorageUrl is an API-relative path
@@ -308,14 +329,6 @@ export class TileLayerPyramidWorker implements OnModuleInit {
       }
       await onBeat();
 
-      // #186: elevation (DEM) layers never get a PNG pyramid; the
-      // re-encode would destroy the float elevation values. Their
-      // web-tiled COG serves directly through /file.cog. Guard here
-      // so a stray retry-pyramid on a dem item is a no-op instead
-      // of a corruption.
-      if ((data as { dem?: boolean }).dem) {
-        return;
-      }
       // COG -> web-mercator MBTiles -> PMTiles. The previous
       // gdal2tiles + `pmtiles convert <dir>` sequence silently
       // stopped working when the pmtiles binary moved to
@@ -607,7 +620,9 @@ export class TileLayerPyramidWorker implements OnModuleInit {
         'COG URL is not this portal\'s object storage. Re-upload the raster so it has a storage key.',
       );
     }
-    const res = await fetch(url);
+    // The host check above covers the first hop only; a redirect
+    // could lead anywhere, so none is followed.
+    const res = await fetch(url, { redirect: 'error' });
     if (!res.ok) {
       throw new Error(`Download failed (HTTP ${res.status})`);
     }
@@ -730,4 +745,11 @@ export class TileLayerPyramidWorker implements OnModuleInit {
       });
     });
   }
+}
+
+/** A pyramid's top zoom: an integer 0..24, 18 when unset or invalid. */
+export function clampMaxZoom(value: unknown): number {
+  const n = typeof value === 'number' ? value : Number.NaN;
+  if (!Number.isFinite(n)) return 18;
+  return Math.min(24, Math.max(0, Math.floor(n)));
 }

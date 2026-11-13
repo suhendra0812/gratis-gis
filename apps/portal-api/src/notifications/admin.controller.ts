@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
+import { UuidPathPipe } from '../common/uuid-shape.js';
 import {
   BadRequestException,
   Body,
@@ -6,6 +7,7 @@ import {
   Delete,
   Get,
   HttpCode,
+  Logger,
   Optional,
   Param,
   Post,
@@ -22,7 +24,9 @@ import {
   IsString,
   Max,
   Min,
+  ValidateNested,
 } from 'class-validator';
+import { Type } from 'class-transformer';
 import {
   NotificationChannel,
   NotificationStatus,
@@ -36,7 +40,12 @@ import { CurrentUser } from '../auth/current-user.decorator.js';
 import type { AuthUser } from '../auth/auth-sync.service.js';
 import { PrismaService } from '../prisma/prisma.service.js';
 import { NOTIFICATION_TYPES, getTypeMeta } from './notification-types.js';
-import { SystemSettingsService, type SmtpConfig } from './system-settings.service.js';
+import {
+  SMTP_PASSWORD_AGAIN,
+  SystemSettingsService,
+  sameSmtpTarget,
+  type SmtpConfig,
+} from './system-settings.service.js';
 import { NotificationTypeDefaultService } from './notification-type-default.service.js';
 import { NotificationTemplateService } from './notification-template.service.js';
 import { EmailTransport } from './email-transport.js';
@@ -61,12 +70,33 @@ class SaveSmtpDto {
   @IsOptional() @IsString() password?: string;
 }
 
-class TestSmtpDto {
+export class TestSmtpDto {
   @IsEmail() to!: string;
   /** When provided, send the test against this unsaved config so the
    *  admin can verify before clicking Save. Optional; falls back to
-   *  the stored config. */
-  @IsOptional() config?: SaveSmtpDto;
+   *  the stored config. ValidateNested + Type make SaveSmtpDto's own
+   *  rules (port range, types) run; without them none did. */
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => SaveSmtpDto)
+  config?: SaveSmtpDto;
+}
+
+/**
+ * What an SMTP test tells the caller. The raw error can carry the
+ * first line any TCP service sends back (an SSH banner, an HTTP
+ * status line), which turned the test into a port and banner probe of
+ * the API's network. The full text goes to the log instead.
+ */
+export function describeSmtpTestError(err: unknown): string {
+  const msg = err instanceof Error ? err.message : String(err);
+  const code = /^SMTP server returned (\d{3})/.exec(msg)?.[1];
+  if (code === '535' || code === '530' || code === '534') {
+    return `The SMTP server refused the login (${code}).`;
+  }
+  if (code) return `The SMTP server answered ${code} and did not accept the message.`;
+  if (/timed out/i.test(msg)) return 'Timed out talking to the SMTP server.';
+  return 'Could not complete an SMTP conversation with that host and port.';
 }
 
 class PutDefaultDto {
@@ -145,6 +175,8 @@ interface RecentRow {
 @UseGuards(AdminGuard)
 @Controller('admin/notifications')
 export class NotificationsAdminController {
+  private readonly log = new Logger('NotificationsAdmin');
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly settings: SystemSettingsService,
@@ -291,7 +323,9 @@ export class NotificationsAdminController {
    */
   @Post(':id/retry')
   @UseGuards(OperatorOrgGuard)
-  async retry(@Param('id') id: string): Promise<{ retried: boolean }> {
+  async retry(
+    @Param('id', new UuidPathPipe('Notification not found')) id: string,
+  ): Promise<{ retried: boolean }> {
     const r = await this.prisma.notification.updateMany({
       where: { id, status: { in: ['failed', 'sending'] } },
       data: {
@@ -447,10 +481,17 @@ export class NotificationsAdminController {
       };
       // If admin left password blank in the form but a stored one
       // exists, fall back to the stored value so the test exercises
-      // the real config the worker would use.
+      // the real config the worker would use. Only for the same
+      // server, port and user: sending it to any other host would
+      // hand the stored password to whoever runs that host.
       if (c.password === undefined) {
         const stored = await this.settings.getSmtpConfig();
-        if (stored?.password) c.password = stored.password;
+        if (stored?.password) {
+          if (!sameSmtpTarget(stored, c)) {
+            throw new BadRequestException(SMTP_PASSWORD_AGAIN);
+          }
+          c.password = stored.password;
+        }
       }
       return c;
     })();
@@ -470,10 +511,12 @@ export class NotificationsAdminController {
       );
       return { ok: true };
     } catch (err) {
-      return {
-        ok: false,
-        error: err instanceof Error ? err.message : String(err),
-      };
+      this.log.warn(
+        `SMTP test to ${cfg.host}:${cfg.port} failed: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+      return { ok: false, error: describeSmtpTestError(err) };
     }
   }
 

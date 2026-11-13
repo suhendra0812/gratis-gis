@@ -127,6 +127,11 @@ interface Props {
    * re-fetches on focus to pick up other viewers' edits.
    */
   initialDrawings: DrawingSet[];
+  /**
+   * Bumped by the parent when another map tool (select, feature
+   * editing) takes over the clicks; the armed markup tool stands down.
+   */
+  standDownSignal?: number;
 }
 
 export function MarkupPanel({
@@ -142,6 +147,7 @@ export function MarkupPanel({
   onPromoted,
   onDrawActiveChange,
   initialDrawings,
+  standDownSignal,
 }: Props) {
   const t = useT();
   const fmt = useFormat();
@@ -167,6 +173,9 @@ export function MarkupPanel({
   const activeSetIdRef = useRef(activeSetId);
   activeSetIdRef.current = activeSetId;
   const collabRef = useRef<DrawingsCollabSession | null>(null);
+  // Bumped to reopen the room after the socket drops on its own.
+  const [collabEpoch, setCollabEpoch] = useState(0);
+  const collabRetriesRef = useRef(0);
 
   // R1-presence-crdt: signed-in co-editors share a Yjs room for the
   // active markup set. Anonymous stays on REST LWW.
@@ -177,9 +186,22 @@ export function MarkupPanel({
       return;
     }
     let cancelled = false;
+    let retryTimer: ReturnType<typeof setTimeout> | null = null;
     void (async () => {
       try {
         const session = await openDrawingsCollabSession({
+          // A dropped socket used to leave a dead session in place:
+          // its stale doc kept feeding the panel and the next save
+          // overwrote other editors' shapes. Drop it and reopen after
+          // a growing pause (one try a minute at most); the new
+          // room's sync replaces the stale features.
+          onClosed: () => {
+            if (cancelled) return;
+            collabRef.current = null;
+            const wait = Math.min(2000 * 2 ** collabRetriesRef.current, 60_000);
+            collabRetriesRef.current += 1;
+            retryTimer = setTimeout(() => setCollabEpoch((n) => n + 1), wait);
+          },
           mapId,
           drawingSetId: activeSetId,
           onFeatures: (features) => {
@@ -205,10 +227,11 @@ export function MarkupPanel({
     })();
     return () => {
       cancelled = true;
+      if (retryTimer) clearTimeout(retryTimer);
       collabRef.current?.close();
       collabRef.current = null;
     };
-  }, [open, currentUser, activeSetId, mapId, onDrawingsChange]);
+  }, [open, currentUser, activeSetId, mapId, onDrawingsChange, collabEpoch]);
   const toolRef = useRef(tool);
   toolRef.current = tool;
 
@@ -222,6 +245,15 @@ export function MarkupPanel({
   useEffect(() => {
     if (!open && tool !== 'off') setTool('off');
   }, [open, tool]);
+
+  // Another tool was chosen after this one: disarm. Skips the first
+  // run so mounting does not count as a signal.
+  const standDownSeen = useRef(standDownSignal);
+  useEffect(() => {
+    if (standDownSeen.current === standDownSignal) return;
+    standDownSeen.current = standDownSignal;
+    setTool('off');
+  }, [standDownSignal]);
 
   const drawActive = open && tool !== 'off';
   useEffect(() => {
@@ -340,19 +372,23 @@ export function MarkupPanel({
     async (setId: string, feature: DrawingFeature) => {
       const set = drawingsRef.current.find((s) => s.id === setId);
       if (!set || !canEditSet(set)) return;
-      const nextFeatures = [...set.features, feature];
       setBusy(true);
       setError(null);
       try {
+        // Ask the server to append to the set as it stands. Sending
+        // the whole array built from this page's copy erased any pin
+        // added since: a second quick pin from the same base, or
+        // another reviewer's pins on a page loaded earlier.
         const updated = await portalJson<DrawingSet>(
           `/api/portal/items/${mapId}/drawings/${setId}`,
           {
             method: 'PATCH',
-            body: JSON.stringify({ features: nextFeatures }),
+            body: JSON.stringify({ appendFeatures: [feature] }),
           },
         );
+        // Responses can land out of order; keep the newer copy.
         const nextSets = drawingsRef.current.map((s) =>
-          s.id === setId ? updated : s,
+          s.id === setId && !(s.updatedAt > updated.updatedAt) ? updated : s,
         );
         setDrawings(nextSets);
         onDrawingsChange(nextSets);
@@ -609,8 +645,17 @@ export function MarkupPanel({
     if (!firstEditable) setTool('off');
   }, [drawings, activeSetId, canEditSet]);
 
-  // Silence unused refresh warning (kept for future focus refetch).
-  void refresh;
+  // Pick up other viewers' markup when the tab regains focus, as the
+  // prop doc above promises. Nothing called refresh before, so a page
+  // open for an hour kept showing (and building on) its first copy.
+  useEffect(() => {
+    if (!open) return;
+    const onFocus = () => {
+      void refresh();
+    };
+    window.addEventListener('focus', onFocus);
+    return () => window.removeEventListener('focus', onFocus);
+  }, [open, refresh]);
 
   if (!open) return null;
   return (

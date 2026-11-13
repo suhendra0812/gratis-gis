@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-import { ConflictException } from '@nestjs/common';
+import { BadRequestException, ConflictException } from '@nestjs/common';
 
 import type { AuthUser } from '../auth/auth-sync.service.js';
 import { PolicyService } from '../policy/policy.service.js';
@@ -222,6 +222,24 @@ describe('ItemsService list paging and projection', () => {
     expect(countWhere).toMatchObject({ type: 'map' });
   });
 
+  it('filters by data.source.itemId when sourceItemId is set', async () => {
+    const prisma = makePrisma();
+    const svc = makeService(prisma);
+    const src = '33333333-3333-4333-8333-333333333333';
+    await svc.listPaged(makeUser(), {
+      lite: false,
+      type: 'derived_layer',
+      mine: true,
+      sourceItemId: src,
+      limit: 50,
+    });
+    const where = (prisma.item.findMany.mock.calls[0]![0] as { where: unknown })
+      .where;
+    expect(where).toMatchObject({
+      data: { path: ['source', 'itemId'], equals: src },
+    });
+  });
+
   it('annotates web_app rows with _template in lite mode', async () => {
     const prisma = makePrisma();
     const webAppId = '22222222-2222-2222-2222-222222222222';
@@ -248,7 +266,98 @@ describe('ItemsService list paging and projection', () => {
   });
 });
 
+describe('ItemsService full list of maps', () => {
+  it('applies the per-layer viewer filter to maps the caller cannot edit', async () => {
+    const prisma = makePrisma();
+    prisma.item.findMany.mockResolvedValue([
+      makeListRow({
+        ownerId: 'someone-else',
+        data: {
+          layers: [
+            {
+              id: 'hidden',
+              access: {
+                policy: 'custom',
+                entries: [
+                  { principalType: 'user', principalId: 'x', view: true },
+                ],
+              },
+            },
+            { id: 'open' },
+          ],
+        },
+      }),
+    ]);
+    const svc = makeService(prisma);
+    const rows = (await svc.list(makeUser(), { lite: false })) as Array<{
+      data: { layers: Array<{ id: string; access?: { entries?: unknown } }> };
+    }>;
+    expect(rows[0]!.data.layers.map((l) => l.id)).toEqual(['open']);
+  });
+});
+
+describe('ItemsService list owner filter', () => {
+  it('lets a non-admin filter by another owner, still inside visibleWhere', async () => {
+    const prisma = makePrisma();
+    const svc = makeService(prisma);
+    await svc.list(makeUser(), {
+      lite: true,
+      ownerId: '22222222-2222-2222-2222-222222222222',
+    });
+    const args = prisma.item.findMany.mock.calls[0]![0] as {
+      where: Record<string, unknown>;
+    };
+    expect(JSON.stringify(args.where)).toContain(
+      '22222222-2222-2222-2222-222222222222',
+    );
+    // The visibility clause is still there.
+    expect(JSON.stringify(args.where)).toContain('org-1');
+  });
+});
+
 describe('ItemsController GET /items paging contract', () => {
+  it('refuses a malformed ownerId with 400 instead of reaching Prisma', async () => {
+    const listPaged = jest.fn().mockResolvedValue({ rows: [], total: 0 });
+    const { controller, res } = makeController({ listPaged });
+    await expect(
+      controller.list(
+        makeUser(),
+        res as never,
+        undefined,
+        undefined,
+        undefined,
+        'not-a-uuid',
+      ),
+    ).rejects.toBeInstanceOf(BadRequestException);
+    expect(listPaged).not.toHaveBeenCalled();
+  });
+
+  it('passes a uuid sourceItemId through and refuses a malformed one', async () => {
+    const listPaged = jest.fn().mockResolvedValue({ rows: [], total: 0 });
+    const { controller, res } = makeController({ listPaged });
+    const src = '33333333-3333-4333-8333-333333333333';
+    const call = (value: string) =>
+      controller.list(
+        makeUser(),
+        res as never,
+        undefined, // mine
+        undefined, // type
+        undefined, // q
+        undefined, // ownerId
+        undefined, // bbox
+        undefined, // buffer
+        undefined, // lite
+        undefined, // full
+        undefined, // limit
+        undefined, // offset
+        undefined, // sharedWithGroupId
+        value,
+      );
+    await call(src);
+    expect((listPaged.mock.calls[0]![1] as Record<string, unknown>).sourceItemId).toBe(src);
+    await expect(call('nope')).rejects.toBeInstanceOf(BadRequestException);
+  });
+
   it('defaults to lite + limit 500 and emits X-Total-Count', async () => {
     const listPaged = jest
       .fn()
@@ -609,5 +718,33 @@ describe('listTrash owner projection', () => {
       fullName: true,
       avatarUrl: true,
     });
+  });
+});
+
+// Smart folders and the trash used to load every matching row with its
+// full data blob before trimming the result.
+describe('smart folder and trash loads', () => {
+  const me = { id: 'u1', orgId: 'o1', orgRole: 'admin', groupIds: [] } as never;
+
+  it('a smart folder asks list() for a bounded lite page', async () => {
+    const svc = Object.create(ItemsService.prototype) as ItemsService;
+    const list = jest.fn(async () => []);
+    Object.assign(svc, { list });
+    await (svc as unknown as {
+      resolveSmartFolder: (u: unknown, q: unknown) => Promise<unknown>;
+    }).resolveSmartFolder(me, { q: 'parcels', limit: 50 });
+    expect(list).toHaveBeenCalledWith(
+      me,
+      expect.objectContaining({ q: 'parcels', limit: 50, lite: true }),
+    );
+  });
+
+  it('the trash list leaves out item data', async () => {
+    const svc = Object.create(ItemsService.prototype) as ItemsService;
+    const findMany = jest.fn(async () => []);
+    Object.assign(svc, { prisma: { item: { findMany } } });
+    await svc.listTrash(me);
+    const calls = findMany.mock.calls as unknown as Array<[{ omit?: unknown }]>;
+    expect(calls[0]![0].omit).toEqual({ data: true });
   });
 });

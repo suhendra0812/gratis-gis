@@ -3,6 +3,18 @@
 
 import { isStaleItemSave, useGuardedItemPatch } from '@/lib/item-version';
 import { useT } from '@/lib/i18n/locale-context';
+import { inlineMdToHtml } from '@/lib/inline-md';
+import {
+  allWidgetsDeep,
+  containerFlowsInRow,
+  defaultFollowMap,
+  findWidgetWithParent,
+  insertionIndex,
+  isFlowContainer,
+  moveWidgetInTree,
+  pastDragThreshold,
+  removeWidgetDeep,
+} from '@/lib/custom-app-tree';
 import {
   useCallback,
   useEffect,
@@ -98,6 +110,7 @@ import {
   newSourceId,
 } from '@gratis-gis/shared-types';
 import type { AppThemePresetId, AssetRef } from '@gratis-gis/shared-types';
+import { resolveAssetRefSync } from '@gratis-gis/shared-types';
 import { AssetPicker } from '@/components/asset-picker';
 import type { CustomBasemap } from '@/lib/custom-basemap';
 import { MapCanvas } from '../map/map-canvas';
@@ -308,7 +321,8 @@ export function CustomAppDetail({
   const widgetMapIdsKey = useMemo(() => {
     const pairs: string[] = [];
     for (const p of app.pages) {
-      for (const w of p.widgets) {
+      // Deep: a Map inside a container or tab has its own override too.
+      for (const w of allWidgetsDeep(p.widgets)) {
         if (w.kind === 'map' && w.config.kind === 'map' && w.config.mapId) {
           pairs.push(`${w.id}:${w.config.mapId}`);
         }
@@ -325,7 +339,7 @@ export function CustomAppDetail({
         const uniqueMapIds = new Set<string>();
         if (app.mapId) uniqueMapIds.add(app.mapId);
         for (const p of app.pages) {
-          for (const w of p.widgets) {
+          for (const w of allWidgetsDeep(p.widgets)) {
             if (
               w.kind === 'map' &&
               w.config.kind === 'map' &&
@@ -372,7 +386,7 @@ export function CustomAppDetail({
         // Per-widget override map.
         const widgetMap: Record<string, MapData> = {};
         for (const p of app.pages) {
-          for (const w of p.widgets) {
+          for (const w of allWidgetsDeep(p.widgets)) {
             if (
               w.kind === 'map' &&
               w.config.kind === 'map' &&
@@ -405,9 +419,16 @@ export function CustomAppDetail({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [app.mapId, widgetMapIdsKey]);
 
+  // The app object most recently rendered.  Save compares it with
+  // the one it sent: an edit made while the request was in flight
+  // replaces `app`, and that edit has not been saved.
+  const latestAppRef = useRef(app);
+  latestAppRef.current = app;
+
   const onSave = useCallback(async () => {
     setSaving(true);
     setError(null);
+    const sent = app;
     try {
       const data: WebAppData = {
         version: 1,
@@ -423,7 +444,10 @@ export function CustomAppDetail({
         const txt = await res.text().catch(() => '');
         throw new Error(`save failed: ${res.status} ${txt}`);
       }
-      setDirty(false);
+      // Only what was sent is saved.  Leave the app dirty when it
+      // changed during the request, so Save stays enabled for those
+      // later edits.
+      if (latestAppRef.current === sent) setDirty(false);
       setSaved(true);
       setTimeout(() => setSaved(false), 2000);
     } catch (err) {
@@ -515,9 +539,7 @@ export function CustomAppDetail({
           // dashboard means.
           const mapWidget =
             cur.blueprint === 'dashboard'
-              ? cur.pages
-                  .flatMap((pg) => pg.widgets ?? [])
-                  .find((w) => w.kind === 'map')
+              ? defaultFollowMap(cur.pages, activePageIdx)
               : undefined;
           const added: AppDataSource[] = fresh.map((c) => ({
             id: newSourceId(),
@@ -537,7 +559,7 @@ export function CustomAppDetail({
         /* The Layers panel's own add control remains; a failed
            discovery just means the author adds by hand as before. */
       });
-  }, []);
+  }, [activePageIdx]);
 
   // #22: build the picker option list from themeItems (server-
   // loaded) with a fall-through to the in-process starter list so
@@ -608,11 +630,10 @@ export function CustomAppDetail({
   }, [app.themePresetId, themeItems]);
 
   // #22: capture the currently-applied theme tokens and stamp them
-  // as a new `theme` item.  Reads from the live CSS variables on
-  // the document root rather than the source tokens object so an
-  // author who customized via the older theme.accent / theme.bg
-  // block also captures those overrides.  Opens the new theme
-  // item in a new tab.
+  // as a new `theme` item.  Takes the resolved preset tokens (the
+  // selected theme item, else the built-in preset), so overrides
+  // made through the older theme.accent / theme.bg block are not
+  // captured.  Opens the new theme item in a new tab.
   const [savingAsTheme, setSavingAsTheme] = useState(false);
   const onSaveAsTheme = useCallback(async () => {
     setSavingAsTheme(true);
@@ -660,7 +681,6 @@ export function CustomAppDetail({
     resolvedThemeTokens,
     themeOptions,
   ]);
-  void savingAsTheme;
 
   const updatePage = useCallback(
     (idx: number, patch: Partial<CustomPage>) => {
@@ -876,9 +896,9 @@ export function CustomAppDetail({
           ),
         };
       });
-      // Select the new widget so the right rail shows it. For tab-
-      // routed drops, select the freshly-added child id; the parent
-      // tabs widget stays the click target on canvas.
+      // Select the new widget so the right rail shows it. A drop
+      // routed into a tab selects nothing; the tabs widget stays the
+      // click target on canvas.
       setSelectedWidgetId(routedToTab ? null : widget.id);
       setDirty(true);
     },
@@ -973,19 +993,14 @@ export function CustomAppDetail({
   // uses to draw the Map widget.
   const previewStatesByMapWidget = useMemo<Record<string, MapData>>(() => {
     const out: Record<string, MapData> = {};
-    const walk = (list: CustomWidget[]) => {
-      for (const w of list) {
-        if (w.kind === 'map') {
-          const md = widgetMapData[w.id] ?? previewMapData;
-          if (md) out[w.id] = md;
-        }
-        // Containers nest, and a map inside a tab is still a map the
-        // legend beside it can follow.
-        const kids = (w as { children?: CustomWidget[] }).children;
-        if (Array.isArray(kids)) walk(kids);
+    // Containers nest, and a map inside a tab is still a map the
+    // legend beside it can follow.
+    for (const w of allWidgetsDeep(activePage?.widgets ?? [])) {
+      if (w.kind === 'map') {
+        const md = widgetMapData[w.id] ?? previewMapData;
+        if (md) out[w.id] = md;
       }
-    };
-    walk(activePage?.widgets ?? []);
+    }
     return out;
   }, [activePage?.widgets, widgetMapData, previewMapData]);
   // #22 WYSIWYG: deep-find the selected widget so clicking a tool
@@ -1058,6 +1073,11 @@ export function CustomAppDetail({
   // properties (default map, targets, page title, etc.).
   const rightPanelContent = selectedWidget ? (
     <WidgetProperties
+      // Keyed by widget so every piece of local inspector state
+      // (draft text boxes such as the chart's range edges) starts
+      // fresh for the newly selected widget instead of carrying the
+      // previous widget's text into it.
+      key={selectedWidget.id}
       widget={selectedWidget}
       canEdit={canEdit}
       pageWidgets={activePage.widgets}
@@ -1099,6 +1119,7 @@ export function CustomAppDetail({
       }}
       onPickMap={() => setPickingMap({ scope: 'app' })}
       onSaveAsTheme={onSaveAsTheme}
+      savingAsTheme={savingAsTheme}
     />
   );
 
@@ -1212,7 +1233,10 @@ export function CustomAppDetail({
           if (pickingMap?.scope === 'widget') {
             // Per-widget override path: write to widget.config.mapId.
             const wid = pickingMap.widgetId;
-            const widget = activePage.widgets.find((w) => w.id === wid);
+            // Deep lookup: a Map inside a container or tab is not in
+            // the page-level array, and a miss here dropped the pick
+            // while the map's layers were still adopted below.
+            const widget = findWidgetWithParent(activePage.widgets, wid)?.widget;
             if (widget && widget.kind === 'map') {
               updateWidget(wid, {
                 config: {
@@ -2013,7 +2037,7 @@ const GAP_PX = 1.5;
 /**
  * Floor for the canvas's working width. On viewports narrower than
  * this the designer pane scrolls horizontally instead of squeezing
- * the 48-column grid into a sliver. The earlier 1400px fixed-width
+ * the 192-column grid into a sliver. The earlier 1400px fixed-width
  * experiment was reverted (broke narrow viewports + made wide
  * displays cramped); the new model is responsive container widgets
  * inside a flexible grid, so the grid's min-width is just a
@@ -2094,8 +2118,6 @@ interface ActiveGesture {
   widgetWidth: number;
   widgetHeight: number;
 }
-
-const DRAG_THRESHOLD_PX = 4;
 
 function Canvas({
   widgets,
@@ -2207,6 +2229,11 @@ function Canvas({
   // Phone preview: the page as the runtime stacks it below 768px.
   // Read-only; layout is authored on the desktop grid.
   const [phonePreview, setPhonePreview] = useState(false);
+  // True only once the pointer has moved past the drag threshold.
+  // Map previews freeze (unmount their MapLibre instance) during a
+  // drag; keying that on `gesture` froze and reloaded every map on a
+  // plain click that only selects a card.
+  const [dragging, setDragging] = useState(false);
   // #53 WYSIWYG: drag-from-palette drop-target indicator.  When
   // a palette tile is hovered over a container's footprint, we
   // light up that container with an outline so the user knows
@@ -2233,10 +2260,7 @@ function Canvas({
   // Compute the canvas's grid extent from the widgets' bottom-most
   // row so dropping a widget below the current content extends the
   // canvas naturally. Always at least 12 rows so a fresh app has
-  // room to drop into.  #98: partitioned containers are excluded
-  // because their grid layout is ignored at render time -- counting
-  // their (often arbitrary, e.g. 16 or 240) rowSpan would inflate
-  // the grid height for no visual reason.
+  // room to drop into.
   // #80: the RUNTIME's row formula, verbatim (see totalRows in
   // CustomRuntimeClient). The designer used to run fixed 3px rows
   // with its own row count, which meant a rowSpan bought a
@@ -2325,7 +2349,7 @@ function Canvas({
     let targetLayout: CustomLayout | null = null;
     if (host) {
       const targetEl = canvasRef.current?.querySelector(
-        `[data-widget-id="${host.id}"]`,
+        `[data-widget-id="${CSS.escape(host.id)}"]`,
       ) as HTMLElement | null;
       if (targetEl) {
         const tr = targetEl.getBoundingClientRect();
@@ -2378,7 +2402,7 @@ function Canvas({
       // rely on currentTarget (which may be a resize-handle button
       // for resize gestures).
       const widgetEl = canvasRef.current?.querySelector(
-        `[data-widget-id="${widget.id}"], [data-child-id="${widget.id}"]`,
+        `[data-widget-id="${CSS.escape(widget.id)}"], [data-child-id="${CSS.escape(widget.id)}"]`,
       ) as HTMLElement | null;
       const rect = widgetEl?.getBoundingClientRect();
       const grabOffsetX = rect ? e.clientX - rect.left : 0;
@@ -2434,11 +2458,14 @@ function Canvas({
     }
     /**
      * Compute the insertion index inside a container based on the
-     * cursor position vs. existing children's bounding rects.  For
-     * a row-layout container, slot picked by cursor X; for column-
-     * layout, by cursor Y.  Children that match `excludeId` (the
-     * widget currently being dragged) are skipped so a reorder
-     * doesn't count its own slot.
+     * cursor position vs. existing children's bounding rects.  The
+     * axis comes from the container's config (dock, overlay and menu
+     * containers always stack vertically): measuring the children's
+     * spread picked the wrong axis whenever there was only one
+     * sibling.  Only direct children count, not the children of a
+     * nested container.  The dragged widget is skipped, so the result
+     * is an index into the list with that widget taken out, which is
+     * what moveWidgetInTree expects.
      */
     function indexInContainer(
       containerId: string,
@@ -2446,41 +2473,32 @@ function Canvas({
       excludeId: string,
     ): number {
       const containerEl = canvasRef.current?.querySelector(
-        `[data-widget-id="${containerId}"]`,
+        `[data-widget-id="${CSS.escape(containerId)}"]`,
       ) as HTMLElement | null;
       if (!containerEl) return 0;
       const children = Array.from(
         containerEl.querySelectorAll('[data-child-id]'),
       ) as HTMLElement[];
       const relevant = children.filter(
-        (c) => c.getAttribute('data-child-id') !== excludeId,
+        (c) =>
+          c.getAttribute('data-child-id') !== excludeId &&
+          c.parentElement?.closest('[data-widget-id]') === containerEl,
       );
       if (relevant.length === 0) return 0;
-      // Detect layout direction by the children's center spread:
-      // wider horizontal range than vertical → row, else column.
+      const parentCfg = findWidgetWithParent(widgets, containerId)?.widget.config;
+      const isRow =
+        parentCfg?.kind === 'container' ? containerFlowsInRow(parentCfg) : false;
       const rects = relevant.map((c) => c.getBoundingClientRect());
-      const xs = rects.map((r) => r.left + r.width / 2);
-      const ys = rects.map((r) => r.top + r.height / 2);
-      const xSpread = Math.max(...xs) - Math.min(...xs);
-      const ySpread = Math.max(...ys) - Math.min(...ys);
-      const isRow = xSpread >= ySpread;
-      const cursor = isRow ? e.clientX : e.clientY;
-      const centers = isRow ? xs : ys;
-      // Insertion index: first center > cursor; else after last.
-      for (let i = 0; i < centers.length; i++) {
-        if (cursor < centers[i]!) return i;
-      }
-      return relevant.length;
+      const centers = rects.map((r) =>
+        isRow ? r.left + r.width / 2 : r.top + r.height / 2,
+      );
+      return insertionIndex(centers, isRow ? e.clientX : e.clientY);
     }
     function onMove(e: MouseEvent) {
       const dx = e.clientX - g.startX;
       const dy = e.clientY - g.startY;
-      if (
-        Math.abs(dx) < DRAG_THRESHOLD_PX &&
-        Math.abs(dy) < DRAG_THRESHOLD_PX
-      ) {
-        return;
-      }
+      if (!pastDragThreshold(dx, dy)) return;
+      setDragging(true);
       // #96: track hovered container for drop-target highlight on
       // every move kind.  The mouseup handler reads the cursor's
       // final position; this just keeps the visual indicator in
@@ -2518,16 +2536,13 @@ function Canvas({
           const isFlowParent =
             parentCfg?.kind === 'container' &&
             containerArrange(parentCfg) === 'free' &&
-            (parentCfg.position === undefined ||
-              parentCfg.position === 'inline' ||
-              parentCfg.position === 'sticky-top' ||
-              parentCfg.position === 'sticky-bottom');
+            isFlowContainer(parentCfg);
           if (!isFlowParent) return;
           // Compute the cursor's position WITHIN the parent
           // container's rect and map it to a col / row in the
           // 1..192 space the renderer uses.
           const parentEl = canvasRef.current?.querySelector(
-            `[data-widget-id="${g.srcParentId}"]`,
+            `[data-widget-id="${CSS.escape(g.srcParentId)}"]`,
           ) as HTMLElement | null;
           if (!parentEl) return;
           const prect = parentEl.getBoundingClientRect();
@@ -2625,7 +2640,13 @@ function Canvas({
       // gesture crossed a parent boundary (reparent), reordered
       // within the same container, or was a pure top-level grid
       // move (already applied live by onMove).
-      if (g.kind === 'move') {
+      //
+      // A release within the drag threshold is a click: it only
+      // selects.  Without this check a plain click on a dock child
+      // ran a reorder (and could reparent a nested child) and marked
+      // the app as changed.
+      const dragged = pastDragThreshold(e.clientX - g.startX, e.clientY - g.startY);
+      if (g.kind === 'move' && dragged) {
         const { col, row } = cursorToGrid(e);
         // #98: same DOM hit-test as the dragover handler so the
         // mouseup decision matches the live drop-target highlight.
@@ -2684,11 +2705,23 @@ function Canvas({
               : indexInContainer(targetParentId, e, g.widgetId);
           let pageLayout: CustomLayout | null = null;
           if (targetParentId === null) {
+            // Children inside a container carry placeholder 1x1 spans
+            // (containers ignore spans).  Taking those onto the page
+            // grid made a 6 px speck, so fall back to the kind's
+            // default size.
+            const moving = findWidgetWithParent(widgets, g.widgetId)?.widget;
+            const placeholder =
+              g.startLayout.colSpan <= 1 && g.startLayout.rowSpan <= 1;
+            const spans =
+              placeholder && moving
+                ? defaultLayoutForKind(moving.kind)
+                : g.startLayout;
+            const colSpan = Math.min(spans.colSpan, GRID_COLS - clampCol(col) + 1);
             pageLayout = {
               col: clampCol(col),
               row: Math.max(1, row),
-              colSpan: g.startLayout.colSpan,
-              rowSpan: g.startLayout.rowSpan,
+              colSpan,
+              rowSpan: spans.rowSpan,
             };
           } else {
             // #99: compute the destination col/row from the cursor
@@ -2696,7 +2729,7 @@ function Canvas({
             // child will render at that spot in the free-position
             // FlowContainer.
             const targetEl = canvasRef.current?.querySelector(
-              `[data-widget-id="${targetParentId}"]`,
+              `[data-widget-id="${CSS.escape(targetParentId)}"]`,
             ) as HTMLElement | null;
             if (targetEl) {
               const tr = targetEl.getBoundingClientRect();
@@ -2711,11 +2744,14 @@ function Canvas({
               const yRatio = (e.clientY - tr.top - g.grabOffsetY) / travelY;
               const xClamp = Math.max(0, Math.min(1, xRatio));
               const yClamp = Math.max(0, Math.min(1, yRatio));
+              // Keep the widget's own spans: the container ignores
+              // them, and keeping them means the widget gets its size
+              // back if it is dragged out onto the page again.
               pageLayout = {
                 col: Math.max(1, Math.min(192, Math.round(xClamp * 191) + 1)),
                 row: Math.max(1, Math.min(192, Math.round(yClamp * 191) + 1)),
-                colSpan: 1,
-                rowSpan: 1,
+                colSpan: g.startLayout.colSpan,
+                rowSpan: g.startLayout.rowSpan,
               };
             }
           }
@@ -2735,10 +2771,7 @@ function Canvas({
           const isFlowParent =
             parentCfg?.kind === 'container' &&
             containerArrange(parentCfg) === 'free' &&
-            (parentCfg.position === undefined ||
-              parentCfg.position === 'inline' ||
-              parentCfg.position === 'sticky-top' ||
-              parentCfg.position === 'sticky-bottom');
+            isFlowContainer(parentCfg);
           if (!isFlowParent) {
             const targetIndex = indexInContainer(
               targetParentId,
@@ -2767,6 +2800,7 @@ function Canvas({
         if (pushed.size > 0) onPushRows(pushed);
       }
       setDropTargetId(null);
+      setDragging(false);
       setGesture(null);
     }
     window.addEventListener('mousemove', onMove);
@@ -2871,7 +2905,7 @@ function Canvas({
       selected={w.id === selectedId}
       canEdit={canEdit && !preview}
       gesturing={Boolean(gesture && gesture.widgetId === w.id)}
-      anyGesture={gesture !== null}
+      anyGesture={dragging}
       isDropTarget={w.id === dropTargetId}
       // #363: prefer the widget's own map override if one is
       // resolved, else fall through to the app default.
@@ -3316,7 +3350,7 @@ function WidgetCard({
             so the routing into children isn't a mystery. */}
         {isDropTarget && canEdit ? (
           <div className="pointer-events-none absolute inset-0 z-20 flex items-center justify-center bg-accent/10">
-            <span className="rounded-md bg-accent px-3 py-1.5 text-xs font-medium text-accent-ink shadow-md">
+            <span className="rounded-md bg-accent px-3 py-1.5 text-xs font-medium text-accent-foreground shadow-md">
               Drop into {label}
             </span>
           </div>
@@ -3440,12 +3474,12 @@ function WidgetCard({
             frozen={anyGesture}
           />
         </div>
-      ) : widget.config.kind === 'image' && widget.config.url ? (
-        // Live preview for the Image widget when a URL is set. No
+      ) : widget.config.kind === 'image' && imageWidgetSrc(widget.config) ? (
+        // Live preview for the Image widget when a source is set. No
         // sandboxing concerns -- it's a read-only <img>.
         <div className="relative flex flex-1 overflow-hidden bg-surface-2/40">
           <img
-            src={widget.config.url}
+            src={imageWidgetSrc(widget.config) ?? undefined}
             alt={widget.config.alt ?? ''}
             className="pointer-events-none h-full w-full"
             style={{ objectFit: widget.config.objectFit ?? 'contain' }}
@@ -3539,10 +3573,8 @@ function WidgetCard({
         </>
       )}
       {/* Resize handles -- only visible when the widget is selected
-          AND the user can edit. Three handles cover the common cases
-          (right edge for width, bottom edge for height, bottom-right
-          corner for both). 8-handle resize can come if anyone
-          actually misses it. Each handle stops propagation so the
+          AND the user can edit. Eight handles: four edges and four
+          corners (#97). Each handle stops propagation so the
           mousedown doesn't fall through to the body's move gesture. */}
       {selected && canEdit && !inCell && <ResizeHandles onResizeStart={onResizeStart} />}
     </div>
@@ -3664,7 +3696,7 @@ function widgetPlaceholderText(
     case 'basemap-gallery':
       return 'Tiles of available basemaps';
     case 'image':
-      return 'Paste an image URL in the right rail';
+      return 'Pick an image in the right rail';
     case 'button':
       return 'Configure label + link in the right rail';
     case 'tool':
@@ -3735,7 +3767,7 @@ function summarizeWidget(w: CustomWidget): string {
     case 'filter':
       return w.config.field ? `by ${w.config.field}` : '(pick a field)';
     case 'image':
-      return w.config.url ? 'image set' : 'no url';
+      return imageWidgetSrc(w.config) ? 'image set' : 'no image';
     case 'button':
       return w.config.label || 'no label';
     case 'tool':
@@ -3821,44 +3853,6 @@ async function discoverMapTargets(mapId: string): Promise<TargetCandidate[]> {
     });
   }
   return out;
-}
-
-/**
- * Friendly name for a target row: the sublayer's label from its
- * data_layer item, cached across renders. Falls back to the raw
- * ids while loading or if the item is gone.
- */
-function TargetLabel({
-  dataLayerId,
-  layerKey,
-}: {
-  dataLayerId: string;
-  layerKey: string;
-}) {
-  const [label, setLabel] = useState<string | null>(null);
-  useEffect(() => {
-    let cancelled = false;
-    void (async () => {
-      try {
-        const res = await fetch(`/api/portal/items/${dataLayerId}`);
-        if (!res.ok || cancelled) return;
-        const item = (await res.json()) as {
-          title?: string;
-          data?: { layers?: Array<{ id?: string; label?: string }> };
-        };
-        const sub = item.data?.layers?.find((l) => l.id === layerKey);
-        if (!cancelled) {
-          setLabel(sub?.label ? `${item.title} · ${sub.label}` : item.title ?? null);
-        }
-      } catch {
-        /* keep the fallback */
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [dataLayerId, layerKey]);
-  return <>{label ?? `${dataLayerId.slice(0, 8)} / ${layerKey}`}</>;
 }
 
 /**
@@ -3956,6 +3950,7 @@ function AppProperties({
   onClearMap,
   onPickMap,
   onSaveAsTheme,
+  savingAsTheme,
 }: {
   app: CustomAppData;
   page: CustomPage;
@@ -3981,6 +3976,9 @@ function AppProperties({
   onClearMap: () => void;
   onPickMap: () => void;
   onSaveAsTheme: () => void;
+  /** True while a save-as-theme request is in flight; the button is
+   *  disabled so a double click cannot create two theme items. */
+  savingAsTheme: boolean;
 }) {
   const sources = app.sources ?? [];
   return (
@@ -4079,13 +4077,9 @@ function AppProperties({
           label="Theme"
           hint="Visual preset applied to every widget inside the app. Pick from your org's catalog or save the current look as a new theme."
         >
-          {themeOptions.length === 0 ? (
-            <p className="rounded-md border border-dashed border-border bg-surface-1 px-2 py-1.5 text-xs text-muted">
-              No theme items in your org yet. Ask an admin to restore
-              starter themes via Admin &rarr; Housekeeping.
-            </p>
-          ) : (
-            <div className="grid grid-cols-1 gap-1.5">
+          {/* themeOptions is never empty: it falls back to the
+              built-in starter list when the org has no theme items. */}
+          <div className="grid grid-cols-1 gap-1.5">
               {themeOptions.map((opt) => {
                 // Match either by the user-saved item id or by the
                 // starter kind (back-compat with apps saved before
@@ -4127,11 +4121,10 @@ function AppProperties({
                   </button>
                 );
               })}
-            </div>
-          )}
+          </div>
           <button
             type="button"
-            disabled={!canEdit}
+            disabled={!canEdit || savingAsTheme}
             onClick={onSaveAsTheme}
             className="mt-2 inline-flex w-full items-center justify-center gap-1 rounded-md border border-dashed border-border bg-surface-1 px-2 py-1.5 text-xs text-ink-1 hover:bg-surface-2 disabled:cursor-not-allowed disabled:opacity-50"
           >
@@ -4197,8 +4190,12 @@ function AppProperties({
                   key={src.id}
                   source={src}
                   siblings={sources.filter((o) => o.id !== src.id)}
-                  mapWidgets={(page.widgets ?? []).filter(
-                    (w) => w.kind === 'map',
+                  // Sources are app-level, so list maps on every page
+                  // (and inside containers), named by page.
+                  mapOptions={app.pages.flatMap((pg) =>
+                    allWidgetsDeep(pg.widgets ?? [])
+                      .filter((w) => w.kind === 'map')
+                      .map((w) => ({ id: w.id, pageTitle: pg.title })),
                   )}
                   canEdit={canEdit}
                   onChange={(patch) => {
@@ -4233,7 +4230,7 @@ function AppProperties({
                 // what they meant. Any other app leaves it unset.
                 const mapWidget =
                   app.blueprint === 'dashboard'
-                    ? (page.widgets ?? []).find((w) => w.kind === 'map')
+                    ? defaultFollowMap(app.pages, app.pages.indexOf(page))
                     : undefined;
                 const next: AppDataSource = {
                   id: newSourceId(),
@@ -4268,14 +4265,14 @@ function AppProperties({
 function SourceRow({
   source,
   siblings,
-  mapWidgets,
+  mapOptions,
   canEdit,
   onChange,
   onRemove,
 }: {
   source: AppDataSource;
   siblings: AppDataSource[];
-  mapWidgets: CustomWidget[];
+  mapOptions: Array<{ id: string; pageTitle: string }>;
   canEdit: boolean;
   onChange: (patch: SourcePatch) => void;
   onRemove: () => void;
@@ -4334,11 +4331,21 @@ function SourceRow({
           className="min-w-0 flex-1 rounded border border-border bg-surface-1 px-1 py-0.5 text-2xs"
         >
           <option value="">every record</option>
-          {mapWidgets.map((w) => (
-            <option key={w.id} value={w.id}>
-              only what is on Map · {w.id.slice(2, 10)}
+          {mapOptions.map((m) => (
+            <option key={m.id} value={m.id}>
+              only what is on Map · {m.pageTitle} · {m.id.slice(2, 10)}
             </option>
           ))}
+          {/* A followed map that is gone: show it rather than let the
+              browser fall back to "every record" while the stored
+              value still narrows the layer. */}
+          {source.followMapWidgetId &&
+          !source.via &&
+          !mapOptions.some((m) => m.id === source.followMapWidgetId) ? (
+            <option value={source.followMapWidgetId}>
+              only what is on a removed map (pick another)
+            </option>
+          ) : null}
           {siblings.length > 0 ? (
             <option value="@via">only rows linked to another layer</option>
           ) : null}
@@ -4536,8 +4543,8 @@ function WidgetProperties({
           </Field>
         </div>
         <p className="text-xs leading-snug text-muted">
-          Drag the widget on the canvas to move; drag the right,
-          bottom, or corner handles to resize. Or enter cells here.
+          Drag the widget on the canvas to move; drag any edge or
+          corner handle to resize. Or enter cells here.
         </p>
         <label className="flex items-start gap-2 text-xs text-ink-1">
           <input
@@ -4767,18 +4774,15 @@ function WidgetConfigForm({
             }
           >
             <select
-              value={(() => {
-                if (atCfg.sourceId !== undefined) {
-                  const i = appTargets.findIndex(
-                    (s) => s.id === atCfg.sourceId,
-                  );
-                  if (i >= 0) return i;
-                }
-                return atCfg.targetIndex;
-              })()}
+              value={targetSelectIndex(
+                atCfg.targetIndex,
+                atCfg.sourceId,
+                appTargets,
+              )}
               disabled={!canEdit || appTargets.length === 0}
               onChange={(e) => {
                 const i = Number(e.target.value);
+                if (i < 0) return;
                 const id = appTargets[i]?.id;
                 onChangeConfig({
                   targetIndex: i,
@@ -4790,11 +4794,21 @@ function WidgetConfigForm({
               {appTargets.length === 0 ? (
                 <option value={0}>(no targets)</option>
               ) : (
-                appTargets.map((src, i) => (
-                  <option key={src.id} value={i}>
-                    {src.label?.trim() || src.layer.layerKey}
-                  </option>
-                ))
+                <>
+                  {/* The widget names a removed layer: say so rather
+                      than showing a layer it does not read. */}
+                  {targetSelectIndex(atCfg.targetIndex, atCfg.sourceId, appTargets) ===
+                  -1 ? (
+                    <option value={-1} disabled>
+                      (layer removed, pick one)
+                    </option>
+                  ) : null}
+                  {appTargets.map((src, i) => (
+                    <option key={src.id} value={i}>
+                      {src.label?.trim() || src.layer.layerKey}
+                    </option>
+                  ))}
+                </>
               )}
             </select>
           </Field>
@@ -6207,6 +6221,7 @@ function FeatureMutationWidgetConfigEditor({
   config: {
     kind: 'create-feature' | 'edit-feature' | 'delete-feature';
     mapWidgetId: string;
+    sourceId?: string;
     targetIndex?: number;
     label?: string;
   };
@@ -6220,9 +6235,18 @@ function FeatureMutationWidgetConfigEditor({
   // target in the bound map -- it builds a templates palette /
   // listens for clicks across all of them.  When set, the legacy
   // single-target behavior kicks in.
+  //
+  // The pin is written as `sourceId` too, and read by id first, the
+  // same as every other widget: the runtime resolves it by id, so a
+  // removed or reordered source cannot move the pin to another layer.
   const sentinel = -1;
-  const currentValue =
-    typeof config.targetIndex === 'number' ? config.targetIndex : sentinel;
+  const removed = -2;
+  const pinned =
+    config.sourceId !== undefined || typeof config.targetIndex === 'number';
+  const pinnedIndex = pinned
+    ? targetSelectIndex(config.targetIndex, config.sourceId, appTargets)
+    : sentinel;
+  const currentValue = pinned && pinnedIndex < 0 ? removed : pinnedIndex;
   return (
     <div className="space-y-3">
       <MapBindingPicker
@@ -6246,13 +6270,23 @@ function FeatureMutationWidgetConfigEditor({
             // delete here: the WidgetConfigForm wrapper does
             // `{...current, ...patch}` and undefined overwrites the
             // stored value.
-            onChangeConfig({ targetIndex: n === sentinel ? undefined : n });
+            if (n === removed) return;
+            onChangeConfig(
+              n === sentinel
+                ? { targetIndex: undefined, sourceId: undefined }
+                : { targetIndex: n, sourceId: appTargets[n]?.id },
+            );
           }}
           className="h-9 w-full rounded-md border border-border bg-surface-0 px-2 text-sm focus:border-accent focus:outline-hidden"
         >
           <option value={sentinel}>
             All editable targets (recommended)
           </option>
+          {currentValue === removed ? (
+            <option value={removed} disabled>
+              (pinned layer removed, pick one)
+            </option>
+          ) : null}
           {appTargets.map((src, i) => (
             <option key={src.id} value={i}>
               {`Only ${src.label?.trim() || src.layer.layerKey}`}
@@ -6545,6 +6579,10 @@ function DesignerChild({
         }}
         onMouseDown={(e) => onChildMoveStart(child, parentId, e)}
         data-child-id={child.id}
+        // Also a container host: the drop and move hit test only
+        // looks at data-widget-id, so without it a nested container
+        // was invisible and drops went to the outer container.
+        data-widget-id={child.id}
         className={`relative cursor-pointer ${
           isSelected ? 'outline-solid outline-2 outline-accent' : ''
         }`}
@@ -7289,45 +7327,6 @@ function markdownToHtml(md: string): string {
     parts.push(`<p>${inlineMdToHtml(t).replace(/\n/g, '<br>')}</p>`);
   }
   return parts.join('');
-}
-
-function inlineMdToHtml(s: string): string {
-  // Preserve color spans verbatim BEFORE the HTML escape pass so a
-  // `<span style="color:#xxx">text</span>` written by the rich-text
-  // editor's color picker survives the round-trip.  Each match is
-  // stashed under a placeholder; we escape the rest, run markdown
-  // transforms, then restore canonical spans.  Only the exact shape
-  // (color style, no other attributes, no nested tags) survives --
-  // arbitrary HTML never passes through.
-  const colorSpans: string[] = [];
-  const pre = s.replace(
-    /<span style="color:\s*(#[0-9a-fA-F]{3,8})">([^<]+)<\/span>/g,
-    (_m, color, text) => {
-      const escaped = String(text)
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;');
-      const idx = colorSpans.length;
-      colorSpans.push(`<span style="color: ${color}">${escaped}</span>`);
-      return ` COLOR${idx} `;
-    },
-  );
-  let out = pre
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;');
-  out = out.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_m, text, href) => {
-    const safeHref = safeHttpHref(String(href));
-    if (!safeHref) return String(text);
-    return `<a href="${safeHref.replace(/"/g, '&quot;')}">${text}</a>`;
-  });
-  out = out.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
-  out = out.replace(/\*([^*]+)\*/g, '<em>$1</em>');
-  out = out.replace(/`([^`]+)`/g, '<code>$1</code>');
-  out = out.replace(/ COLOR(\d+) /g, (_m, idx) => {
-    return colorSpans[Number(idx)] ?? '';
-  });
-  return out;
 }
 
 /**
@@ -8325,6 +8324,42 @@ function patchHeader(
  * runtime drops them, so the canvas shows the same empty state the
  * published app would.
  */
+/** The parts of a data_layer item the designer's pickers read. */
+type LayerItemLite = {
+  title?: string;
+  data?: {
+    version?: number;
+    layers?: Array<{
+      id?: string;
+      label?: string;
+      geometryType?: string | null;
+      fields?: Array<{ name?: string; type?: string }>;
+    }>;
+  };
+};
+
+/**
+ * Data_layer item reads shared by every layer picker and field picker
+ * in the designer, one request per item for the life of the page.
+ * Each picker used to fetch every source's full item again, one at a
+ * time, on every mount.  A failed read is not kept, so it is retried
+ * next time.
+ */
+const layerItemCache = new Map<string, Promise<LayerItemLite | null>>();
+function fetchLayerItem(dataLayerId: string): Promise<LayerItemLite | null> {
+  const hit = layerItemCache.get(dataLayerId);
+  if (hit) return hit;
+  const p = fetch(`/api/portal/items/${dataLayerId}`)
+    .then((res) => (res.ok ? (res.json() as Promise<LayerItemLite>) : null))
+    .catch(() => null)
+    .then((item) => {
+      if (!item) layerItemCache.delete(dataLayerId);
+      return item;
+    });
+  layerItemCache.set(dataLayerId, p);
+  return p;
+}
+
 function useResolvedTargets(sources: AppDataSource[]): ResolvedTargetLite[] {
   const [resolved, setResolved] = useState<ResolvedTargetLite[]>([]);
   // Sources is a fresh array identity on every keystroke in the
@@ -8336,18 +8371,16 @@ function useResolvedTargets(sources: AppDataSource[]): ResolvedTargetLite[] {
     let cancelled = false;
     void (async () => {
       const out: ResolvedTargetLite[] = [];
-      for (const src of sources) {
+      // All reads in parallel (and shared through the cache); the
+      // loop below keeps the author's order.
+      const items = await Promise.all(
+        sources.map((src) => fetchLayerItem(src.layer.dataLayerId)),
+      );
+      for (const [i, src] of sources.entries()) {
         const t = src.layer;
         try {
-          const res = await fetch(`/api/portal/items/${t.dataLayerId}`);
-          if (!res.ok) continue;
-          const item = (await res.json()) as {
-            title?: string;
-            data?: {
-              version?: number;
-              layers?: Array<{ id?: string; label?: string; geometryType?: string | null }>;
-            };
-          };
+          const item = items[i];
+          if (!item) continue;
           if (item.data?.version !== 3) continue;
           const sub = item.data.layers?.find((l) => l.id === t.layerKey);
           if (!sub) continue;
@@ -8400,8 +8433,9 @@ function useResolvedTargets(sources: AppDataSource[]): ResolvedTargetLite[] {
  * aggregate endpoint refuses names that are not on the layer (so a
  * typo produces an error rather than a confident zero), which is the
  * right server behaviour but a poor authoring experience if the
- * author is typing blind. Cached per target for the life of the
- * inspector; layer schemas change on the order of never.
+ * author is typing blind. Item reads are shared through
+ * fetchLayerItem for the life of the page; layer schemas change on
+ * the order of never.
  */
 function useTargetFields(target: ViewerTarget | undefined): {
   fields: Array<{ name: string; type?: string }>;
@@ -8422,16 +8456,8 @@ function useTargetFields(target: ViewerTarget | undefined): {
     setState({ fields: [], loading: true });
     void (async () => {
       try {
-        const res = await fetch(`/api/portal/items/${dataLayerId}`);
-        if (!res.ok) throw new Error('lookup failed');
-        const item = (await res.json()) as {
-          data?: {
-            layers?: Array<{
-              id?: string;
-              fields?: Array<{ name?: string; type?: string }>;
-            }>;
-          };
-        };
+        const item = await fetchLayerItem(dataLayerId);
+        if (!item) throw new Error('lookup failed');
         const layer = item.data?.layers?.find((l) => l.id === layerKey);
         const fields = (layer?.fields ?? [])
           .filter((f): f is { name: string; type?: string } =>
@@ -8498,13 +8524,12 @@ function TargetSelect({
   // is the kind of database detail the UI is supposed to keep to
   // itself.
   const resolved = useResolvedTargets(appTargets);
-  const effectiveIndex = (() => {
-    if (sourceId !== undefined) {
-      const i = appTargets.findIndex((s) => s.id === sourceId);
-      if (i >= 0) return i;
-    }
-    return value;
-  })();
+  // Same precedence as useWidgetSource: an id that no longer exists
+  // (its layer was removed) binds to nothing at runtime, so it must
+  // not fall back to the legacy index here either.  Show an explicit
+  // placeholder instead; that also leaves every real layer pickable,
+  // so a change event can rebind the widget even with one layer left.
+  const effectiveIndex = targetSelectIndex(value, sourceId, appTargets);
   return (
     <Field
       label="Layer"
@@ -8519,6 +8544,7 @@ function TargetSelect({
         disabled={!canEdit || appTargets.length === 0}
         onChange={(e) => {
           const i = Number(e.target.value);
+          if (i < 0) return;
           onChange(i, appTargets[i]?.id);
         }}
         className="w-full rounded-md border border-border bg-surface-1 px-2 py-1 text-xs"
@@ -8526,17 +8552,44 @@ function TargetSelect({
         {appTargets.length === 0 ? (
           <option value={0}>(no layers)</option>
         ) : (
-          appTargets.map((src, i) => (
-            <option key={src.id} value={i}>
-              {src.label?.trim() ||
-                resolved.find((r) => r.sourceId === src.id)?.title ||
-                src.layer.layerKey}
-            </option>
-          ))
+          <>
+            {effectiveIndex === -1 ? (
+              <option value={-1} disabled>
+                (layer removed, pick one)
+              </option>
+            ) : null}
+            {appTargets.map((src, i) => (
+              <option key={src.id} value={i}>
+                {src.label?.trim() ||
+                  resolved.find((r) => r.sourceId === src.id)?.title ||
+                  src.layer.layerKey}
+              </option>
+            ))}
+          </>
         )}
       </select>
     </Field>
   );
+}
+
+/**
+ * Position of a widget's layer in the app's source list for a layer
+ * picker, or -1 when the widget names a source that is gone (or an
+ * index past the end).  Mirrors useWidgetSource in the runtime: the
+ * id wins, and the legacy index is only read when there is no id.
+ */
+function targetSelectIndex(
+  value: number | undefined,
+  sourceId: string | undefined,
+  appTargets: AppDataSource[],
+): number {
+  if (sourceId !== undefined) {
+    return appTargets.findIndex((s) => s.id === sourceId);
+  }
+  if (typeof value === 'number' && value >= 0 && value < appTargets.length) {
+    return value;
+  }
+  return appTargets.length === 0 ? 0 : -1;
 }
 
 /**
@@ -8570,7 +8623,14 @@ function FilterWidgetConfigEditor({
         appTargets={appTargets}
         canEdit={canEdit}
         onChange={(i, id) =>
-          onChangeConfig({ targetIndex: i, ...(id ? { sourceId: id } : {}) })
+          onChangeConfig({
+            targetIndex: i,
+            ...(id ? { sourceId: id } : {}),
+            // A field from the old layer matches no option here, so
+            // the select showed the first option while the saved
+            // config still named the old field.
+            ...(layerChanged(target, appTargets[i]?.layer) ? { field: undefined } : {}),
+          })
         }
       />
       <Field
@@ -8765,24 +8825,19 @@ function ChartBinEditor({
               label="How many ranges"
               hint="The portal measures the field and splits its range evenly."
             >
-              <input
-                type="number"
+              {/* Typed into a draft and clamped on blur: clamping each
+                  keystroke turned the "1" of "15" into 2. */}
+              <NumberInput
                 min={2}
                 max={200}
                 value={bin.count}
+                normalize={(n) => Math.min(200, Math.max(2, Math.round(n)))}
                 disabled={!canEdit}
-                onChange={(e) => {
-                  const n = Number(e.target.value);
-                  if (!Number.isFinite(n)) return;
+                onChange={(count) =>
                   onChangeConfig({
-                    bin: {
-                      field: bin.field,
-                      mode: 'count',
-                      count: Math.min(200, Math.max(2, Math.round(n))),
-                    },
-                  });
-                }}
-                className="w-full rounded-md border border-border bg-surface-1 px-2 py-1 text-xs"
+                    bin: { field: bin.field, mode: 'count', count },
+                  })
+                }
               />
             </Field>
           ) : bin.mode === 'width' ? (
@@ -8790,20 +8845,19 @@ function ChartBinEditor({
               label="Range size"
               hint="In the field's own units, e.g. 0.5 for half a milligram per litre."
             >
-              <input
-                type="number"
+              {/* Draft until blur: rejecting "0" on the way to
+                  "0.5" snapped the box back to the old value. */}
+              <NumberInput
                 min={0}
                 step="any"
                 value={bin.width}
+                normalize={(w) => (w > 0 ? w : null)}
                 disabled={!canEdit}
-                onChange={(e) => {
-                  const w = Number(e.target.value);
-                  if (!Number.isFinite(w) || w <= 0) return;
+                onChange={(width) =>
                   onChangeConfig({
-                    bin: { field: bin.field, mode: 'width', width: w },
-                  });
-                }}
-                className="w-full rounded-md border border-border bg-surface-1 px-2 py-1 text-xs"
+                    bin: { field: bin.field, mode: 'width', width },
+                  })
+                }
               />
             </Field>
           ) : (
@@ -8812,6 +8866,9 @@ function ChartBinEditor({
               hint="Ascending, comma separated. Use the same numbers as your map's classes and the chart will cut where the legend does."
             >
               <input
+                // Remounts when the saved edges change, so the box
+                // shows the sorted, de-duplicated list that was kept.
+                key={bin.edges.join(',')}
                 type="text"
                 defaultValue={bin.edges.join(', ')}
                 disabled={!canEdit}
@@ -8826,6 +8883,7 @@ function ChartBinEditor({
                   // error about thresholds.
                   const sorted = [...new Set(edges)].sort((a, b) => a - b);
                   if (sorted.length === 0) return;
+                  if (sorted.join(',') === bin.edges.join(',')) return;
                   onChangeConfig({
                     bin: { field: bin.field, mode: 'edges', edges: sorted },
                   });
@@ -8987,6 +9045,11 @@ function ChartWidgetConfigEditor({
       : appTargets.indexOf(src) === config.targetIndex,
   )?.layer;
   const { fields, loading } = useTargetFields(target);
+  // The runtime ignores `bin` for a pie and groups by `groupBy`, and
+  // the bin editor is hidden for a pie.  So only a non-pie chart that
+  // bins turns Group by off; otherwise a binned bar switched to a pie
+  // had no control on screen to set what it groups by.
+  const binning = Boolean(config.bin) && config.chartType !== 'pie';
   const aggregate = config.aggregate ?? 'count';
   const numeric = numericCandidates(fields);
   return (
@@ -9024,7 +9087,16 @@ function ChartWidgetConfigEditor({
         appTargets={appTargets}
         canEdit={canEdit}
         onChange={(i, id) =>
-          onChangeConfig({ targetIndex: i, ...(id ? { sourceId: id } : {}) })
+          onChangeConfig({
+            targetIndex: i,
+            ...(id ? { sourceId: id } : {}),
+            // Fields from the old layer match no option here, so the
+            // selects showed their first option while the saved
+            // config still named the old fields and the query failed.
+            ...(layerChanged(target, appTargets[i]?.layer)
+              ? { groupBy: undefined, valueField: undefined, bin: undefined }
+              : {}),
+          })
         }
       />
       <Field label="Chart type">
@@ -9047,14 +9119,14 @@ function ChartWidgetConfigEditor({
             ? 'Reading the layer schema…'
             : fields.length === 0
               ? 'Bind a target layer to choose a field.'
-              : config.bin
-                ? `Turned off: the chart is binning ${config.bin.field} into ranges instead.`
+              : binning
+                ? `Turned off: the chart is binning ${config.bin!.field} into ranges instead.`
                 : 'One bar or slice per distinct value of this field.'
         }
       >
         <select
-          value={config.bin ? '' : (config.groupBy ?? '')}
-          disabled={!canEdit || fields.length === 0 || Boolean(config.bin)}
+          value={binning ? '' : (config.groupBy ?? '')}
+          disabled={!canEdit || fields.length === 0 || binning}
           onChange={(e) =>
             onChangeConfig({ groupBy: e.target.value || undefined })
           }
@@ -9187,7 +9259,14 @@ function IndicatorWidgetConfigEditor({
         appTargets={appTargets}
         canEdit={canEdit}
         onChange={(i, id) =>
-          onChangeConfig({ targetIndex: i, ...(id ? { sourceId: id } : {}) })
+          onChangeConfig({
+            targetIndex: i,
+            ...(id ? { sourceId: id } : {}),
+            // The old layer's field matches no option on the new one.
+            ...(layerChanged(target, appTargets[i]?.layer)
+              ? { valueField: undefined }
+              : {}),
+          })
         }
       />
       <Field label="Measure">
@@ -9284,8 +9363,12 @@ function IndicatorWidgetConfigEditor({
           disabled={!canEdit}
           onChange={(e) =>
             patchFormat({
+              // Clamped: a typed -1 or 200 used to reach
+              // Intl.NumberFormat and throw on the live canvas.
               decimals:
-                e.target.value === '' ? undefined : Number(e.target.value),
+                e.target.value === '' || !Number.isFinite(Number(e.target.value))
+                  ? undefined
+                  : Math.min(6, Math.max(0, Math.floor(Number(e.target.value)))),
             })
           }
           className="w-full rounded-md border border-border bg-surface-1 px-2 py-1 text-xs"
@@ -9372,25 +9455,56 @@ function NumberInput({
   value,
   min,
   max,
+  step,
+  normalize,
   disabled,
   onChange,
 }: {
   value: number;
   min?: number;
   max?: number;
+  step?: string;
+  /** Turns a typed number into the value to save, or null to reject
+   *  it.  Defaults to clamping into min..max. */
+  normalize?: (n: number) => number | null;
   disabled?: boolean;
   onChange: (v: number) => void;
 }) {
+  // The box holds the text being typed.  An in-range number is
+  // written as it is typed; anything else waits for blur, where it is
+  // clamped.  min/max on the element only stop the spinner, so a
+  // typed -1 used to be saved and crash the runtime; clamping on
+  // every keystroke instead would turn the "1" of "15" into the min.
+  const [draft, setDraft] = useState<string | null>(null);
+  const clamp = (n: number): number | null => {
+    let v = n;
+    if (min !== undefined) v = Math.max(min, v);
+    if (max !== undefined) v = Math.min(max, v);
+    return v;
+  };
+  const norm = normalize ?? clamp;
   return (
     <input
       type="number"
-      value={value}
+      value={draft ?? value}
       min={min}
       max={max}
+      step={step}
       disabled={disabled}
       onChange={(e) => {
+        setDraft(e.target.value);
         const n = Number(e.target.value);
-        if (Number.isFinite(n)) onChange(n);
+        if (e.target.value !== '' && Number.isFinite(n) && norm(n) === n) {
+          onChange(n);
+        }
+      }}
+      onBlur={() => {
+        if (draft !== null) {
+          const n = Number(draft);
+          const v = draft !== '' && Number.isFinite(n) ? norm(n) : null;
+          if (v !== null && v !== value) onChange(v);
+        }
+        setDraft(null);
       }}
       className="w-full rounded-md border border-border bg-surface-1 px-2 py-1 text-xs"
     />
@@ -9416,6 +9530,15 @@ const WIDGETS_BIND_MAP_ID = new Set<CustomWidgetKind>([
   'create-feature',
   'edit-feature',
   'delete-feature',
+  // These follow a map too and are stamped with an empty
+  // mapWidgetId; without auto-binding they showed "bind a map" while
+  // Legend or Search dropped the same way worked at once.
+  'export',
+  'bookmark',
+  'coordinates',
+  'my-location',
+  'elevation-profile',
+  'magic-outline',
 ]);
 
 /**
@@ -9436,6 +9559,27 @@ function autoBindMapWidgetId(
       mapWidgetId,
     } as CustomWidget['config'],
   };
+}
+
+/** True when the newly picked layer is a different layer (not just a
+ *  different source over the same layer), so field picks no longer
+ *  apply. */
+function layerChanged(
+  current: { dataLayerId: string; layerKey: string } | undefined,
+  next: { dataLayerId: string; layerKey: string } | undefined,
+): boolean {
+  if (!current || !next) return true;
+  return current.dataLayerId !== next.dataLayerId || current.layerKey !== next.layerKey;
+}
+
+/**
+ * Where an Image widget's picture comes from, resolved the way the
+ * runtime does it: the picked asset first, the legacy `url` second.
+ * The picker stores `asset` and clears `url`, so testing `url` alone
+ * left the canvas showing a placeholder for every picked image.
+ */
+function imageWidgetSrc(cfg: { asset?: AssetRef | null; url?: string }): string | null {
+  return resolveAssetRefSync(cfg.asset ?? null) ?? cfg.url ?? null;
 }
 
 function clampCol(col: number): number {
@@ -9615,6 +9759,10 @@ const TOOL_MODE_KINDS: ReadonlySet<CustomWidgetKind> = new Set([
   'search',
   'print',
   'select',
+  // Stamped as a tool and drawn as one by the runtime
+  // (TOOL_DISPLAY_KINDS); missing here, the canvas drew it as a panel
+  // and the inspector hid its Display mode section.
+  'export',
   'basemap-gallery',
   'bookmark',
   'coordinates',
@@ -9830,45 +9978,6 @@ function updateWidgetDeep(
 }
 
 /**
- * #22 WYSIWYG: remove a widget by id anywhere in the tree.
- * Mirrors updateWidgetDeep's walking behaviour.
- */
-function removeWidgetDeep(
-  widgets: CustomWidget[],
-  targetId: string,
-): CustomWidget[] {
-  const filtered = widgets.filter((w) => w.id !== targetId);
-  if (filtered.length !== widgets.length) return filtered;
-  return widgets.map((w) => {
-    const cfg = w.config;
-    if ('widgets' in cfg && Array.isArray(cfg.widgets)) {
-      const nextChildren = removeWidgetDeep(cfg.widgets, targetId);
-      if (nextChildren !== cfg.widgets) {
-        return {
-          ...w,
-          config: { ...cfg, widgets: nextChildren },
-        } as CustomWidget;
-      }
-    }
-    if (cfg.kind === 'tabs' && Array.isArray(cfg.tabs)) {
-      let touched = false;
-      const nextTabs = cfg.tabs.map((t) => {
-        const nextTabWidgets = removeWidgetDeep(t.widgets, targetId);
-        if (nextTabWidgets !== t.widgets) {
-          touched = true;
-          return { ...t, widgets: nextTabWidgets };
-        }
-        return t;
-      });
-      if (touched) {
-        return { ...w, config: { ...cfg, tabs: nextTabs } } as CustomWidget;
-      }
-    }
-    return w;
-  });
-}
-
-/**
  * Append a child widget to a container identified by id. Returns a
  * new `widgets` array with the container updated; doesn't mutate.
  * Recurses through nested containers so dropping into a foldable-
@@ -9906,130 +10015,6 @@ function appendChildToContainer(
     }
     return w;
   });
-}
-
-/**
- * #96: locate a widget anywhere in the tree along with its parent
- * container's id (null = page-level) and its index in the parent's
- * children array.  Used by the reparent gesture so the move handler
- * can remove the widget from its source location precisely.
- *
- * Recurses through container.config.widgets[] and tabs.tabs[].widgets[].
- */
-function findWidgetWithParent(
-  widgets: CustomWidget[],
-  id: string,
-  parentId: string | null = null,
-): { widget: CustomWidget; parentId: string | null; index: number } | null {
-  for (let i = 0; i < widgets.length; i++) {
-    const w = widgets[i]!;
-    if (w.id === id) return { widget: w, parentId, index: i };
-    const cfg = w.config;
-    if ('widgets' in cfg && Array.isArray(cfg.widgets)) {
-      const inner = findWidgetWithParent(cfg.widgets, id, w.id);
-      if (inner) return inner;
-    }
-    if (cfg.kind === 'tabs' && Array.isArray(cfg.tabs)) {
-      for (const t of cfg.tabs) {
-        const inner = findWidgetWithParent(t.widgets, id, w.id);
-        if (inner) return inner;
-      }
-    }
-  }
-  return null;
-}
-
-/**
- * #96: insert a child widget at a specific index inside a container.
- * `containerId === null` inserts at the page level.  index clamped
- * to [0, parent.length].  Returns a fresh widgets array.
- */
-function insertWidgetAt(
-  widgets: CustomWidget[],
-  containerId: string | null,
-  index: number,
-  child: CustomWidget,
-): CustomWidget[] {
-  if (containerId === null) {
-    const i = Math.max(0, Math.min(index, widgets.length));
-    return [...widgets.slice(0, i), child, ...widgets.slice(i)];
-  }
-  return widgets.map((w) => {
-    if (w.id === containerId) {
-      const cfg = w.config;
-      if ('widgets' in cfg && Array.isArray(cfg.widgets)) {
-        const i = Math.max(0, Math.min(index, cfg.widgets.length));
-        const nextChildren = [
-          ...cfg.widgets.slice(0, i),
-          child,
-          ...cfg.widgets.slice(i),
-        ];
-        return { ...w, config: { ...cfg, widgets: nextChildren } } as CustomWidget;
-      }
-      return w;
-    }
-    const cfg = w.config;
-    if ('widgets' in cfg && Array.isArray(cfg.widgets)) {
-      const nextChildren = insertWidgetAt(cfg.widgets, containerId, index, child);
-      if (nextChildren !== cfg.widgets) {
-        return { ...w, config: { ...cfg, widgets: nextChildren } } as CustomWidget;
-      }
-    }
-    return w;
-  });
-}
-
-/**
- * #96: move a widget from wherever it lives in the tree to a new
- * parent + index.  Performs the remove + insert in one pass so the
- * page-level widgets array updates atomically.  When the source
- * widget is rooted at page-level and moves into a container, its
- * grid layout coords are reset to a (1,1,1,1) placeholder because
- * children inside containers ignore grid coords.  When moving from
- * a container OUT to the page level, the caller supplies a
- * `pageLayout` overlay (the cursor's drop coords) so the widget
- * re-acquires a sensible grid position.
- */
-function moveWidgetInTree(
-  widgets: CustomWidget[],
-  sourceId: string,
-  targetParentId: string | null,
-  targetIndex: number,
-  pageLayout: CustomLayout | null,
-): CustomWidget[] {
-  const found = findWidgetWithParent(widgets, sourceId);
-  if (!found) return widgets;
-  // `targetIndex` is the position among the target's children WITHOUT
-  // the source, which is what both callers compute (indexInContainer
-  // skips the dragged widget). It used to be shifted left once more
-  // for a same-parent move to the right, on the assumption that it
-  // counted the source; every such reorder landed one slot short of
-  // where it was dropped, and dragging to the end never reached it.
-  const adjustedIndex = targetIndex;
-  const withoutSource = removeWidgetDeep(widgets, sourceId);
-  let widgetToInsert = found.widget;
-  if (pageLayout) {
-    // #99: pageLayout is the cursor-derived destination layout.
-    // When dropping at page level, it's the grid coords.  When
-    // dropping into a container (free-position FlowContainer), it's
-    // the in-container col/row in the 1..192 axis space the
-    // renderer maps to a left/top percent.  Either way we just
-    // overwrite the widget's layout with the cursor-derived one.
-    widgetToInsert = { ...widgetToInsert, layout: pageLayout };
-  } else if (targetParentId !== null && found.parentId === null) {
-    // Moving from page level into a container without a pageLayout
-    // (shouldn't happen with the current canvas, but kept as a
-    // safety net for any future call site that doesn't compute a
-    // cursor-derived destination): collapse the layout to the
-    // placeholder origin.  The container's auto-spread fallback
-    // will visually distribute the child until it gets its first
-    // explicit position write.
-    widgetToInsert = {
-      ...widgetToInsert,
-      layout: { col: 1, row: 1, colSpan: 1, rowSpan: 1 },
-    };
-  }
-  return insertWidgetAt(withoutSource, targetParentId, adjustedIndex, widgetToInsert);
 }
 
 /**
@@ -10340,7 +10325,6 @@ function stampWidget(kind: CustomWidgetKind, layout: CustomLayout): CustomWidget
         config: {
           kind: 'create-feature',
           mapWidgetId: '',
-          targetIndex: 0,
           label: 'Add feature',
           displayMode: 'tool',
           panelArrangement: defaultPanelArrangement('create-feature'),
@@ -10354,7 +10338,6 @@ function stampWidget(kind: CustomWidgetKind, layout: CustomLayout): CustomWidget
         config: {
           kind: 'edit-feature',
           mapWidgetId: '',
-          targetIndex: 0,
           label: 'Edit feature',
           displayMode: 'tool',
           panelArrangement: defaultPanelArrangement('edit-feature'),
@@ -10368,7 +10351,6 @@ function stampWidget(kind: CustomWidgetKind, layout: CustomLayout): CustomWidget
         config: {
           kind: 'delete-feature',
           mapWidgetId: '',
-          targetIndex: 0,
           label: 'Delete feature',
           displayMode: 'tool',
           panelArrangement: defaultPanelArrangement('delete-feature'),

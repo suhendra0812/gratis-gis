@@ -44,11 +44,17 @@ cd "$REPO_ROOT"
 # at all; a per-script override would re-split the mutex.
 LOCK_FILE="${GRATISGIS_LOCK_FILE:-/var/lock/gratisgis-deploy.lock}"
 mkdir -p "$(dirname "$LOCK_FILE")"
-exec 9>"$LOCK_FILE"
-if ! flock -n 9; then
-  echo "Another deploy is in progress (lock=$LOCK_FILE)." >&2
-  echo "Tail /tmp/deploy.log if you started one in the background, or wait for it to finish before re-running." >&2
-  exit 1
+if [[ -n "${GG_DEPLOY_REEXEC:-}" ]] && { : >&9; } 2>/dev/null; then
+  # Restarted from the new checkout (see "Syncing repo" below). The
+  # first run still holds the lock on fd 9, which exec kept open.
+  :
+else
+  exec 9>"$LOCK_FILE"
+  if ! flock -n 9; then
+    echo "Another deploy is in progress (lock=$LOCK_FILE)." >&2
+    echo "Tail /tmp/deploy.log if you started one in the background, or wait for it to finish before re-running." >&2
+    exit 1
+  fi
 fi
 # The lock auto-releases when fd 9 closes (process exit).
 
@@ -114,7 +120,17 @@ GG_DEPLOY_COMMIT="$(
   echo "FATAL: cannot resolve '${GG_DEPLOY_REF}' to a commit. Check GG_REF." >&2
   exit 1
 }
+GG_SELF_BEFORE="$(git hash-object infra/deploy.sh)"
 git reset --hard "$GG_DEPLOY_COMMIT"
+# Bash keeps reading the copy of this script it opened before the
+# reset, so without a restart every deploy ran the previous release's
+# steps after this point. Restart once from the new copy, pinned to the
+# ref just resolved.
+if [[ -z "${GG_DEPLOY_REEXEC:-}" ]] \
+    && [[ "$(git hash-object infra/deploy.sh)" != "$GG_SELF_BEFORE" ]]; then
+  echo "deploy.sh changed in ${GG_DEPLOY_REF}; restarting with the new copy."
+  GG_DEPLOY_REEXEC=1 GG_REF="$GG_DEPLOY_REF" exec bash infra/deploy.sh
+fi
 echo "Deploying ref ${GG_DEPLOY_REF} at commit:"
 git log --oneline -1
 
@@ -158,6 +174,11 @@ echo "=== Materializing Keycloak realm import ==="
 . infra/lib-env.sh
 gg_load_env_file infra/.env.prod
 gg_require_prod_env
+# The env file of an older install still carries the GG_VERSION that
+# bootstrap.sh wrote at setup time, and loading it just replaced the
+# stamp computed above. The stamp from git wins.
+GG_VERSION="$(git describe --tags --always 2>/dev/null || echo "")"
+export GG_VERSION
 # Derived AUTH_URL the realm template uses for the realm-level
 # frontendUrl. Keep this separate from PUBLIC_URL: the realm has to
 # advertise itself as the AUTH subdomain (otherwise discovery
@@ -175,7 +196,23 @@ echo "Wrote infra/keycloak/import/realm-gratis-gis.json"
 COMPOSE=(docker compose -f infra/docker-compose.prod.yml --env-file infra/.env.prod)
 
 echo "=== Building images ==="
-"${COMPOSE[@]}" build
+# The nightly `docker builder prune` drops the build cache, so the
+# database image's apt layer was rebuilt on every deploy. That gave it
+# a new image id, and compose then recreated the postgres container:
+# a short database outage on every deploy even when nothing about the
+# database changed. The image carries a hash of its inputs as a label;
+# when it matches, postgres is left out of the build and keeps running.
+GG_PG_INPUTS="$(cat infra/postgres/Dockerfile infra/init-prod-db.sql infra/init-prod-db.sh \
+  | sha256sum | cut -c1-16)"
+export GG_PG_INPUTS
+GG_BUILD_SERVICES=()
+GG_PG_BUILT_FROM="$(docker image inspect gratis-gis-postgres:prod \
+  --format '{{ index .Config.Labels "org.gratisgis.pg-inputs" }}' 2>/dev/null || true)"
+if [[ "$GG_PG_BUILT_FROM" == "$GG_PG_INPUTS" ]]; then
+  mapfile -t GG_BUILD_SERVICES < <("${COMPOSE[@]}" config --services | grep -vx postgres || true)
+  echo "Database image inputs unchanged; not rebuilding it."
+fi
+"${COMPOSE[@]}" build "${GG_BUILD_SERVICES[@]}"
 
 echo "=== Bringing up stack ==="
 "${COMPOSE[@]}" up -d --remove-orphans
@@ -346,6 +383,42 @@ json.dump(client, sys.stdout)
     rm -f /tmp/gg-field-app-update.json
   fi
 
+  # --- qgis-plugin: loopback redirect needs a port separator ---
+  # Realms imported before the fix allow `http://127.0.0.1*`, which
+  # also matches a host such as 127.0.0.1.example. portal-api used to
+  # tighten this at startup, but its service account has no
+  # manage-clients role (and should not get one just for this), so on
+  # the demo it logged a 403 on every boot. The master admin does it
+  # here instead. Same rule as apps/portal-api/src/admin/qgis-redirects.ts:
+  # drop the open loopback patterns, keep any other custom URI, add
+  # the custom scheme and http://127.0.0.1:*. Idempotent.
+  GG_QGIS_CID="$(kc_client_id qgis-plugin)"
+  if [[ -n "$GG_QGIS_CID" ]]; then
+    if KC get "clients/$GG_QGIS_CID" -r gratis-gis --fields redirectUris 2>/dev/null \
+        | python3 -c '
+import json, sys
+open_loopback = {"http://127.0.0.1*", "https://127.0.0.1*", "http://localhost*", "https://localhost*"}
+cur = json.load(sys.stdin).get("redirectUris") or []
+nxt = [u for u in cur if u not in open_loopback]
+for u in ("gratisgis-qgis://auth-callback", "http://127.0.0.1:*"):
+    if u not in nxt:
+        nxt.append(u)
+if nxt == cur:
+    sys.exit(3)
+json.dump({"redirectUris": nxt}, sys.stdout)
+' > /tmp/gg-qgis-update.json; then
+      docker cp /tmp/gg-qgis-update.json "$KEYCLOAK_CONTAINER:/tmp/gg-qgis-update.json"
+      if KC update "clients/$GG_QGIS_CID" -r gratis-gis -f /tmp/gg-qgis-update.json; then
+        echo "qgis-plugin redirect list reconciled."
+      else
+        echo "WARN: qgis-plugin client update failed; check kcadm output above." >&2
+      fi
+    else
+      echo "qgis-plugin redirect list already tight (or could not be read)."
+    fi
+    rm -f /tmp/gg-qgis-update.json
+  fi
+
   # --- realm: offline session idle timeout ---
   # 30 days is Keycloak's default; the Android field client's sign-in
   # lifetime is exactly this value, so it is pinned rather than
@@ -403,14 +476,23 @@ if rows:
   # to the field app or QGIS: "Offline tokens not allowed for the user
   # or client". Adding offline_access to the default role covers every
   # user who holds it, including future ones. Idempotent.
-  GG_DEFAULT_ROLE="$(KC get realms/gratis-gis --fields defaultRole 2>/dev/null \
+  # kcadm's --fields drops nested objects unless their fields are
+  # named, so plain `--fields defaultRole` returned {} and this step
+  # warned on every deploy. add-roles also fails when the role is
+  # already a composite, so check before adding.
+  GG_DEFAULT_ROLE="$(KC get realms/gratis-gis --fields 'defaultRole(name)' 2>/dev/null \
     | python3 -c 'import sys,json; print((json.load(sys.stdin).get("defaultRole") or {}).get("name",""))' \
       2>/dev/null || true)"
-  if [[ -n "$GG_DEFAULT_ROLE" ]] \
-      && KC add-roles -r gratis-gis --rname "$GG_DEFAULT_ROLE" --rolename offline_access >/dev/null 2>&1; then
+  if [[ -z "$GG_DEFAULT_ROLE" ]]; then
+    echo "WARN: could not read the realm's default role." >&2
+  elif KC get-roles -r gratis-gis --rname "$GG_DEFAULT_ROLE" --fields name 2>/dev/null \
+      | python3 -c 'import sys,json; sys.exit(0 if any(r.get("name")=="offline_access" for r in json.load(sys.stdin)) else 1)' \
+        2>/dev/null; then
     echo "Default role $GG_DEFAULT_ROLE includes offline_access."
+  elif KC add-roles -r gratis-gis --rname "$GG_DEFAULT_ROLE" --rolename offline_access >/dev/null 2>&1; then
+    echo "Added offline_access to the default role $GG_DEFAULT_ROLE."
   else
-    echo "WARN: could not add offline_access to the default role${GG_DEFAULT_ROLE:+ $GG_DEFAULT_ROLE}." >&2
+    echo "WARN: could not add offline_access to the default role $GG_DEFAULT_ROLE." >&2
   fi
 
   # --- offline_access for every realm user ---
@@ -418,26 +500,35 @@ if rows:
   # refresh-token survives restarts and weeks offline. Keycloak gates
   # that on the user holding the offline_access realm role; without
   # it the PKCE code exchange returns "Offline tokens not allowed for
-  # the user or client". Grant to everyone, a page at a time so a
-  # realm with more than one page of users is covered; add-roles is
-  # idempotent.
-  echo "Granting offline_access to every realm user..."
-  GG_KC_OFFSET=0
-  while :; do
-    GG_KC_PAGE="$(KC get users -r gratis-gis --fields username \
-        --offset "$GG_KC_OFFSET" --limit 100 2>/dev/null \
-      | python3 -c "import sys,json; [print(u['username']) for u in json.load(sys.stdin)]" \
-        2>/dev/null || true)"
-    [[ -n "$GG_KC_PAGE" ]] || break
-    while read -r username; do
-      if [[ -z "$username" ]]; then continue; fi
-      KC add-roles -r gratis-gis --uusername "$username" \
-          --rolename offline_access >/dev/null 2>&1 \
-        && echo "  + $username" \
-        || echo "  = $username (already had role)"
-    done <<< "$GG_KC_PAGE"
-    GG_KC_OFFSET=$((GG_KC_OFFSET + 100))
-  done
+  # the user or client". Users who hold the default role already have
+  # it through the step above, so only users with neither the default
+  # role nor a direct grant get one. Granting to everyone started one
+  # kcadm JVM per user on every deploy, under the shared stack lock.
+  # add-roles fails when the role is already present, so its exit
+  # status is not used to tell the two cases apart.
+  kc_usernames() {
+    local path="$1" offset=0 page
+    while :; do
+      page="$(KC get "$path" -r gratis-gis --offset "$offset" --limit 100 2>/dev/null \
+        | python3 -c "import sys,json; [print(u['username']) for u in json.load(sys.stdin)]" \
+          2>/dev/null || true)"
+      [[ -n "$page" ]] || break
+      printf '%s\n' "$page"
+      offset=$((offset + 100))
+    done
+  }
+  echo "Granting offline_access to realm users who lack it..."
+  GG_KC_COVERED="$( { kc_usernames roles/offline_access/users
+    [[ -n "$GG_DEFAULT_ROLE" ]] && kc_usernames "roles/$GG_DEFAULT_ROLE/users"; } | sort -u)"
+  GG_KC_ALL="$(kc_usernames users | sort -u)"
+  GG_KC_MISSING="$(comm -23 <(printf '%s\n' "$GG_KC_ALL") <(printf '%s\n' "$GG_KC_COVERED"))"
+  while read -r username; do
+    if [[ -z "$username" ]]; then continue; fi
+    KC add-roles -r gratis-gis --uusername "$username" \
+        --rolename offline_access >/dev/null 2>&1 \
+      && echo "  + $username" \
+      || echo "WARN: could not grant offline_access to $username" >&2
+  done <<< "$GG_KC_MISSING"
   echo "Offline-access reconciliation done."
 
   # --- portal-api-admin: portal-admin identity for snapshot tooling ---

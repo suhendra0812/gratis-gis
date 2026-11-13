@@ -52,6 +52,7 @@ import type {
 } from '@gratis-gis/shared-types';
 import {
   splitByPrefetchPolicy,
+  isServerStampedField,
   stampSubmissionMetadata,
 } from '@gratis-gis/shared-types';
 import {
@@ -79,6 +80,7 @@ import { changedValues } from '@/lib/feature-attribute-diff';
 import { toast } from '@/lib/toast';
 import {
   searchLayers,
+  searchV3Layers,
   type SearchResult as MapSearchResult,
 } from '../map/search-sources';
 import { FormRuntime } from '@/components/form-runtime';
@@ -86,6 +88,7 @@ import { PwaInstallButton } from '@/components/pwa-install-button';
 import { removeDeploymentFromDevice } from '@/lib/offline-remove';
 import {
   deleteFeatures,
+  countUnsyncedEdits,
   enqueueEdit,
   getCachedFeature,
   getDeployment,
@@ -101,6 +104,7 @@ import {
   type CachedFeature,
   type QueueRecord,
 } from '@/lib/offline-store';
+import { placedAtGpsFix } from '@/lib/gps-placement';
 import { buildOfflineRecoveryZip } from '@/lib/offline-export';
 import { formatBytes } from '@/lib/format-bytes';
 import { formatOfflineMessage } from '@/lib/offline-message';
@@ -166,7 +170,7 @@ import { OfflineBasemapRow } from './offline-basemap-row';
 import { createGpsMarker, type GpsMarkerHandle } from './gps-map-marker';
 import { useDeviceHeading } from './use-device-heading';
 import { angleBetween } from '@/lib/device-heading';
-import { stampGpsMetadata } from './gps-metadata-stamp';
+import { classifyGpsField, stampGpsMetadata } from './gps-metadata-stamp';
 import { FieldAttachments } from './field-attachments';
 import { uploadPendingAttachmentsInResponse } from '@/lib/form-attachment-upload';
 import { describeZoom } from '@/lib/map-scale';
@@ -731,6 +735,9 @@ export function FieldRuntime({
 
   const canvasRef = useRef<MapCanvasHandle | null>(null);
   const mapRef = useRef<maplibregl.Map | null>(null);
+  // Bumped on each popup Edit so a slow record read cannot open a
+  // form after a newer Edit tap.
+  const editLoadTokenRef = useRef(0);
   // GPS state (Phase A). Hook owns the watch lifecycle and follow-mode
   // toggle; marker handle paints the dot + accuracy ring on the map and
   // is created on first map-ready. The two are intentionally
@@ -1071,14 +1078,16 @@ export function FieldRuntime({
           next = { ...next, visible: false };
         }
         if (offlineActive && next.source?.kind === 'data-layer') {
-          const key = `${next.source.itemId}:${next.source.layerKey ?? ''}`;
-          // Try with an empty layerKey first (legacy v1/v2), then
-          // with the layerKey when present.
+          // The cache is keyed by the resolved sublayer, which a legacy
+          // map source without a layerKey only names through
+          // resolveEditableLayer. Fall back to the raw key for
+          // single-table layers that are not editable here.
+          const resolved = resolveEditableLayer(editableLayers, next.source);
           const fc =
-            offlineFeatures[`${next.source.itemId}:${next.source.layerKey ?? ''}`] ??
-            (next.source.layerKey
-              ? offlineFeatures[`${next.source.itemId}:${next.source.layerKey}`]
-              : undefined);
+            (resolved
+              ? offlineFeatures[`${next.source.itemId}:${resolved.layerKey}`]
+              : undefined) ??
+            offlineFeatures[`${next.source.itemId}:${next.source.layerKey ?? ''}`];
           if (fc) {
             next = {
               ...next,
@@ -1089,12 +1098,18 @@ export function FieldRuntime({
           // It'll fail to fetch offline, but MapCanvas tolerates
           // that (empty source) and the user sees an empty layer
           // rather than a broken canvas.
-          void key;
         }
         return next;
       }),
     };
-  }, [mapData, hiddenLayerIds, isOnline, offlineFeatures, basemapOverrideId]);
+  }, [
+    mapData,
+    hiddenLayerIds,
+    isOnline,
+    offlineFeatures,
+    basemapOverrideId,
+    editableLayers,
+  ]);
 
   // Effective pickLists. When offline, pick from IndexedDB instead of
   // the prop so newly-added pick lists from the download cache work.
@@ -1315,10 +1330,7 @@ export function FieldRuntime({
     window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
   }
 
-  // Auto-sync when isOnline flips from false -> true. Captured via a
-  // ref so we don't fire on the initial mount when isOnline starts
-  // true and there's nothing queued (the queue read is cheap but
-  // pointless).
+  // Auto-sync when isOnline flips from false -> true.
   const wasOnlineRef = useRef(isOnline);
   useEffect(() => {
     if (!wasOnlineRef.current && isOnline) {
@@ -1326,6 +1338,25 @@ export function FieldRuntime({
     }
     wasOnlineRef.current = isOnline;
   }, [isOnline, runSync]);
+
+  // And once when the runtime opens with signal and edits are already
+  // waiting: queued in an earlier session, then the PWA was closed or
+  // evicted. The flip above never fires for a boot that is already
+  // online, and on iOS and Firefox there is no Background Sync to
+  // cover it. Gated on a cheap count so an empty queue does not
+  // trigger a sync and a refresh of every layer.
+  const bootSyncDoneRef = useRef(false);
+  useEffect(() => {
+    if (bootSyncDoneRef.current || !isOnline || !currentUserId) return;
+    bootSyncDoneRef.current = true;
+    void countUnsyncedEdits(currentUserId)
+      .then((n) => {
+        if (n > 0 && mountedRef.current) void runSync('auto');
+      })
+      .catch(() => {
+        /* no IndexedDB: nothing could have been queued */
+      });
+  }, [isOnline, currentUserId, runSync]);
 
   // Slice 6 (persistence floor; see docs/field-offline-areas.md):
   // surface whether the browser will keep our IndexedDB across
@@ -1659,9 +1690,10 @@ export function FieldRuntime({
   // Templates: one row per (editable layer, symbology class) pair.
   // Computed once unless the source data changes; stable React keys
   // come from `template.id`.
+  // No templates for an anonymous viewer; see canWriteLayer.
   const templates = useMemo<FieldTemplate[]>(
-    () => buildTemplates(editableLayers, mapData),
-    [editableLayers, mapData],
+    () => (currentUserId ? buildTemplates(editableLayers, mapData) : []),
+    [editableLayers, mapData, currentUserId],
   );
 
   // Selection is unused at this slice but MapCanvas requires the
@@ -2039,10 +2071,7 @@ export function FieldRuntime({
           // narrowing across `ml.source!.x` is too pessimistic
           // inside arrow callbacks.
           const src = ml.source;
-          const dl = editableLayers.find(
-            (e) =>
-              e.dataLayerId === src.itemId && e.layerKey === src.layerKey,
-          );
+          const dl = resolveEditableLayer(editableLayers, src);
           if (dl) editable = dl;
         }
         hits.push({
@@ -2496,6 +2525,8 @@ export function FieldRuntime({
       },
       openRelated?: RelatedRecordRef,
     ) => {
+      // A newer tap while this read is in flight owns the screen.
+      const token = ++editLoadTokenRef.current;
       let properties = fallback.properties;
       let geometry = fallback.geometry;
       let found = false;
@@ -2537,6 +2568,7 @@ export function FieldRuntime({
           /* no cache on this device: keep what the map drew */
         }
       }
+      if (token !== editLoadTokenRef.current) return;
       setFeatureSheet(null);
       clearPendingMarker();
       setFormModal({
@@ -2873,6 +2905,7 @@ export function FieldRuntime({
                   mapRef={mapRef}
                   canvasRef={canvasRef}
                   layers={mapData.layers ?? []}
+                  isOnline={isOnline}
                   autoFocus
                   onClose={() => setSearchExpanded(false)}
                 />
@@ -2953,9 +2986,11 @@ export function FieldRuntime({
               {t('fieldRuntime.nothingToCollectTitle')}
             </p>
             <p className="mt-0.5 text-2xs text-muted">
-              {editableLayers.length > 0
-                ? t('fieldRuntime.nothingToCollectViewOnly')
-                : t('fieldRuntime.nothingToCollectNoLayers')}
+              {!currentUserId
+                ? t('fieldRuntime.nothingToCollectSignIn')
+                : editableLayers.length > 0
+                  ? t('fieldRuntime.nothingToCollectViewOnly')
+                  : t('fieldRuntime.nothingToCollectNoLayers')}
             </p>
           </div>
         ) : null}
@@ -3228,7 +3263,7 @@ export function FieldRuntime({
             // #265: a related row tapped in the sheet opens its parent's
             // edit form drilled into that record, as the builder's panel
             // does; Back then lands on the parent.
-            if (!parent.editable || !parent.globalId) return;
+            if (!canWriteLayer(parent.editable, currentUserId) || !parent.globalId) return;
             void openFeatureEdit(
               parent.editable,
               parent.globalId,
@@ -3237,7 +3272,7 @@ export function FieldRuntime({
             );
           }}
           onEdit={(hit) => {
-            if (!hit.editable || !hit.globalId) return;
+            if (!canWriteLayer(hit.editable, currentUserId) || !hit.globalId) return;
             void openFeatureEdit(hit.editable, hit.globalId, {
               properties: hit.properties,
               geometry: hit.geometry,
@@ -3258,11 +3293,31 @@ export function FieldRuntime({
             // through to GPS / map center via the same fallback
             // the FAB uses. For non-point geometries, fall back
             // to no geometry; the FormModal already handles that.
-            if (!hit.editable) return;
+            if (!canWriteLayer(hit.editable, currentUserId)) return;
             const presetAttributes: Record<string, string> = {};
             for (const [k, v] of Object.entries(hit.properties)) {
               if (v === null || v === undefined) continue;
+              // Submission and GPS columns describe the original's
+              // visit, not this one. Copied, they also blocked the
+              // stamps, which only fill blanks.
+              if (isServerStampedField(k) || classifyGpsField(k)) continue;
               presetAttributes[k] = typeof v === 'string' ? v : String(v);
+            }
+            // A line or polygon copy needs a shape of its own. Opening
+            // the form with no geometry saved a row that could never
+            // be tapped again, so go through vertex collection with
+            // the copied attributes instead.
+            if (hit.editable.geometryType !== 'point') {
+              setFeatureSheet(null);
+              setActiveTemplate({
+                id: `copy:${hit.editable.dataLayerId}:${hit.editable.layerKey}`,
+                layer: hit.editable,
+                label: hit.editable.layerLabel,
+                sublabel: hit.editable.dataLayerTitle,
+                color: '#888888',
+                presetAttributes,
+              });
+              return;
             }
             const map = mapRef.current;
             const gpsPos = gps.position;
@@ -3323,8 +3378,12 @@ export function FieldRuntime({
           }}
           onSaved={(where) => {
             const layer = formModal.layer;
+            const savedId = formModal.featureId;
             clearPendingMarker();
-            setFormModal(null);
+            // Close only the form that was saved. A slow save can finish
+            // after the collector has moved on to another form, and that
+            // one must stay open.
+            setFormModal((cur) => (cur && cur.featureId === savedId ? null : cur));
             refreshAfterWrite(layer, where);
             if (formModal.mode === 'edit') {
               toast.success(t('featureEdit.featureUpdated'));
@@ -3361,6 +3420,45 @@ export function FieldRuntime({
  * gesture and ride along with terra-draw integration in a follow-up
  * slice (#196).
  */
+/**
+ * The EditableLayer a map's data-layer source draws. A legacy map
+ * source with no layerKey is resolved by page.tsx to the data layer's
+ * first spatial sublayer, so it matches the first spatial entry for
+ * that item. Matching on layerKey alone left such a layer with no
+ * Edit, hidden from the layer panel, and drawn empty offline.
+ */
+function resolveEditableLayer(
+  editableLayers: readonly EditableLayer[],
+  src: { itemId: string; layerKey?: string | undefined },
+): EditableLayer | undefined {
+  if (src.layerKey) {
+    return editableLayers.find(
+      (e) => e.dataLayerId === src.itemId && e.layerKey === src.layerKey,
+    );
+  }
+  return editableLayers.find(
+    (e) => e.dataLayerId === src.itemId && e.geometryType !== null,
+  );
+}
+
+/**
+ * Whether this viewer may write to `layer` from the field app: add,
+ * edit, copy, or add a related row.
+ *
+ * A layer with `addable: false` is kept in editableLayers only so the
+ * layer panel can list it; the data layer or the map marks it as
+ * reference only, and the API does not refuse the write on its own.
+ * An anonymous viewer of a public deployment has no account to save
+ * as, so a capture would fail online or queue under an empty owner
+ * that no signed-in account can ever send.
+ */
+function canWriteLayer(
+  layer: EditableLayer | null | undefined,
+  currentUserId: string,
+): layer is EditableLayer {
+  return !!layer && layer.addable !== false && currentUserId !== '';
+}
+
 function isPointGeometry(t: LayerGeometryType): boolean {
   return t === 'point';
 }
@@ -3882,11 +3980,7 @@ function LayerVisibilityPanel({
             let geometryType: LayerGeometryType = null;
             if (l.source?.kind === 'data-layer') {
               const src = l.source;
-              const dl = editableLayers.find(
-                (e) =>
-                  e.dataLayerId === src.itemId &&
-                  e.layerKey === src.layerKey,
-              );
+              const dl = resolveEditableLayer(editableLayers, src);
               geometryType = dl?.geometryType ?? null;
             } else if (!isGroup) {
               // Non-data-layer overlays (arcgis-rest, geojson-url):
@@ -4999,7 +5093,20 @@ function FeatureForm({
     return { ...modal.presetAttributes };
   }, [modal]);
 
+  // True while a save is running, so a second tap does not send it twice.
+  const submittingRef = useRef(false);
+
   async function handleSubmit(response: FormResponse) {
+    if (submittingRef.current) return;
+    submittingRef.current = true;
+    try {
+      await submitResponse(response);
+    } finally {
+      submittingRef.current = false;
+    }
+  }
+
+  async function submitResponse(response: FormResponse) {
     setError(null);
     // GPS fix metadata stamping (#225 item 3). For add-mode features
     // only -- on edit, the existing fix was the one that mattered.
@@ -5047,8 +5154,9 @@ function FeatureForm({
       modal.mode === 'add'
         ? { ...modal.presetAttributes, ...response }
         : response;
+    // Only when the point was put at the fix; see placedAtGpsFix.
     const gpsStamped: FormResponse =
-      modal.mode === 'add' && gpsPosition
+      modal.mode === 'add' && placedAtGpsFix(activeGeometry, gpsPosition)
         ? stampGpsMetadata(modal.layer.fields, responseWithPresets, gpsPosition)
         : responseWithPresets;
     // Submission bookkeeping, on adds only (an edit keeps the row's
@@ -5756,6 +5864,9 @@ function FieldFeaturePopupSheet({
   // list mode (the hook's first guard short-circuits on a null
   // parentId).
   const detailHit = concrete.mode === 'detail' ? concrete.hit : null;
+  const hitWritable =
+    concrete.mode === 'detail' &&
+    canWriteLayer(concrete.hit.editable, currentUserId);
   const parentEditable =
     detailHit && detailHit.editable && detailHit.globalId
       ? detailHit.editable
@@ -5875,13 +5986,11 @@ function FieldFeaturePopupSheet({
             </button>
             <button
               type="button"
-              disabled={
-                !concrete.hit.editable || !concrete.hit.globalId
-              }
+              disabled={!hitWritable || !concrete.hit.globalId}
               onClick={() => onEdit(concrete.hit)}
               className="inline-flex h-10 min-w-0 flex-1 items-center justify-center gap-1 rounded-md border border-border bg-surface-1 px-2 text-sm font-medium text-ink-1 hover:bg-surface-2 disabled:opacity-50"
               title={
-                concrete.hit.editable
+                hitWritable
                   ? t('fieldRuntime.sheetEditTitle')
                   : t('fieldRuntime.relatedNoEditAccess')
               }
@@ -5891,11 +6000,11 @@ function FieldFeaturePopupSheet({
             </button>
             <button
               type="button"
-              disabled={!concrete.hit.editable}
+              disabled={!hitWritable}
               onClick={() => onCopy(concrete.hit)}
               className="inline-flex h-10 min-w-0 flex-1 items-center justify-center gap-1 rounded-md border border-border bg-surface-1 px-2 text-sm font-medium text-ink-1 hover:bg-surface-2 disabled:opacity-50"
               title={
-                concrete.hit.editable
+                hitWritable
                   ? t('fieldRuntime.sheetCopyTitle')
                   : t('fieldRuntime.relatedNoEditAccess')
               }
@@ -6018,11 +6127,14 @@ function FieldFeaturePopupSheet({
               (parentEditable.childLayers?.length ?? 0) > 0 ? (
                 <div className="border-t border-border bg-surface-0/50">
                   {(parentEditable.childLayers ?? []).map((c) => {
-                    const child = editableLayers.find(
+                    const found = editableLayers.find(
                       (e) =>
                         e.dataLayerId === (c.dataLayerId ?? parentEditable.dataLayerId) &&
                         e.layerKey === c.layerKey,
                     );
+                    // Listed even when not writable, with Add and Open
+                    // off; see canWriteLayer.
+                    const child = canWriteLayer(found, currentUserId) ? found : undefined;
                     const rowsState = relatedRowsByChild[childKey(c)];
                     return (
                       <section
@@ -6817,9 +6929,12 @@ function FieldAddressSearch({
   mapRef,
   canvasRef,
   layers,
+  isOnline = true,
   autoFocus,
   onClose,
 }: {
+  /** Online, v3 layers are searched on the server; see below. */
+  isOnline?: boolean;
   mapRef: React.MutableRefObject<maplibregl.Map | null>;
   // #249.12: passing the canvas handle lets a feature pick reuse the
   // same fly-and-highlight animation the desktop SearchBar fires, so a
@@ -6853,7 +6968,16 @@ function FieldAddressSearch({
       bbox: [number, number, number, number] | null;
     }>
   >([]);
-  const [featureResults, setFeatureResults] = useState<MapSearchResult[]>([]);
+  const [localFeatureResults, setLocalFeatureResults] = useState<
+    MapSearchResult[]
+  >([]);
+  const [serverFeatureResults, setServerFeatureResults] = useState<
+    MapSearchResult[]
+  >([]);
+  const featureResults = useMemo(
+    () => [...localFeatureResults, ...serverFeatureResults],
+    [localFeatureResults, serverFeatureResults],
+  );
   const [open, setOpen] = useState(false);
   const [loading, setLoading] = useState(false);
   const rootRef = useRef<HTMLDivElement | null>(null);
@@ -6886,18 +7010,16 @@ function FieldAddressSearch({
     return () => document.removeEventListener('mousedown', onDoc);
   }, []);
 
-  // #249.12: layer-attribute search runs synchronously off the map's
-  // current source data on every keystroke. Cheap (one pass through
-  // up to MAX_ATTRIBUTE_HITS_PER_LAYER features per layer), no
-  // network. Snapshot featuresByLayer from MapLibre via
-  // querySourceFeatures: for the GeoJSON sources field-runtime uses
-  // (URL-backed online, geojson-inline offline) this returns every
-  // feature in the source. Re-runs whenever the query, layer list,
-  // or layer ids change.
+  // #249.12: layer-attribute search over the map's loaded source
+  // data, on every keystroke. This covers GeoJSON sources: the inline
+  // copies used offline and legacy single-table layers. Online, v3
+  // data layers are vector tiles, which querySourceFeatures cannot
+  // read without a source layer and which never hold every feature
+  // anyway; the effect after this one searches those on the server.
   useEffect(() => {
     const q = query.trim();
     if (q.length < 1 || !layers || layers.length === 0) {
-      setFeatureResults([]);
+      setLocalFeatureResults([]);
       return;
     }
     const map = mapRef.current;
@@ -6921,8 +7043,36 @@ function FieldAddressSearch({
         }
       }
     }
-    setFeatureResults(searchLayers(q, layers, featuresByLayer));
+    setLocalFeatureResults(searchLayers(q, layers, featuresByLayer));
   }, [query, layers, mapRef]);
+
+  // Online: search v3 data layers on the server, as the desktop search
+  // bar does, debounced so a large layer is not queried per keystroke.
+  // Offline the inline copies above already cover them.
+  useEffect(() => {
+    const q = query.trim();
+    const v3Layers = (layers ?? []).filter(
+      (l) => l.source.kind === 'data-layer' && l.search?.enabled,
+    );
+    if (!isOnline || q.length < 2 || v3Layers.length === 0) {
+      setServerFeatureResults([]);
+      return;
+    }
+    const controller = new AbortController();
+    const handle = setTimeout(() => {
+      searchV3Layers(q, v3Layers, controller.signal)
+        .then((rows) => {
+          if (!controller.signal.aborted) setServerFeatureResults(rows);
+        })
+        .catch(() => {
+          /* aborted or offline mid-request; places still show */
+        });
+    }, 300);
+    return () => {
+      controller.abort();
+      clearTimeout(handle);
+    };
+  }, [query, layers, isOnline]);
 
   // Debounced geocode. Match the desktop SearchBar's 250 ms delay
   // and 3-character minimum so we don't hammer Nominatim.
@@ -7064,7 +7214,8 @@ function FieldAddressSearch({
               // re-expand starts clean.
               setQuery('');
               setPlaceResults([]);
-              setFeatureResults([]);
+              setLocalFeatureResults([]);
+              setServerFeatureResults([]);
               setOpen(false);
               onClose?.();
             }}

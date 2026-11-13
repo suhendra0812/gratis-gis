@@ -15,6 +15,8 @@ import { Throttle } from '@nestjs/throttler';
 import {
   IsArray,
   IsInt,
+  Max,
+  Min,
   IsNumber,
   IsObject,
   IsOptional,
@@ -34,7 +36,7 @@ import { assertCredentialKeyConfigured } from '../items/credential-cipher.js';
 
 class TestConnectionDto {
   @IsString() @MinLength(1) @MaxLength(255) host!: string;
-  @IsInt() port!: number;
+  @IsInt() @Min(1) @Max(65535) port!: number;
   @IsString() @MinLength(1) @MaxLength(255) database!: string;
   @IsString() @MinLength(1) @MaxLength(255) role!: string;
   @IsString() @MaxLength(1024) password!: string;
@@ -46,7 +48,7 @@ class CreateConnectionDto {
   @IsString() @MinLength(1) @MaxLength(200) title!: string;
   @IsOptional() @IsString() @MaxLength(2000) description?: string;
   @IsString() @MinLength(1) @MaxLength(255) host!: string;
-  @IsInt() port!: number;
+  @IsInt() @Min(1) @Max(65535) port!: number;
   @IsString() @MinLength(1) @MaxLength(255) database!: string;
   @IsString() @MinLength(1) @MaxLength(255) role!: string;
   @IsString() @MaxLength(1024) password!: string;
@@ -67,7 +69,7 @@ class ReadFeaturesDto {
    * payload still 400s cleanly.
    */
   @IsOptional() @IsObject() filter?: MapLayerFilter;
-  @IsOptional() @IsInt() limit?: number;
+  @IsOptional() @IsInt() @Min(1) @Max(5000) limit?: number;
 }
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -206,11 +208,12 @@ export class PostgisLiveController {
    * `layers[]`) and on demand from the service detail page.
    */
   @Post(':serviceItemId/probe')
-  async probe(
-    @CurrentUser() user: AuthUser,
-    @Param('serviceItemId') serviceItemId: string,
-  ) {
+  @Throttle({ default: { ttl: 60_000, limit: 10 } })
+  async probe(@CurrentUser() user: AuthUser, @Param('serviceItemId') serviceItemId: string) {
     assertUuid('serviceItemId', serviceItemId);
+    // Same gate as create and test: a probe lists the whole schema
+    // and runs a query per table on the owner's database.
+    assertCanAuthorPostgis(user);
     const layers = await this.svc.probe(user, serviceItemId);
     // Keep the item's table snapshot current. It was written once, at
     // create, and nothing refreshed it: a table added afterwards (from

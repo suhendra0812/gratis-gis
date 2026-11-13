@@ -39,7 +39,7 @@
  *    write. The tools here are a convenience gate only.
  */
 
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import type * as maplibregl from 'maplibre-gl';
 import {
   Loader2,
@@ -250,7 +250,13 @@ export function useFeatureEditing({
     [draw],
   );
 
+  // Moves on whenever the tool is left or switched, so a feature load
+  // that finishes afterwards is dropped instead of opening an edit
+  // session for a tool that is no longer active.
+  const toolEpochRef = useRef(0);
+
   const leaveTool = useCallback(() => {
+    toolEpochRef.current += 1;
     if (pendingCreate) clearSketch(pendingCreate.sketchId);
     setPendingCreate(null);
     setPendingEdit(null);
@@ -272,6 +278,7 @@ export function useFeatureEditing({
         leaveTool();
         return;
       }
+      toolEpochRef.current += 1;
       if (pendingCreate) clearSketch(pendingCreate.sketchId);
       setPendingCreate(null);
       setPendingEdit(null);
@@ -357,6 +364,9 @@ export function useFeatureEditing({
       }
       setLoadingFeature(true);
       setSaveError(null);
+      // A tool switch or Escape while the read is in flight bumps the
+      // epoch; a late answer must not open a panel nobody asked for.
+      const epoch = toolEpochRef.current;
       try {
         const full = await fetchFeatureFromServer(
           src.itemId,
@@ -364,6 +374,7 @@ export function useFeatureEditing({
           featureId,
           t('featureEdit.loadFailed'),
         );
+        if (epoch !== toolEpochRef.current) return;
         if (!full) {
           toast.error(t('featureEdit.notFound'));
           if (fromPopup) setTool('off');
@@ -394,6 +405,7 @@ export function useFeatureEditing({
             : null,
         );
       } catch (err) {
+        if (epoch !== toolEpochRef.current) return;
         toast.error(err instanceof Error ? err.message : t('featureEdit.loadFailed'));
         if (fromPopup) setTool('off');
       } finally {
