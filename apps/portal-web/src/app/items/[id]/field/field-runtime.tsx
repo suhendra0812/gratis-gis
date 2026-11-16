@@ -4834,6 +4834,11 @@ function FormModal({
         : t('fieldCollect.submit')
       : t('featureEdit.updateAction');
 
+  // True while the open form is saving, so the header Submit (the only
+  // submit control, since the runtime's own button is hidden) shows it
+  // is busy and refuses a second tap.
+  const [submitting, setSubmitting] = useState(false);
+
   const formProps = {
     dataCollectionId,
     pickLists,
@@ -4842,6 +4847,7 @@ function FormModal({
     isOnline,
     gpsPosition,
     onLocalWriteApplied,
+    onSubmittingChange: setSubmitting,
   };
 
   return (
@@ -4891,7 +4897,8 @@ function FormModal({
           <button
             type="submit"
             form={activeFormId}
-            disabled={deleting}
+            disabled={deleting || submitting}
+            aria-busy={submitting}
             className="inline-flex h-11 shrink-0 items-center justify-center rounded-md px-3 text-base font-semibold text-accent hover:bg-surface-2 active:bg-surface-3 disabled:opacity-50"
           >
             {submitLabel}
@@ -5009,6 +5016,7 @@ function FeatureForm({
   onSaved,
   onNoChanges,
   onLocalWriteApplied,
+  onSubmittingChange,
   position,
   children,
 }: {
@@ -5028,6 +5036,8 @@ function FeatureForm({
   /** Edit mode, nothing changed: nothing to send. */
   onNoChanges: () => void;
   onLocalWriteApplied: () => void;
+  /** Reports a save starting and ending, for the header Submit. */
+  onSubmittingChange: (busy: boolean) => void;
   /** Point layers, the feature's own form: the Manual / GPS choice.
    *  Absent on a related record's form. */
   position?: { mode: PointMode; onModeChange: (mode: PointMode) => void };
@@ -5099,10 +5109,12 @@ function FeatureForm({
   async function handleSubmit(response: FormResponse) {
     if (submittingRef.current) return;
     submittingRef.current = true;
+    onSubmittingChange(true);
     try {
       await submitResponse(response);
     } finally {
       submittingRef.current = false;
+      onSubmittingChange(false);
     }
   }
 

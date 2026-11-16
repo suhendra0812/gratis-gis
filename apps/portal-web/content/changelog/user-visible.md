@@ -30,6 +30,11 @@ A date or time question in a form can start with the current date and time alrea
 ## 2026-11-06 - Edit and delete features in the field app
 In the field app, tap a feature to zoom to, edit, copy or delete it. Drag its shape on the map, place a point by hand or by GPS, and add, edit or delete its related records without leaving the form. It all works offline and syncs later. The compass can turn the map with the way you face.
 
+## [1.6.0] - 2026-11-13
+
+## 2026-11-13 - A new look, and tighter sharing
+GratisGIS has a new logo and brand colour. Printed maps now include your private and organization layers. Turning off editing on a layer now really stops shared editors, share lists are visible only to owners and admins, and dozens of smaller improvements land across forms, maps, apps and the Android app.
+
 ## [1.5.0] - 2026-11-12
 
 ## 2026-11-12 - A tighter, more reliable GratisGIS

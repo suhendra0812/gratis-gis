@@ -398,9 +398,15 @@ export interface MapLayer {
  * id; the layer is visible to that principal only when `view` is
  * true. `query` gates popups / attribute-table / search; `edit`
  * reserves future feature-editing once that pillar ships.
+ *
+ * `principalType: 'everyone'` (principalId EVERYONE_PRINCIPAL_ID) is
+ * the "Everyone else" column: it applies to any viewer no user or
+ * group entry matches, which covers org members reaching the map
+ * through org-wide sharing and anonymous viewers of a public map.
+ * Without it a custom layer was hidden from all of them.
  */
 export interface MapLayerAccessEntry {
-  principalType: 'user' | 'group';
+  principalType: 'user' | 'group' | 'everyone';
   principalId: string;
   view: boolean;
   query: boolean;
@@ -411,8 +417,8 @@ export interface MapLayerAccess {
   /**
    * `'inherit'`: no per-layer restriction beyond item-level sharing.
    * `'custom'`: apply `entries`: a principal not listed (and not a
-   * member of a listed group) defaults to the layer being hidden for
-   * them. Authors flip to `'custom'` the first time they adjust the
+   * member of a listed group) gets the 'everyone' entry, or has the
+   * layer hidden when there is none. Authors flip to `'custom'` the first time they adjust the
    * matrix; until then, everyone who can see the webmap can see
    * every layer they have item access to.
    */
@@ -518,7 +524,26 @@ export type MapFilterOp =
   | '<='
   | 'contains'
   | 'is-null'
-  | 'is-not-null';
+  | 'is-not-null'
+  // Membership in a list of feature ids. Only on the hidden
+  // `_global_id` of a current-format data layer, with the ids comma
+  // separated in `value` (see FILTER_IN_FIELD). Written by the
+  // attribute table's "Use as filter" so the filter matches exactly
+  // the selected features.
+  | 'in';
+
+/** The one field the `in` operator may name. */
+export const FILTER_IN_FIELD = '_global_id';
+/** Most ids one `in` clause may list; the server refuses more. */
+export const FILTER_IN_MAX_VALUES = 1000;
+
+/** The ids an `in` clause lists, blanks dropped. */
+export function filterInValues(value: string): string[] {
+  return value
+    .split(',')
+    .map((v) => v.trim())
+    .filter((v) => v.length > 0);
+}
 
 /**
  * A single where-clause. Stays string-typed so the editor stores a
@@ -540,6 +565,23 @@ export interface MapLayerFilterClause {
 export interface MapLayerFilter {
   combinator: 'all' | 'any';
   clauses: MapLayerFilterClause[];
+}
+
+/**
+ * A filter with a second filter ANDed beside it. Runtime and wire
+ * only; nothing saves this shape (a saved layer or source filter is
+ * always a plain MapLayerFilter).
+ *
+ * A reader's cross-filter click narrows the author's filter. When the
+ * author wrote "match any" over two or more clauses, the flat shape
+ * cannot say "(A or B) and selection", and merging the clauses
+ * turned it into "A and B and selection". The selection rides in
+ * `and` instead, and every evaluator (MapLibre expression, in-memory
+ * matcher, server SQL) ANDs it with the outer filter. `and` itself
+ * never carries another `and`.
+ */
+export interface ScopedLayerFilter extends MapLayerFilter {
+  and?: MapLayerFilter;
 }
 
 /**
@@ -1277,6 +1319,9 @@ export const DEFAULT_LAYER_SCALE: MapLayerScale = {
   labelsMinZoom: null,
   labelsMaxZoom: null,
 };
+
+/** principalId of the 'everyone' layer access entry. */
+export const EVERYONE_PRINCIPAL_ID = '*';
 
 export const DEFAULT_LAYER_ACCESS: MapLayerAccess = {
   policy: 'inherit',

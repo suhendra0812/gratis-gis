@@ -5,6 +5,7 @@ import {
   hasUnsafePathSegment,
   isCrossOriginMutation,
   isUnsafePathSegment,
+  printReadBearer,
   securityResponseHeaders,
 } from './bff-guards';
 
@@ -128,7 +129,7 @@ describe('PAGE_CSP_SOURCE', () => {
     // Jest here is CommonJS and cannot load the .mjs, so read the
     // constant from source.
     const source = readFileSync(join(__dirname, 'content-security-policy.mjs'), 'utf8');
-    const PAGE_CSP_SOURCE = /PAGE_CSP_SOURCE = '([^']+)'/.exec(source)![1]!;
+    const PAGE_CSP_SOURCE = /PAGE_CSP_SOURCE =\s*'([^']+)'/.exec(source)![1]!;
     const { getPathMatch } = jest.requireActual<{
       getPathMatch: (
         path: string,
@@ -143,5 +144,53 @@ describe('PAGE_CSP_SOURCE', () => {
     expect(Boolean(match('/items/abc'))).toBe(true);
     expect(Boolean(match('/api/auth/session'))).toBe(true);
     expect(Boolean(match('/api/portal/items/x/proxy/a'))).toBe(false);
+    // The app runtime's policy comes from the middleware (28b-5).
+    const app = '/items/11111111-1111-4111-8111-111111111111';
+    expect(Boolean(match(`${app}/custom/run`))).toBe(false);
+    expect(Boolean(match(`${app}/custom/run/`))).toBe(false);
+    expect(Boolean(match(`${app}/custom`))).toBe(true);
+    expect(Boolean(match(`${app}/custom/runner`))).toBe(true);
+    expect(Boolean(match(`${app}/viewer/run`))).toBe(true);
+  });
+});
+
+describe('printReadBearer', () => {
+  const cred = 'ggprint.eyJ1aWQiOiJ1MSJ9.c2ln';
+  const id = '11111111-1111-4111-8111-111111111111';
+
+  it.each([
+    `items/${id}/geojson`,
+    `items/${id}/layers/parcels/geojson`,
+    `items/${id}/proxy/0/query`,
+  ])('forwards the credential on the read route %s', (suffix) => {
+    expect(printReadBearer('GET', suffix, cred)).toBe(cred);
+  });
+
+  it.each([
+    `items/${id}`,
+    `items/${id}/layers/parcels/features`,
+    `items/${id}/proxy/0/applyEdits`,
+    `items/${id}/proxy`,
+    `items/${id}/proxy/0/query/x`,
+    `postgis-live/${id}/features`,
+    'admin/users',
+  ])('ignores it on %s', (suffix) => {
+    expect(printReadBearer('GET', suffix, cred)).toBeNull();
+  });
+
+  it('forwards it on the postgis-live read, which is a POST', () => {
+    expect(printReadBearer('POST', `postgis-live/${id}/features`, cred)).toBe(cred);
+    expect(printReadBearer('POST', `postgis-live/${id}/probe`, cred)).toBeNull();
+    expect(printReadBearer('POST', 'postgis-live/create', cred)).toBeNull();
+    expect(printReadBearer('DELETE', `postgis-live/${id}/features`, cred)).toBeNull();
+  });
+
+  it('ignores it on writes, when absent, and when malformed', () => {
+    expect(printReadBearer('POST', `items/${id}/geojson`, cred)).toBeNull();
+    expect(printReadBearer('PATCH', `items/${id}/geojson`, cred)).toBeNull();
+    expect(printReadBearer('DELETE', `items/${id}/geojson`, cred)).toBeNull();
+    expect(printReadBearer('GET', `items/${id}/geojson`, null)).toBeNull();
+    expect(printReadBearer('GET', `items/${id}/geojson`, 'Bearer x')).toBeNull();
+    expect(printReadBearer('GET', `items/${id}/geojson`, 'ggk_' + 'a'.repeat(43))).toBeNull();
   });
 });
