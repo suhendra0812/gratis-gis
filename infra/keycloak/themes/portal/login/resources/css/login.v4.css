@@ -17,8 +17,8 @@
      light-mode tokens: deep chart-blue accent, cool sheet neutrals.
      Keep in sync with apps/portal-web/src/app/globals.css and
      docs/design-system.md "Brand: Contour". */
-  --portal-accent: #21466e;
-  --portal-accent-hover: #1a3756;
+  --portal-accent: #0b6e69;
+  --portal-accent-hover: #08524e;
   --portal-accent-foreground: #ffffff;
   --portal-ink-0: #161d27;
   --portal-ink-1: #272c35;
@@ -215,7 +215,10 @@ label {
   width: 48px;
   height: 48px;
   margin: 0 auto 12px;
-  background-image: url("../img/logo.svg");
+  /* Versioned name, like this stylesheet's: Keycloak serves theme
+     resources with a 30 day max-age and keeps a gzip copy on disk,
+     so a changed file under an old name keeps reaching visitors. */
+  background-image: url("../img/logo.v2.svg");
   background-size: contain;
   background-repeat: no-repeat;
 }

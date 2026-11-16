@@ -105,7 +105,10 @@ export interface EditorFeatureCreatedPayload {
   /** Best-effort summary string -- the first non-empty user field's
    *  value, e.g. "Building #4127". Falls back to a truncated
    *  featureId when nothing better is available. */
-  summary: string;
+  summary: string;  /** Set when one request created more than a handful of features and
+   *  this single notification stands for all of them. featureId is then
+   *  the first one. Absent on the normal per-feature notification. */
+  featureCount?: number;
 }
 
 /** Payload shape for data_collection_feature_created. Mirrors
@@ -126,7 +129,10 @@ export interface DataCollectionFeatureCreatedPayload {
   /** Display name of the author who created the feature. */
   createdByName: string;
   /** Best-effort summary string from the first non-empty user field. */
-  summary: string;
+  summary: string;  /** Set when one request created more than a handful of features and
+   *  this single notification stands for all of them. featureId is then
+   *  the first one. Absent on the normal per-feature notification. */
+  featureCount?: number;
 }
 
 /** Payload shape for form_submission_received. */
@@ -149,18 +155,6 @@ export interface FormSubmissionReceivedPayload {
    * (pre-#190) still render cleanly with just `summary`.
    */
   answers?: Array<{ label: string; value: string }>;
-}
-
-/** Payload shape for user_invited. The recipient is the invitee, not
- *  the inviting admin; the renderer pulls the invite link directly
- *  from the realm at trigger time. */
-export interface UserInvitedPayload {
-  invitedEmail: string;
-  invitedByName: string;
-  /** One-time-use invite link issued by Keycloak. */
-  inviteLink: string;
-  /** Optional ISO timestamp when the invite link stops working. */
-  expiresAt?: string;
 }
 
 /** Payload shape for data_collection_schema_break (#230 Phase A).
@@ -292,6 +286,12 @@ const TYPE_VARIABLES: { [K in NotificationType]?: TemplateVariableDescriptor[] }
     { name: 'featureId', label: 'Feature ID', example: 'drains/123' },
     { name: 'createdByName', label: 'Created by', example: 'Contributor User' },
     {
+      name: 'featureCount',
+      label: 'Feature count',
+      description:
+        'Set only on the single summary sent when one request adds more than 10 features.',
+    },
+    {
       name: 'summary',
       label: 'Summary',
       description: 'First non-empty user field on the new feature.',
@@ -311,6 +311,12 @@ const TYPE_VARIABLES: { [K in NotificationType]?: TemplateVariableDescriptor[] }
     { name: 'featureId', label: 'Feature ID', example: 'points/456' },
     { name: 'createdByName', label: 'Created by', example: 'Field Worker' },
     {
+      name: 'featureCount',
+      label: 'Feature count',
+      description:
+        'Set only on the single summary sent when one request adds more than 10 features.',
+    },
+    {
       name: 'summary',
       label: 'Summary',
       description: 'First non-empty user field on the new feature.',
@@ -328,21 +334,6 @@ const TYPE_VARIABLES: { [K in NotificationType]?: TemplateVariableDescriptor[] }
       description: 'First answered question.',
       example: 'jane@example.com',
     },
-  ],
-  user_invited: [
-    {
-      name: 'invitedEmail',
-      label: 'Invited email',
-      example: 'newuser@example.com',
-    },
-    { name: 'invitedByName', label: 'Invited by', example: 'Admin User' },
-    {
-      name: 'inviteLink',
-      label: 'Invite link',
-      description: 'One-time-use link to accept the invite.',
-      example: 'https://auth.example.org/...',
-    },
-    { name: 'expiresAt', label: 'Expires at', example: 'in 7 days' },
   ],
   data_collection_schema_break: [
     { name: 'dataCollectionId', label: 'Deployment ID' },
@@ -493,14 +484,15 @@ const renderers: { [K in NotificationType]?: Renderer<unknown> } = {
     const editorUrl = `${ctx.baseUrl}/items/${payload.editorId}`;
     const dataLayerUrl = `${ctx.baseUrl}/items/${payload.dataLayerId}`;
     const subject = `New submission on "${payload.editorTitle}": ${payload.summary}`;
+    const what = addedWhat(payload.featureCount);
     const text =
-      `${payload.createdByName} added a feature through "${payload.editorTitle}".\n\n` +
+      `${payload.createdByName} added ${what} through "${payload.editorTitle}".\n\n` +
       `Layer: ${payload.dataLayerTitle}\n` +
       `Summary: ${payload.summary}\n\n` +
       `Editor: ${editorUrl}\n` +
       `Data layer: ${dataLayerUrl}\n`;
     const html =
-      `<p><strong>${escapeHtml(payload.createdByName)}</strong> added a feature ` +
+      `<p><strong>${escapeHtml(payload.createdByName)}</strong> added ${what} ` +
       `through <strong>${escapeHtml(payload.editorTitle)}</strong>.</p>` +
       `<ul>` +
       `<li>Layer: ${escapeHtml(payload.dataLayerTitle)}</li>` +
@@ -518,14 +510,15 @@ const renderers: { [K in NotificationType]?: Renderer<unknown> } = {
     const deploymentUrl = `${ctx.baseUrl}/items/${payload.dataCollectionId}`;
     const dataLayerUrl = `${ctx.baseUrl}/items/${payload.dataLayerId}`;
     const subject = `New field submission on "${payload.dataCollectionTitle}": ${payload.summary}`;
+    const what = addedWhat(payload.featureCount);
     const text =
-      `${payload.createdByName} added a feature through your "${payload.dataCollectionTitle}" field deployment.\n\n` +
+      `${payload.createdByName} added ${what} through your "${payload.dataCollectionTitle}" field deployment.\n\n` +
       `Layer: ${payload.dataLayerTitle}\n` +
       `Summary: ${payload.summary}\n\n` +
       `Deployment: ${deploymentUrl}\n` +
       `Data layer: ${dataLayerUrl}\n`;
     const html =
-      `<p><strong>${escapeHtml(payload.createdByName)}</strong> added a feature ` +
+      `<p><strong>${escapeHtml(payload.createdByName)}</strong> added ${what} ` +
       `through your <strong>${escapeHtml(payload.dataCollectionTitle)}</strong> ` +
       `field deployment.</p>` +
       `<ul>` +
@@ -634,29 +627,6 @@ const renderers: { [K in NotificationType]?: Renderer<unknown> } = {
     return { subject, text, html };
   }) as Renderer<unknown>,
 
-  user_invited: ((payload: UserInvitedPayload, ctx) => {
-    const expiryNote = payload.expiresAt
-      ? ` (link expires ${formatDate(payload.expiresAt)})`
-      : '';
-    const subject = `${payload.invitedByName} invited you to ${ctx.orgLabel}`;
-    const text =
-      `${payload.invitedByName} invited you to ${ctx.orgLabel}.\n\n` +
-      `Click the link below to set a password and sign in${expiryNote}:\n\n` +
-      `${payload.inviteLink}\n`;
-    const html =
-      `<p><strong>${escapeHtml(payload.invitedByName)}</strong> invited you to ` +
-      `<strong>${escapeHtml(ctx.orgLabel)}</strong>.</p>` +
-      `<p>Click the button below to set a password and sign in${escapeHtml(
-        expiryNote,
-      )}:</p>` +
-      `<p><a href="${escapeAttr(payload.inviteLink)}" ` +
-      `style="display:inline-block;background:#2563eb;color:#fff;padding:10px 18px;border-radius:6px;text-decoration:none;font-weight:600;">` +
-      `Accept invitation</a></p>` +
-      `<p style="font-size:12px;color:#666;">Or copy this link into your browser: ` +
-      `<a href="${escapeAttr(payload.inviteLink)}">${escapeHtml(payload.inviteLink)}</a></p>`;
-    return { subject, text, html };
-  }) as Renderer<unknown>,
-
   comment_mentioned: ((payload: CommentMentionedPayload, ctx) => {
     const itemUrl =
       `${ctx.baseUrl}/items/${payload.itemId}` +
@@ -729,6 +699,13 @@ function formatDate(iso: string): string {
   } catch {
     return iso;
   }
+}
+
+/** "a feature", or "12 features" on the bulk summary notification. */
+function addedWhat(featureCount: number | undefined): string {
+  return typeof featureCount === 'number' && featureCount > 1
+    ? `${featureCount} features`
+    : 'a feature';
 }
 
 function escapeHtml(s: string): string {

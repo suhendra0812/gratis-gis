@@ -1009,6 +1009,7 @@ export const ptBR: Partial<CatalogShape> = {
     moreAddOptions: 'Mais opções de adicionar',
     addGroup: 'Adicionar grupo',
     emptyNoLayers: 'Ainda não há camadas.',
+    tablesHeading: 'Tabelas',
     emptyCanEdit: 'Adicione uma por URL, portal ou catálogo.',
     emptyViewer: 'O proprietário não adicionou camadas.',
     newGroupDefaultTitle: 'Novo grupo',
@@ -1266,6 +1267,7 @@ export const ptBR: Partial<CatalogShape> = {
     noIconsMatch: 'Nenhum ícone corresponde.',
   },
   mapFilterEditor: {
+    selectedFeatures: 'Somente as {count} feições escolhidas na tabela de atributos',
     clauses: 'Cláusulas',
     noFilter: 'Sem filtro',
     matchAll: 'corresponder a TODAS',
@@ -1554,6 +1556,10 @@ export const ptBR: Partial<CatalogShape> = {
     applyFolderSharing: 'Aplicar compartilhamento da pasta',
     applyFolderSharingTitle:
       'Aplica o compartilhamento desta pasta a cada item dentro dela. Cada item termina com as mesmas linhas de compartilhamento que a pasta.',
+    sortLabel: 'Ordenação',
+    sortAz: 'A a Z',
+    sortCustom: 'Personalizada',
+    sortCustomTitle: 'Sua ordem salva. Arraste as linhas para alterá-la.',
     newSubfolder: 'Nova subpasta',
     newSubfolderTitle: 'Criar uma nova subpasta dentro desta pasta',
     addItems: 'Adicionar itens',
@@ -2383,8 +2389,6 @@ export const ptBR: Partial<CatalogShape> = {
     loadingMaps: 'Carregando mapas...',
     noMaps: 'Nenhum mapa ainda',
     layerGone: '{item} não tem mais uma camada "{layerKey}".',
-    tableNoShapes:
-      '{layer} é uma tabela sem formas, então não há nada para desenhar.',
   },
   mapAddLayer: {
     title: 'Adicionar camada',
@@ -2528,6 +2532,9 @@ export const ptBR: Partial<CatalogShape> = {
     },
   },
   mapSearch: {
+    hiddenLayer: 'Oculta',
+    hiddenLayerHint:
+      'Esta camada está desligada. Escolher o resultado a liga.',
     geocoderUnavailable:
       'A busca de lugares está indisponível no momento ({reason}). Os resultados de camadas acima não são afetados.',
     noPlaces:
@@ -3010,6 +3017,7 @@ export const ptBR: Partial<CatalogShape> = {
     moreNotShown: '+{count} a mais não exibidos.',
   },
   mapComments: {
+    loadOlder: 'Carregar tópicos anteriores',
     title: 'Comentários',
     panelAria: 'Comentários do mapa',
     closeAria: 'Fechar painel de comentários',
@@ -3180,7 +3188,10 @@ export const ptBR: Partial<CatalogShape> = {
   mapLayerAccess: {
     resetToInherit: "Reset to inherit",
     customOnlyListed:
-      "Only the people and groups listed here see this layer. Org members and public viewers the map is not shared with do not.",
+      "Custom access: each column decides what that viewer gets. Everyone else covers org members and public viewers the map is not shared with by name.",
+    everyoneElse: 'Todos os outros',
+    everyoneElseType: 'organização e público',
+    everyoneElseHint: 'Membros da organização e visitantes públicos com quem o mapa não é compartilhado nominalmente.',
     title: 'Acesso às camadas',
     description:
       'Ajuste o que cada usuário ou grupo compartilhado vê neste mapa. A matriz restringe o acesso; um aviso aparece quando um principal não tem acesso em nível de item aos dados de origem de uma camada.',
@@ -3587,6 +3598,18 @@ export const ptBR: Partial<CatalogShape> = {
       'Mantenha os volumes. A próxima inicialização atualiza o Keycloak. Para HTTPS no Tailscale, use o nome MagicDNS com https:// e o Tailscale Serve. Um IP da tailnet continua em http:// com a porta.',
   },
   adminSecurity: {
+    embedTitle:
+      'Sites que os apps podem incorporar',
+    embedIntro:
+      'O widget Incorporar dos apps personalizados pode mostrar páginas destes sites. Digite um endereço por linha, por exemplo https://dashboards.example.org. Use https://*.example.org para todos os subdomínios. As outras páginas do portal continuam sem incorporar nada externo.',
+    embedSave:
+      'Salvar sites',
+    embedSaving:
+      'Salvando…',
+    embedSaved:
+      'Salvo.',
+    embedErr:
+      'Não foi possível salvar os sites.',
     pageIntro:
       'Adicione uma conta de trabalho que as pessoas já tenham e decida se o próximo login deve configurar um autenticador.',
     errLoad: 'Não foi possível carregar as configurações de login.',
@@ -3744,6 +3767,7 @@ export const ptBR: Partial<CatalogShape> = {
     maintenanceOff: 'Desligar manutenção',
     failed: 'A solicitação falhou.',
     operatorOnly: 'Prontidão e manutenção valem para toda a instalação, então só administradores da organização operadora podem usá-las.',
+    backupUiDisabled: 'Backup, restauração e manutenção estão desligados nesta instalação (GRATIS_DISABLE_BACKUP_UI).',
   },
   opsBackup: {
     failureBanner: 'Uma cópia não terminou. Leia a execução que falhou. Um aviso é enviado uma vez se as notificações estiverem ativas.',
@@ -4069,14 +4093,12 @@ export const ptBR: Partial<CatalogShape> = {
     hidePassword: 'ocultar',
     checkboxEnabled: 'Ativado',
     checkboxSslTls: 'SSL / TLS na conexão (porta 465)',
-    labelSendTestTo: 'Enviar teste para',
-    placeholderTestEmail: 'voce@exemplo.com',
     sendTest: 'Enviar teste',
     smtpSavedRealmWarning:
       'SMTP salvo, mas a sincronização do realm Keycloak falhou: {warning}',
     smtpSavedOk: 'Salvo. O worker usará o novo SMTP no próximo envio.',
     saveFailed: 'Falha ao salvar.',
-    testEmailInvalid: 'Digite um endereço de e-mail válido para o teste.',
+    testGoesToYou: 'O teste vai para o e-mail da sua própria conta.',
     testSent: 'Teste enviado para {email}.',
     testFailedUnclear: 'Teste falhou sem erro claro.',
     testFailed: 'Teste falhou.',
@@ -4423,6 +4445,8 @@ export const ptBR: Partial<CatalogShape> = {
     errors: {
       moveRepeatInAttachment: "Can't move a repeating group inside an attachment group. Each attachment is already one repeat instance, so a nested repeat here would mean attachment-of-attachment, which the data model doesn't support.",
       saveFailed: "Save failed.",
+      repeatGroupUnbound:
+        "Repeat group {groups} has no related table in the linked layer to save its rows into. Rebuild it with \"Start from a data layer\" from one of the layer's related tables, or remove it.",
       layerSyncFailed: "Form saved, but couldn't update the linked layer's columns: {detail}",
       invalidJson: "That file is not valid JSON.",
       questionIdUsed: "Question id \"{id}\" is already used.",

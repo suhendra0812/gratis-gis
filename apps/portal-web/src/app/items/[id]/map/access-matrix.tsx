@@ -9,10 +9,8 @@ import {
   Link2,
   Loader2,
   Search,
-  Users,
 } from 'lucide-react';
 import type {
-  ItemShare,
   MapLayer,
   MapLayerAccess,
   MapLayerAccessEntry,
@@ -26,10 +24,14 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog';
 import { useT } from '@/lib/i18n/locale-context';
+import { matrixEntryFor, writeMatrixEntry } from '@/lib/map-access-matrix';
 import {
-  matrixEntryFor,
-  principalHasItemAccess as itemAccessFor,
-  writeMatrixEntry,
+  hasAccess as answerHasAccess,
+  type AccessAnswers,
+} from '@/lib/principal-access';
+import {
+  EVERYONE_ELSE,
+  everyoneHasItemAccess,
   type ItemReach,
 } from '@/lib/map-access-matrix';
 
@@ -40,7 +42,9 @@ import {
  * so the matrix can still render during a lookup.
  */
 export interface MatrixPrincipal {
-  type: 'user' | 'group';
+  /** 'everyone' is the matrix's own "Everyone else" column, never a
+   *  share (see EVERYONE_ELSE). */
+  type: 'user' | 'group' | 'everyone';
   id: string;
   name: string;
 }
@@ -57,18 +61,17 @@ interface Props {
    */
   layerItemIds: Record<string, string | null>;
   /**
-   * Current item-level shares keyed by item id. Matrix uses this to
-   * detect "webmap shared, but underlying item isn't" gaps. Fetched
-   * by the parent when the modal opens.
+   * Server answers to "can this principal read that backing item",
+   * keyed by item id then principal. Matrix uses them to detect
+   * "webmap shared, but underlying item isn't" gaps. Fetched by the
+   * parent when the modal opens; unknown pairs raise no warning.
    */
-  itemShares: Record<string, ItemShare[]>;
+  itemAccess: AccessAnswers;
   /**
-   * Access level and owner of each backing item, keyed by item id.
-   * An org-wide or public item, or the item's owner, needs no share.
+   * Access level of each backing item, keyed by item id. Decides the
+   * "Everyone else" column, which no share can name.
    */
   itemReach?: Record<string, ItemReach>;
-  /** Groups the current user can see; used to resolve group membership. */
-  groupMemberships: Record<string, string[]>;
   onClose: () => void;
   /** Patch a single layer's `access` field; parent merges into its state. */
   onPatchAccess: (layerId: string, next: MapLayerAccess) => void;
@@ -76,7 +79,7 @@ interface Props {
    * Grant `view` permission on a backing item to a principal. Matrix
    * calls this for single-cell "fix it" actions and the bulk-grant
    * button at the top. Parent performs the POST to /items/:id/share
-   * and refreshes the itemShares entry.
+   * and marks the pair as granted.
    */
   onGrantItemAccess: (
     itemId: string,
@@ -107,9 +110,8 @@ export function AccessMatrix({
   layers,
   principals,
   layerItemIds,
-  itemShares,
+  itemAccess,
   itemReach = {},
-  groupMemberships,
   onClose,
   onPatchAccess,
   onGrantItemAccess,
@@ -126,6 +128,13 @@ export function AccessMatrix({
   useEffect(() => {
     if (!open) setActivePopover(null);
   }, [open]);
+
+  // Matrix columns: every principal the map is shared with, then
+  // "Everyone else" (org-wide and public viewers no share names).
+  const columns = useMemo<MatrixPrincipal[]>(
+    () => [...principals, { ...EVERYONE_ELSE, name: t('mapLayerAccess.everyoneElse') }],
+    [principals, t],
+  );
 
   const filtered = useMemo(() => {
     const q = filter.trim().toLowerCase();
@@ -144,7 +153,9 @@ export function AccessMatrix({
       principal: MatrixPrincipal;
     }> = [];
     const hasAccess = (itemId: string, p: MatrixPrincipal): boolean =>
-      itemAccessFor(itemShares[itemId], itemReach[itemId], p, groupMemberships);
+      p.type === 'everyone'
+        ? everyoneHasItemAccess(itemReach[itemId])
+        : answerHasAccess(itemAccess, itemId, { type: p.type, id: p.id });
     for (const layer of layers) {
       const itemId = layerItemIds[layer.id];
       if (!itemId) continue;
@@ -155,7 +166,7 @@ export function AccessMatrix({
       }
     }
     return out;
-  }, [layers, layerItemIds, itemShares, itemReach, principals, groupMemberships]);
+  }, [layers, layerItemIds, itemAccess, itemReach, principals]);
 
   const principalKey = (p: MatrixPrincipal) => `${p.type}:${p.id}`;
 
@@ -175,14 +186,16 @@ export function AccessMatrix({
 
   /**
    * Does this principal have at least view access to the given item?
-   * A user matches by their own id; a group matches as itself; a user
-   * also matches any group they belong to (via groupMemberships).
+   * The server decides for users and groups (owner, org-wide, public,
+   * user and group shares; see lib/principal-access.ts). "Everyone
+   * else" is decided from the item's access level alone.
    */
   function principalHasItemAccess(
     itemId: string,
     p: MatrixPrincipal,
   ): boolean {
-    return itemAccessFor(itemShares[itemId], itemReach[itemId], p, groupMemberships);
+    if (p.type === 'everyone') return everyoneHasItemAccess(itemReach[itemId]);
+    return answerHasAccess(itemAccess, itemId, { type: p.type, id: p.id });
   }
 
   function entryFor(
@@ -199,7 +212,7 @@ export function AccessMatrix({
   ) {
     onPatchAccess(
       layer.id,
-      writeMatrixEntry(layer.access, principals, p, patch, layerEditable(layer)),
+      writeMatrixEntry(layer.access, columns, p, patch, layerEditable(layer)),
     );
   }
 
@@ -294,13 +307,7 @@ export function AccessMatrix({
         </div>
 
         <div className="flex-1 overflow-auto">
-          {principals.length === 0 ? (
-            <div className="flex flex-col items-center justify-center gap-2 py-12 text-sm text-muted">
-              <Users className="h-6 w-6" />
-              <p>{t('mapLayerAccess.shareFirst')}</p>
-              <p className="text-xs">{t('mapLayerAccess.shareFirstHint')}</p>
-            </div>
-          ) : filtered.length === 0 ? (
+          {filtered.length === 0 ? (
             <div className="py-12 text-center text-sm text-muted">
               {t('mapLayerAccess.noLayersMatch')}
             </div>
@@ -311,15 +318,22 @@ export function AccessMatrix({
                   <th className="sticky left-0 z-10 border-b border-r border-border bg-surface-1 px-3 py-2 text-left text-2xs font-medium uppercase tracking-wide text-muted">
                     {t('mapLayerAccess.layerHeader')}
                   </th>
-                  {principals.map((p) => (
+                  {columns.map((p) => (
                     <th
                       key={principalKey(p)}
                       className="border-b border-border px-2 py-2 text-center font-medium"
+                      title={
+                        p.type === 'everyone'
+                          ? t('mapLayerAccess.everyoneElseHint')
+                          : undefined
+                      }
                     >
                       <div className="flex flex-col items-center gap-0.5">
                         <span className="text-xs text-ink-0">{p.name}</span>
                         <span className="text-2xs text-muted">
-                          {p.type}
+                          {p.type === 'everyone'
+                            ? t('mapLayerAccess.everyoneElseType')
+                            : p.type}
                         </span>
                       </div>
                     </th>
@@ -364,7 +378,7 @@ export function AccessMatrix({
                           </div>
                         ) : null}
                       </td>
-                      {principals.map((p) => {
+                      {columns.map((p) => {
                         const key = principalKey(p);
                         const entry = entryFor(layer, p);
                         const hasItemAccess = itemId
@@ -427,7 +441,7 @@ export function AccessMatrix({
             const aLayer = layers.find(
               (l) => l.id === activePopover.layerId,
             );
-            const aPrincipal = principals.find(
+            const aPrincipal = columns.find(
               (pp) => principalKey(pp) === activePopover.principalKey,
             );
             if (!aLayer || !aPrincipal) return null;
@@ -452,7 +466,7 @@ export function AccessMatrix({
                   writeEntry(aLayer, aPrincipal, patch)
                 }
                 onClose={() => setActivePopover(null)}
-                {...(aItemId && !aHasItem
+                {...(aItemId && !aHasItem && aPrincipal.type !== 'everyone'
                   ? {
                       onGrant: () => {
                         void doGrant(aItemId, aPrincipal);
@@ -559,7 +573,7 @@ function AccessDetailDialog({
 }: {
   layerTitle: string;
   principalName: string;
-  principalType: 'user' | 'group';
+  principalType: 'user' | 'group' | 'everyone';
   entry: MapLayerAccessEntry;
   itemId: string | null;
   hasItemAccess: boolean;
@@ -586,10 +600,13 @@ function AccessDetailDialog({
             {layerTitle}
           </DialogTitle>
           <DialogDescription className="text-xs text-muted">
-            {principalType === 'group'
-              ? t('mapLayerAccess.groupLabel')
-              : t('mapLayerAccess.userLabel')}{' '}
-            · {principalName}
+            {principalType === 'everyone'
+              ? t('mapLayerAccess.everyoneElseHint')
+              : `${
+                  principalType === 'group'
+                    ? t('mapLayerAccess.groupLabel')
+                    : t('mapLayerAccess.userLabel')
+                } · ${principalName}`}
           </DialogDescription>
         </div>
 

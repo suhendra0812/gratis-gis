@@ -1058,6 +1058,7 @@ export const en = {
     moreAddOptions: 'More add options',
     addGroup: 'Add group',
     emptyNoLayers: 'No layers yet.',
+    tablesHeading: 'Tables',
     emptyCanEdit: 'Add one from a URL, the portal, or the curated catalog.',
     emptyViewer: 'The owner has not added any layers.',
     newGroupDefaultTitle: 'New group',
@@ -1316,6 +1317,7 @@ export const en = {
     noIconsMatch: 'No icons match.',
   },
   mapFilterEditor: {
+    selectedFeatures: 'Only the {count} features picked in the attribute table',
     /** Filter tab controls (#162). */
     clauses: 'Clauses',
     noFilter: 'No filter',
@@ -1611,6 +1613,10 @@ export const en = {
     applyFolderSharing: 'Apply folder sharing',
     applyFolderSharingTitle:
       "Apply this folder's sharing to every item inside it. Each item ends up with the same share rows the folder has.",
+    sortLabel: 'Sort',
+    sortAz: 'A to Z',
+    sortCustom: 'Custom',
+    sortCustomTitle: 'Your saved order. Drag rows to change it.',
     newSubfolder: 'New subfolder',
     newSubfolderTitle: 'Create a new subfolder inside this folder',
     addItems: 'Add items',
@@ -2534,8 +2540,6 @@ export const en = {
     loadingMaps: 'Loading maps...',
     noMaps: 'No maps yet',
     layerGone: '{item} no longer has a layer "{layerKey}".',
-    tableNoShapes:
-      '{layer} is a table with no shapes, so there is nothing to draw.',
   },
   // Map editor: Add Layer dialog (portal / file / URL / ArcGIS / New).
   mapAddLayer: {
@@ -2681,6 +2685,9 @@ export const en = {
   },
   // The map builder's search bar: place results from the geocoder.
   mapSearch: {
+    hiddenLayer: 'Hidden',
+    hiddenLayerHint:
+      'This layer is turned off. Picking the result turns it on.',
     geocoderUnavailable:
       'Place search is unavailable right now ({reason}). Layer results above are unaffected.',
     noPlaces:
@@ -3151,6 +3158,7 @@ export const en = {
     moreNotShown: '+{count} more not shown.',
   },
   mapComments: {
+    loadOlder: 'Load older threads',
     title: 'Comments',
     panelAria: 'Map comments',
     closeAria: 'Close comments panel',
@@ -3318,7 +3326,10 @@ export const en = {
   mapLayerAccess: {
     resetToInherit: "Reset to inherit",
     customOnlyListed:
-      "Only the people and groups listed here see this layer. Org members and public viewers the map is not shared with do not.",
+      "Custom access: each column decides what that viewer gets. Everyone else covers org members and public viewers the map is not shared with by name.",
+    everyoneElse: 'Everyone else',
+    everyoneElseType: 'org and public',
+    everyoneElseHint: 'Org members and public viewers the map is not shared with by name.',
     title: 'Layer access',
     description:
       'Refine what each shared user or group sees on this map. The matrix narrows access; a warning badge appears when a principal has no item-level access to a layer\'s source data.',
@@ -3730,6 +3741,18 @@ export const en = {
   },
   /** Admin → Sign-in (#162). */
   adminSecurity: {
+    embedTitle:
+      'Sites apps may embed',
+    embedIntro:
+      'The Embed widget in custom apps can show pages from these sites. Enter one site address per line, such as https://dashboards.example.org. Use https://*.example.org for every subdomain. Other pages of the portal still embed nothing from outside.',
+    embedSave:
+      'Save sites',
+    embedSaving:
+      'Saving…',
+    embedSaved:
+      'Saved.',
+    embedErr:
+      'Could not save the sites.',
     pageIntro:
       'Add a work account people already have, and decide whether the next sign-in must set up an authenticator.',
     errLoad: 'Could not load sign-in settings.',
@@ -3890,6 +3913,7 @@ export const en = {
     maintenanceOff: 'Turn maintenance off',
     failed: 'The request failed.',
     operatorOnly: 'Readiness and maintenance cover the whole install, so only admins of the operator organization can use them.',
+    backupUiDisabled: 'Backup, restore and maintenance controls are turned off on this install (GRATIS_DISABLE_BACKUP_UI).',
   },
   opsBackup: {
     failureBanner: 'A backup did not finish. Read the failed run below. A notice is sent once for that run when notifications are enabled.',
@@ -4218,14 +4242,12 @@ export const en = {
     hidePassword: 'hide',
     checkboxEnabled: 'Enabled',
     checkboxSslTls: 'SSL / TLS on connect (port 465)',
-    labelSendTestTo: 'Send test to',
-    placeholderTestEmail: 'you@example.com',
     sendTest: 'Send test',
     smtpSavedRealmWarning:
       'SMTP saved, but Keycloak realm sync failed: {warning}',
     smtpSavedOk: 'Saved. Worker will use new SMTP on next send.',
     saveFailed: 'Save failed.',
-    testEmailInvalid: 'Enter a valid email address to test.',
+    testGoesToYou: 'The test goes to your own account email.',
     testSent: 'Test sent to {email}.',
     testFailedUnclear: 'Test failed without a clear error.',
     testFailed: 'Test failed.',
@@ -4573,6 +4595,8 @@ export const en = {
     errors: {
       moveRepeatInAttachment: "Can't move a repeating group inside an attachment group. Each attachment is already one repeat instance, so a nested repeat here would mean attachment-of-attachment, which the data model doesn't support.",
       saveFailed: "Save failed.",
+      repeatGroupUnbound:
+        "Repeat group {groups} has no related table in the linked layer to save its rows into. Rebuild it with \"Start from a data layer\" from one of the layer's related tables, or remove it.",
       layerSyncFailed: "Form saved, but couldn't update the linked layer's columns: {detail}",
       invalidJson: "That file is not valid JSON.",
       questionIdUsed: "Question id \"{id}\" is already used.",

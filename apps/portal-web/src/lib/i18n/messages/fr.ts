@@ -1011,6 +1011,7 @@ export const fr: Partial<CatalogShape> = {
     moreAddOptions: 'Plus d\'options d\'ajout',
     addGroup: 'Ajouter un groupe',
     emptyNoLayers: 'Aucune couche pour l\'instant.',
+    tablesHeading: 'Tables',
     emptyCanEdit: 'Ajoutez-en une depuis une URL, le portail ou le catalogue.',
     emptyViewer: 'Le propriétaire n\'a ajouté aucune couche.',
     newGroupDefaultTitle: 'Nouveau groupe',
@@ -1268,6 +1269,7 @@ export const fr: Partial<CatalogShape> = {
     noIconsMatch: 'Aucune icône ne correspond.',
   },
   mapFilterEditor: {
+    selectedFeatures: 'Seulement les {count} entités choisies dans la table attributaire',
     clauses: 'Clauses',
     noFilter: 'Aucun filtre',
     matchAll: 'correspondre à TOUTES',
@@ -1557,6 +1559,10 @@ export const fr: Partial<CatalogShape> = {
     applyFolderSharing: 'Appliquer le partage du dossier',
     applyFolderSharingTitle:
       'Appliquez le partage de ce dossier à chaque élément qu’il contient. Chaque élément se retrouve avec les mêmes lignes de partage que le dossier.',
+    sortLabel: 'Tri',
+    sortAz: 'A à Z',
+    sortCustom: 'Personnalisé',
+    sortCustomTitle: 'Votre ordre enregistré. Faites glisser les lignes pour le modifier.',
     newSubfolder: 'Nouveau sous-dossier',
     newSubfolderTitle: 'Créer un nouveau sous-dossier dans ce dossier',
     addItems: 'Ajouter des éléments',
@@ -2395,8 +2401,6 @@ export const fr: Partial<CatalogShape> = {
     loadingMaps: 'Chargement des cartes...',
     noMaps: 'Aucune carte pour le moment',
     layerGone: '{item} n\'a plus de couche "{layerKey}".',
-    tableNoShapes:
-      "{layer} est une table sans formes, il n'y a donc rien à dessiner.",
   },
   mapAddLayer: {
     title: 'Ajouter une couche',
@@ -2540,6 +2544,9 @@ export const fr: Partial<CatalogShape> = {
     },
   },
   mapSearch: {
+    hiddenLayer: 'Masquée',
+    hiddenLayerHint:
+      'Cette couche est masquée. Choisir le résultat l\'affiche.',
     geocoderUnavailable:
       'La recherche de lieux est indisponible pour le moment ({reason}). Les résultats de couches ci-dessus ne sont pas affectés.',
     noPlaces:
@@ -3021,6 +3028,7 @@ export const fr: Partial<CatalogShape> = {
     moreNotShown: '+{count} de plus non affichés.',
   },
   mapComments: {
+    loadOlder: 'Charger les fils plus anciens',
     title: 'Commentaires',
     panelAria: 'Commentaires de la carte',
     closeAria: 'Fermer le panneau des commentaires',
@@ -3191,7 +3199,10 @@ export const fr: Partial<CatalogShape> = {
   mapLayerAccess: {
     resetToInherit: "Reset to inherit",
     customOnlyListed:
-      "Only the people and groups listed here see this layer. Org members and public viewers the map is not shared with do not.",
+      "Custom access: each column decides what that viewer gets. Everyone else covers org members and public viewers the map is not shared with by name.",
+    everyoneElse: 'Tous les autres',
+    everyoneElseType: 'organisation et public',
+    everyoneElseHint: 'Membres de l’organisation et visiteurs publics avec qui la carte n’est pas partagée nommément.',
     title: 'Accès aux couches',
     description:
       "Affinez ce que chaque utilisateur ou groupe partagé voit sur cette carte. La matrice restreint l'accès ; un badge d'avertissement apparaît lorsqu'un principal n'a pas d'accès au niveau de l'élément aux données source d'une couche.",
@@ -3597,6 +3608,18 @@ export const fr: Partial<CatalogShape> = {
       'Conservez les volumes. Le prochain démarrage met Keycloak à jour. Pour le HTTPS Tailscale, utilisez le nom MagicDNS avec https:// et Tailscale Serve. Une IP du tailnet reste en http:// avec le port.',
   },
   adminSecurity: {
+    embedTitle:
+      'Sites que les applications peuvent intégrer',
+    embedIntro:
+      "Le widget Intégrer des applications personnalisées peut afficher des pages de ces sites. Saisissez une adresse par ligne, par exemple https://dashboards.example.org. Utilisez https://*.example.org pour tous les sous-domaines. Les autres pages du portail n'intègrent toujours rien d'extérieur.",
+    embedSave:
+      'Enregistrer les sites',
+    embedSaving:
+      'Enregistrement…',
+    embedSaved:
+      'Enregistré.',
+    embedErr:
+      "Impossible d'enregistrer les sites.",
     pageIntro:
       'Ajoutez un compte professionnel que les gens ont déjà, et décidez si la prochaine connexion doit configurer un authentificateur.',
     errLoad: 'Impossible de charger les paramètres de connexion.',
@@ -3754,6 +3777,7 @@ export const fr: Partial<CatalogShape> = {
     maintenanceOff: 'Arrêter la maintenance',
     failed: 'La requête a échoué.',
     operatorOnly: 'La disponibilité et la maintenance concernent toute l\'installation : seuls les admins de l\'organisation opératrice peuvent les utiliser.',
+    backupUiDisabled: 'La sauvegarde, la restauration et la maintenance sont désactivées sur cette installation (GRATIS_DISABLE_BACKUP_UI).',
   },
   opsBackup: {
     failureBanner: 'Une sauvegarde n’a pas fini. Lisez l’exécution en échec. Un avis part une seule fois si les notifications sont actives.',
@@ -4079,14 +4103,12 @@ export const fr: Partial<CatalogShape> = {
     hidePassword: 'masquer',
     checkboxEnabled: 'Activé',
     checkboxSslTls: 'SSL / TLS à la connexion (port 465)',
-    labelSendTestTo: 'Envoyer un test à',
-    placeholderTestEmail: 'vous@exemple.com',
     sendTest: 'Envoyer un test',
     smtpSavedRealmWarning:
       'SMTP enregistré, mais la synchro du realm Keycloak a échoué : {warning}',
     smtpSavedOk: 'Enregistré. Le worker utilisera le nouveau SMTP au prochain envoi.',
     saveFailed: 'Échec de l\'enregistrement.',
-    testEmailInvalid: 'Saisissez une adresse e-mail valide pour le test.',
+    testGoesToYou: "Le test est envoyé à l'adresse e-mail de votre propre compte.",
     testSent: 'Test envoyé à {email}.',
     testFailedUnclear: 'Échec du test sans message d\'erreur clair.',
     testFailed: 'Échec du test.',
@@ -4433,6 +4455,8 @@ export const fr: Partial<CatalogShape> = {
     errors: {
       moveRepeatInAttachment: "Can't move a repeating group inside an attachment group. Each attachment is already one repeat instance, so a nested repeat here would mean attachment-of-attachment, which the data model doesn't support.",
       saveFailed: "Save failed.",
+      repeatGroupUnbound:
+        "Repeat group {groups} has no related table in the linked layer to save its rows into. Rebuild it with \"Start from a data layer\" from one of the layer's related tables, or remove it.",
       layerSyncFailed: "Form saved, but couldn't update the linked layer's columns: {detail}",
       invalidJson: "That file is not valid JSON.",
       questionIdUsed: "Question id \"{id}\" is already used.",

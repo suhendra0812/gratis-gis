@@ -88,12 +88,6 @@ enum NotificationType {
   /// An editor target had a feature added. Phase 2 trigger
   /// (replaces the original Survey123-gap ask).
   editor_feature_created          @map("editor-feature-created")
-  /// An admin has invited a new user to the org. Sent to the
-  /// invitee with the realm-managed invite link. Replaces the
-  /// hand-rolled invite email body that used to live in the
-  /// admin-invite path so all transactional email goes through one
-  /// renderer.
-  user_invited                    @map("user-invited")
   /// A field deployment ('data_collection' item) had a feature
   /// added through the field runtime. Mirrors editor_feature_created
   /// but covers the field-deployment write path, which doesn't
@@ -244,6 +238,13 @@ model Organization {
   /// "dismiss forever" choices. Shape:
   /// { "completed": string[], "dismissed": string[] }.
   onboarding Json @default("{}")
+
+  /// Built-in starters (basemaps, app templates, themes, print
+  /// templates) this org purged, as "<item type>/<seed kind>". The
+  /// sign-in seeders skip these so a purged starter does not come
+  /// back on the next start. A trigger on item deletes fills it
+  /// (2026-11 review, 04-8).
+  dismissedSeedKinds String[] @default([]) @map("dismissed_seed_kinds")
 
   users                 User[]
   groups                Group[]
@@ -800,11 +801,15 @@ model BackupRun {
   finishedAt DateTime?    @map("finished_at")
   status     BackupStatus @default(running)
 
-  /// Filename (NOT full path) relative to BACKUP_DIR. Null while the
+  /// Filename (NOT full path) inside archiveDirectory. Null while the
   /// run is in progress; set atomically at finish. Kept opaque so
   /// operators can move the file to cold storage and just update the
   /// row if they need to.
   filename  String?
+  /// Absolute folder the run wrote its archive to, so changing the
+  /// archive directory later does not hide this archive. Null on rows
+  /// from before the column; those use the current folder.
+  archiveDirectory String? @map("archive_directory")
   /// Bytes on disk after compression. Null if the run failed before
   /// the archive was sealed.
   sizeBytes BigInt? @map("size_bytes")
@@ -945,6 +950,28 @@ model HousekeepingRun {
 
   @@index([startedAt])
   @@map("housekeeping_run")
+}
+
+/// One "Build search indexes" request (2026-11 review, 06-5). The
+/// API queues a row and the worker runs the build, because index
+/// builds on big layers outlast an HTTP request. At most one row per
+/// org is queued or running (partial unique index in the migration).
+model SearchIndexBuild {
+  id          String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId       String    @map("org_id") @db.Uuid
+  /// queued | running | succeeded | failed
+  status      String    @default("queued")
+  requestedBy String?   @map("requested_by") @db.Uuid
+  createdAt   DateTime  @default(now()) @map("created_at")
+  startedAt   DateTime? @map("started_at")
+  finishedAt  DateTime? @map("finished_at")
+  /// SearchIndexBuildResult once the build finished.
+  result      Json?
+  error       String?
+
+  @@index([orgId, createdAt])
+  @@index([status, createdAt])
+  @@map("search_index_build")
 }
 
 /// A share row grants access to an item for a single principal (either a
@@ -1253,6 +1280,10 @@ model FormSubmission {
   submittedBy   String?  @map("submitted_by") @db.Uuid
   capturedAt    DateTime @map("captured_at") @db.Timestamptz(6)
   createdAt     DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  /// Attachment storage keys the submitter was issued, checked when the
+  /// submission was stored. The mirror repair pass re-registers only
+  /// these without a live grant (finding 10-2).
+  verifiedAttachmentKeys String[] @default([]) @map("verified_attachment_keys")
 
   // The migration created these foreign keys; declaring them keeps a
   // future `migrate diff` from proposing to drop them. Deleting a form
