@@ -209,3 +209,6 @@ apps/portal-web/public/maplibre/
 
 # Cloudflare Origin Certificate for GG_TLS_MODE=cloudflare (deploy branch)
 infra/caddy-certs/
+
+# Code-graph tool cache (regenerated).
+graphify-out/

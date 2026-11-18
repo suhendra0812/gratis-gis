@@ -30,6 +30,12 @@ A date or time question in a form can start with the current date and time alrea
 ## 2026-11-06 - Edit and delete features in the field app
 In the field app, tap a feature to zoom to, edit, copy or delete it. Drag its shape on the map, place a point by hand or by GPS, and add, edit or delete its related records without leaving the form. It all works offline and syncs later. The compass can turn the map with the way you face.
 
+## 2026-11-17 - Help is easier to browse
+The help home page now leads with task cards (new here, publish, collect, analyze, build apps, automate, admin). The sidebar stays collapsed until you open a section, and Analysis / Items are grouped by job instead of one long flat list.
+
+## 2026-11-17 - Help pages show the real UI
+Getting started, form designer, map and data layer detail, and the analysis recipe steps (Buffer, Clip, and the other guided tools) now include screenshots of the live portal instead of wireframe drawings.
+
 ## [1.6.0] - 2026-11-13
 
 ## 2026-11-13 - A new look, and tighter sharing
