@@ -140,6 +140,61 @@ versioning policy is in [docs/VERSIONING.md](./docs/VERSIONING.md).
   spatial layer of the data layer, so one asset's inspections showed
   up under unrelated layers.
 
+- AI caps and lock for public installs. Daily call limits per
+  organization and per user, plus a per-minute limit per user, apply
+  before every model call and answer 429 `ai_quota_exceeded` when
+  reached. With public-testing hardening on (`PORTAL_LOCK_ADMIN_TIER`),
+  Admin, AI settings cannot be changed or cleared and AI build is off
+  unless `PORTAL_LOCK_AI_CONFIG` or `PORTAL_AI_DISABLE_BUILD` says
+  otherwise. `PORTAL_AI_BOOTSTRAP_*` can re-apply a provider key from
+  the host environment on every API start, so a database reset does not
+  lose it. All of this is off unless configured.
+
+### Changed
+
+- Map point icons regenerated from the installed lucide-react. 85
+  shapes had changed upstream (for example the rounded star), so map
+  symbols now match the same icons elsewhere in the app.
+
+### Fixed
+
+- Recently deleted loads the item trash 100 at a time with Previous and
+  Next, instead of every deleted item in the org at once. Select all
+  and the bulk actions cover the page shown. `GET /items/trash` takes
+  optional `limit` and `offset`; without them it still returns the
+  whole list.
+- Offline sync: when an edit's save had landed but its answer was lost,
+  later queued edits of the same feature were parked as conflicts with
+  that save. The web app and the Android app now move those edits onto
+  the version the earlier save left, as they already did when the
+  answer arrived.
+- Large imports no longer stall on a NAS. The NAS stack capped the
+  import worker at 1.5 GB, and a 700 MB shapefile of detailed polygons
+  needed about 2.5 GB on its second batch, so the worker was killed and
+  the import sat at 5,000 rows (#573). The NAS worker now defaults to
+  the same 3.5 GB ceiling as the VPS stack, and `GRATIS_WORKER_MEMORY`
+  and `GRATIS_WORKER_HEAP_MB` change it.
+- Imports flush a batch once it reaches about 16 MB of geometry as
+  well as at 5,000 rows, so files of very detailed polygons use far
+  less memory per batch on every install.
+- An import whose worker dies now fails within about 2 minutes,
+  instead of 5, with a message that names memory as the likely cause.
+  The worker beats on a timer while a job runs, so a slow batch is
+  never mistaken for a dead worker.
+- The import banner says "Finishing up" once every feature is read,
+  instead of sitting at 100% while the rows are saved, which takes a
+  few minutes on a large layer. Cancel is hidden for that step, since
+  it could no longer stop the import.
+- A data layer's overview map opens on its data. Layers without their
+  own stored extent (every sample layer on the demo) opened on the
+  whole world with the data as a dot; the preview now falls back to
+  the item's extent.
+
+### Documentation
+
+- Help: task-shaped landing hub, collapsed sidebar, and nested Analysis / Items / Coming-from-ArcGIS groups (URLs unchanged).
+- Help: real UI screenshots for getting-started, form designer, map editing (markup/comments/symbology), admin surfaces, web app detail, and analysis derived-layer recipes (Buffer, Clip, and the other guided steps).
+
 ## [1.6.1] - 2026-11-13
 
 Patch release: the sign-in page logo, a deploy step that keeps
