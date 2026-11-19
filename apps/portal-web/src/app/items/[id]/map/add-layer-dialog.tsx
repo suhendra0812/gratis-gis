@@ -1064,16 +1064,20 @@ export function AddLayerDialog({ open, onClose, onAdd }: Props) {
    * a table added afterwards (from QGIS, say) was never on it, and a
    * connection saved before any table existed offered nothing at all.
    * The probe also refreshes the snapshot for anyone who may edit the
-   * item. Several tables go under one group named for the connection,
-   * like a multi-layer ArcGIS service.
+   * item. A user who may not probe (no contributor role) gets the
+   * stored snapshot instead. Several tables go under one group named
+   * for the connection, like a multi-layer ArcGIS service.
    */
   async function addPostgisLiveItem(item: Item) {
-    let tables: Array<{ name: string; title?: string; geometryKind?: string }>;
+    type Table = { name: string; title?: string; geometryKind?: string };
+    let tables: Table[];
     try {
       const res = await fetch(`/api/portal/postgis-live/${item.id}/probe`, {
         method: 'POST',
       });
-      if (!res.ok) {
+      if (res.status === 403) {
+        tables = ((item.data ?? {}) as { layers?: Table[] }).layers ?? [];
+      } else if (!res.ok) {
         setError(
           t('mapAddLayer.errors.postgisProbeFailed', {
             title: item.title,
@@ -1081,8 +1085,9 @@ export function AddLayerDialog({ open, onClose, onAdd }: Props) {
           }),
         );
         return;
+      } else {
+        tables = (await res.json()) as Table[];
       }
-      tables = (await res.json()) as typeof tables;
     } catch (err) {
       setError(
         t('mapAddLayer.errors.postgisProbeFailed', {

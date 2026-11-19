@@ -2322,12 +2322,6 @@ const iconsInFlight = new WeakMap<maplibregl.Map, boolean>();
  *      path so they cost only one Object.keys + N hasImage checks.
  */
 /**
- * Returns whether any icon registration WORK happened. Callers use
- * this to decide whether a re-sync is needed; the fast path (all
- * registered already) must return false or the caller's tick bump
- * loops forever through the styledata events the re-sync emits.
- */
-/**
  * `m.hasImage(id)`, or true once the map has no style: it was removed
  * (the component unmounted) or a basemap swap is between styles.
  *
@@ -2343,6 +2337,12 @@ function hasImageOrGone(m: maplibregl.Map, id: string): boolean {
   return m.hasImage(id);
 }
 
+/**
+ * Returns whether any icon registration WORK happened. Callers use
+ * this to decide whether a re-sync is needed; the fast path (all
+ * registered already) must return false or the caller's tick bump
+ * loops forever through the styledata events the re-sync emits.
+ */
 async function loadAllIcons(m: maplibregl.Map): Promise<boolean> {
   if (iconsInFlight.get(m)) return false;
   // Fast path: every icon is already registered. Avoids the

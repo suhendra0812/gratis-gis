@@ -53,6 +53,14 @@ Skip it when:
    - **Default schema** — the schema where the picker looks for
      tables by default. Other schemas stay reachable from the
      detail page.
+   - **SSL** - whether the connection is encrypted, as `sslmode`
+     in psql or QGIS. **Prefer**, the default, tries an encrypted
+     connection first and falls back to an unencrypted one only
+     when the server has no SSL. **Require** insists on
+     encryption, **Verify** also checks the server's certificate,
+     and **Disable** never encrypts. Hosted databases such as
+     Neon, Supabase or Amazon RDS accept only encrypted
+     connections. Save stores the mode that connected.
 4. Click **Test connection**. On success you see the PostGIS
    version and a capped preview of geometry tables in the default
    schema (name, geometry kind, SRID, and a planner row estimate
@@ -77,9 +85,8 @@ geometry table in its schema is added, as one layer, or under a
 group named for the connection when there are several. The
 tables are read from the database at that moment, so a table
 created after the connection was saved (from QGIS, say) is
-included, and the connection's own list is refreshed too. Tables
-in any SRID work; geometry is reprojected to WGS84 on the way
-out. Every viewport move issues a bounding-box SELECT against the
+included, and the connection's own table list is refreshed too.
+Every viewport move issues a bounding-box SELECT against the
 database; only intersecting rows come back.
 
 To narrow rows further, open the layer panel's **Filter** tab and
