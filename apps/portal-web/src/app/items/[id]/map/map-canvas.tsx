@@ -1756,6 +1756,7 @@ export const MapCanvas = forwardRef<MapCanvasHandle, Props>(function MapCanvas(
       // is unnecessary.
       const isMvtFeature =
         layer.source.kind === 'data-layer' &&
+        Boolean(layer.source.layerKey) &&
         !layer.id.startsWith('editor-target:');
       const fallbackProps = hit.properties ?? {};
       popupRef.current = new maplibregl.Popup({ closeOnClick: true, maxWidth: '320px' })
@@ -3040,6 +3041,7 @@ function syncOverlays(
     if (!l.visible) continue;
     if (
       l.source.kind === 'data-layer' &&
+      l.source.layerKey &&
       !l.id.startsWith('editor-target:')
     ) {
       const url = dataLayerTileUrl(
@@ -3288,8 +3290,14 @@ function syncOverlays(
     // Editor-target layers stay on the GeoJSON path because the
     // editor needs full attrs in-feature to drive forms +
     // table-mode editing.
+    //
+    // Tiles exist per sublayer only. A data-layer source with no
+    // layerKey (a derived layer, or a v1/v2 single-table layer) has
+    // no tile route and drew nothing; it reads /items/:id/geojson.
     const isMvt =
-      layer.source.kind === 'data-layer' && !isEditorTarget;
+      layer.source.kind === 'data-layer' &&
+      Boolean(layer.source.layerKey) &&
+      !isEditorTarget;
 
     // Keep-alive verdict, decided against the live style before the
     // teardown pass. When kept, the source (and MapLibre's tile /
