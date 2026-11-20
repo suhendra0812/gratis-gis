@@ -106,6 +106,7 @@ TOOLS = (
     "calculate-field",
     "aggregate",
     "spatial-join",
+    "attribute-join",
     "spatial-filter",
     "clip",
     "erase",

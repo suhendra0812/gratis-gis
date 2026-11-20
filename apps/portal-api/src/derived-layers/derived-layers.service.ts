@@ -83,6 +83,7 @@ const ROW_LOCAL_TOOLS = new Set<string>([
   'calculate-field',
   'filter',
   'spatial-join',
+  'attribute-join',
   'spatial-filter',
   'clip',
   'erase',

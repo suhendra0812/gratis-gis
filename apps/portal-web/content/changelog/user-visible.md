@@ -21,6 +21,9 @@ new release banner when cutting a version tag.
 
 <!-- entries below this line are surfaced on the public landing page -->
 
+## 2026-11-20 - Join layers by attribute
+Derived layers can now join another layer by a shared field, such as an ID or a code, not only by location. Find it under "Compare with another layer": bring over the matching row's fields or a count of matches, and keep every row or only the ones that matched. Both this and the spatial join now let you pick which fields to keep from each layer and give the results friendlier names.
+
 ## 2026-11-19 - Field app is easier to read and use one-handed
 Bigger text across the field screens, a bolder count of edits waiting to sync, and the Submit button now sits at the bottom of the form where your thumb can reach it.
 
