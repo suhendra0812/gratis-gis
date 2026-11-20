@@ -77,6 +77,22 @@ versioning policy is in [docs/VERSIONING.md](./docs/VERSIONING.md).
   in settings. Any inline container can switch with **Arrange**. On
   a phone rows stack and grids drop to two columns. The KPI Dashboard
   template now puts its indicators and its charts in Rows.
+- An hourly check that pg_partman keeps partitions ahead of the data.
+  The API logs an error when rows have landed in a default partition
+  and a warning when an active partition set is under one interval
+  from its last partition, with the command that fixes each.
+  `infra/doctor.sh` runs the same check. pg_partman's background worker
+  errors on every run on Postgres 17.12 (upstream bug), and this makes
+  sure nothing goes wrong quietly while that is open (#758).
+- AI caps and lock for public installs. Daily call limits per
+  organization and per user, plus a per-minute limit per user, apply
+  before every model call and answer 429 `ai_quota_exceeded` when
+  reached. With public-testing hardening on (`PORTAL_LOCK_ADMIN_TIER`),
+  Admin, AI settings cannot be changed or cleared and AI build is off
+  unless `PORTAL_LOCK_AI_CONFIG` or `PORTAL_AI_DISABLE_BUILD` says
+  otherwise. `PORTAL_AI_BOOTSTRAP_*` can re-apply a provider key from
+  the host environment on every API start, so a database reset does not
+  lose it. All of this is off unless configured.
 
 ### Changed
 
@@ -88,6 +104,37 @@ versioning policy is in [docs/VERSIONING.md](./docs/VERSIONING.md).
   feature**. Clicking a feature opens the Edit feature panel, where
   the shape is edited alongside the attributes, instead of a
   shape-only session with its own Save shape bar.
+- AI screens stay out of the way until an AI provider is connected.
+  The sidebar Build entry and the item page's AI draft panel are hidden
+  while no provider is set, and opening the Build address directly
+  shows a short notice (with a link to Admin, AI assistant for org
+  admins). Saving or clearing the provider updates the sidebar without
+  a reload.
+- Admin pages share one column with the breadcrumb, so every page
+  starts at the same left edge. The old "Back to portal" links and
+  "Admin" labels on each page are gone; the breadcrumb replaces them.
+- `GRATIS_OPERATOR_ORG_ID=none` makes nobody the operator, with no
+  warning in the log. For installs whose admin login is shared.
+- Admin is now one sidebar entry that opens an admin home: every admin
+  page as a card in four groups (People and access, Your portal, Data,
+  System), with a search box and the setup checklist on top. Each
+  admin page shows a breadcrumb back to it. Pages that only the
+  operator organization can use (Sign-in, Feedback inbox, System
+  health, Backup) are hidden from other admins, and `/users/me` now
+  says whether an admin is an operator. Several pages have clearer
+  names: Sharing review (Permissions), Imports and analyses (Jobs),
+  Cleanup suggestions (Housekeeping), ArcGIS Online import and export
+  (Migrations), System health (Operations), Email delivery
+  (Notifications) and Support bundle (Diagnostics).
+- The Postgres image moves from `postgis/postgis:17-3.5` (Debian
+  bullseye, end of life, no OS security updates) to `17-3.6` (Debian
+  trixie). Postgres stays on 17 and the data volume opens as it is.
+  On first start the API rebuilds text indexes whose sort order may
+  have changed with the newer C library, and upgrades PostGIS to 3.6.
+  Take a backup before upgrading. See docs/UPGRADING.md (#748).
+- Map point icons regenerated from the installed lucide-react. 85
+  shapes had changed upstream (for example the rounded star), so map
+  symbols now match the same icons elsewhere in the app.
 
 ### Fixed
 
@@ -126,25 +173,12 @@ versioning policy is in [docs/VERSIONING.md](./docs/VERSIONING.md).
   layer. Every table with a link column used to appear under every
   spatial layer of the data layer, so one asset's inspections showed
   up under unrelated layers.
-
-- AI caps and lock for public installs. Daily call limits per
-  organization and per user, plus a per-minute limit per user, apply
-  before every model call and answer 429 `ai_quota_exceeded` when
-  reached. With public-testing hardening on (`PORTAL_LOCK_ADMIN_TIER`),
-  Admin, AI settings cannot be changed or cleared and AI build is off
-  unless `PORTAL_LOCK_AI_CONFIG` or `PORTAL_AI_DISABLE_BUILD` says
-  otherwise. `PORTAL_AI_BOOTSTRAP_*` can re-apply a provider key from
-  the host environment on every API start, so a database reset does not
-  lose it. All of this is off unless configured.
-
-### Changed
-
-- Map point icons regenerated from the installed lucide-react. 85
-  shapes had changed upstream (for example the rounded star), so map
-  symbols now match the same icons elsewhere in the app.
-
-### Fixed
-
+- Admins outside the operator organization can use Cleanup
+  suggestions again. Its Review tab failed whole on the one
+  install-wide list it shows (storage by data layer); that card is now
+  left out for them, as the storage card already was. Updates no
+  longer offers them a backup button the API would refuse, and says
+  who can take one.
 - A first install with `infra/bootstrap.sh` no longer stalls on a
   restart-looping Keycloak. Under the script's `umask 077` the realm
   import directory was created at mode 700, so Keycloak (uid 1000,
