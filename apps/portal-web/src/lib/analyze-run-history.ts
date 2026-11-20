@@ -95,6 +95,8 @@ export function labelForPipelineTool(tool: string): string {
       return 'Calculate field';
     case 'spatial-join':
       return 'Spatial join';
+    case 'attribute-join':
+      return 'Join by attribute';
     case 'spatial-filter':
       return 'Spatial filter';
     default:

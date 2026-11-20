@@ -14,6 +14,7 @@ related:
   - analysis-buffer
   - analysis-simplify
   - analysis-spatial-join
+  - analysis-attribute-join
   - analysis-filter
 ---
 ![New Derived layer item type in the wizard](/help/analysis/derived-layer-new-item.png)
@@ -105,6 +106,9 @@ set as the derived-layer builder / tool registry):
 - **[Spatial join](analysis-spatial-join)**. Attach a count or
   selected attributes from another data layer (within /
   intersects / nearest).
+- **[Join by attribute](analysis-attribute-join)**. Attach a count
+  or selected attributes from another data layer where a key field
+  matches (an ID, a code, a parent's feature ID).
 - **[Spatial filter](analysis-spatial-filter)**. Keep rows by
   spatial predicate against another source (no attribute join).
 - **[Clip](analysis-clip)**. Trim features to a mask polygon.

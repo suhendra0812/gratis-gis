@@ -11,6 +11,16 @@ import type {
   ToolGenerator,
   ToolValidateContext,
 } from './types.js';
+import {
+  FIELD_NAME_RE,
+  assertNoClash,
+  joinOutputSchema,
+  joinedNames,
+  keptPropsSql,
+  keptSchema,
+  validateAliases,
+  validateKeepFields,
+} from './join-fields.js';
 
 export interface SpatialJoinParams {
   otherSource: {
@@ -23,9 +33,10 @@ export interface SpatialJoinParams {
   attributeStrategy: 'count' | 'first';
   attrsToKeep?: string[];
   attrPrefix?: string;
+  keepFields?: string[];
+  aliases?: Record<string, string>;
 }
 
-const FIELD_NAME_RE = /^[a-z_][a-z0-9_]*$/i;
 const MAX_ATTRS_TO_KEEP = 16;
 const DEFAULT_NEAREST_MAX_METERS = 1000;
 const MAX_NEAREST_MAX_METERS = 1_000_000; // 1000 km guardrail
@@ -132,7 +143,7 @@ export const spatialJoinGenerator: ToolGenerator<SpatialJoinParams> = {
             `spatial-join.params.attrsToKeep entries must match ${FIELD_NAME_RE}`,
           );
         }
-        list.push(a);
+        if (!list.includes(a)) list.push(a);
       }
       attrsToKeep = list;
     }
@@ -142,28 +153,24 @@ export const spatialJoinGenerator: ToolGenerator<SpatialJoinParams> = {
       typeof attrPrefixRaw === 'string' && attrPrefixRaw.length > 0
         ? attrPrefixRaw
         : 'joined_';
-    if (!/^[a-z_][a-z0-9_]*$/i.test(attrPrefix)) {
+    if (!FIELD_NAME_RE.test(attrPrefix)) {
       throw new BadRequestException(
         'spatial-join.params.attrPrefix must match the field-name shape (letters / digits / underscore, not starting with a digit)',
       );
     }
 
-    // Ensure none of the projected output names collide with
-    // existing upstream fields.  We check via the prefix + suffix
-    // pattern that toSql + outputSchema both produce.
-    if (ctx?.sourceSchema) {
-      const outputNames =
-        attributeStrategy === 'count'
-          ? [`${attrPrefix}count`]
-          : (attrsToKeep ?? []).map((a) => `${attrPrefix}${a}`);
-      for (const name of outputNames) {
-        if (ctx.sourceSchema.some((f) => f.name === name)) {
-          throw new BadRequestException(
-            `spatial-join would create output column "${name}" but the upstream schema already has it; pick a different attrPrefix`,
-          );
-        }
-      }
-    }
+    const keepFields = validateKeepFields('spatial-join', r.keepFields, ctx?.sourceSchema);
+
+    // Only the input fields that carry over can clash with a joined
+    // column (toSql and outputSchema both build the prefixed names).
+    const joined = joinedNames(attributeStrategy, attrsToKeep, attrPrefix);
+    const kept = ctx?.sourceSchema ? keptSchema(ctx.sourceSchema, keepFields) : null;
+    const aliases = validateAliases(
+      'spatial-join',
+      r.aliases,
+      kept ? new Set([...kept.map((f) => f.name), ...joined]) : null,
+    );
+    if (kept) assertNoClash('spatial-join', kept, joined);
 
     return {
       otherSource,
@@ -171,6 +178,8 @@ export const spatialJoinGenerator: ToolGenerator<SpatialJoinParams> = {
       ...(nearestMaxMeters !== undefined ? { nearestMaxMeters } : {}),
       attributeStrategy,
       ...(attrsToKeep !== undefined ? { attrsToKeep } : {}),
+      ...(keepFields !== undefined ? { keepFields } : {}),
+      ...(aliases ? { aliases } : {}),
       attrPrefix,
     };
   },
@@ -179,21 +188,7 @@ export const spatialJoinGenerator: ToolGenerator<SpatialJoinParams> = {
     input: FeatureField[],
     params: SpatialJoinParams,
   ): FeatureField[] {
-    const prefix = params.attrPrefix ?? 'joined_';
-    if (params.attributeStrategy === 'count') {
-      const name = `${prefix}count`;
-      return [
-        ...input,
-        { name, label: name, type: 'number', nullable: false },
-      ];
-    }
-    const extra = (params.attrsToKeep ?? []).map((a) => ({
-      name: `${prefix}${a}`,
-      label: `${prefix}${a}`,
-      type: 'string' as const,
-      nullable: true,
-    }));
-    return [...input, ...extra];
+    return joinOutputSchema(input, params, 'joined_');
   },
 
   outwardReachMeters(params: SpatialJoinParams): number {
@@ -296,12 +291,16 @@ export const spatialJoinGenerator: ToolGenerator<SpatialJoinParams> = {
       `;
     }
 
+    const leftProps = keptPropsSql(params.keepFields, (v) => {
+      sqlParams.push(v);
+      return `$${paramOffset + sqlParams.length}`;
+    });
     const sql = `
       WITH right_rows AS (${rightCte})
       SELECT
         l.global_id,
         l.geom,
-        l.properties || ${joinedExpr} AS properties
+        ${leftProps} || ${joinedExpr} AS properties
       FROM ${inputAlias} l
     `;
 

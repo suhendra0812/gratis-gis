@@ -3,7 +3,7 @@
  * The field list each derived-layer step reads from.
  *
  * Steps change the schema: calculate-field, calculate-geometry,
- * nearest-neighbor, vertices and spatial-join add a column, aggregate,
+ * nearest-neighbor, vertices, spatial-join and attribute-join add a column, aggregate,
  * contour, fishnet and dissolve replace them all. The server validates
  * each step against the schema coming out of the step before it. The
  * builder used to hand every step the SOURCE fields, so a later step
@@ -37,15 +37,22 @@ export function stepOutputSchema(
       return added(input, 'nearest_distance_m', 'number');
     case 'vertices':
       return added(input, 'vertex_index', 'number', false);
-    case 'spatial-join': {
+    case 'spatial-join':
+    case 'attribute-join': {
+      const keep = step.params.keepFields;
+      if (keep) input = input.filter((f) => keep.includes(f.name));
       const prefix = step.params.attrPrefix ?? 'joined_';
-      if (step.params.attributeStrategy === 'count') {
-        return added(input, `${prefix}count`, 'number', false);
-      }
-      return (step.params.attrsToKeep ?? []).reduce(
-        (acc, a) => added(acc, `${prefix}${a}`, 'string'),
-        input,
-      );
+      const out =
+        step.params.attributeStrategy === 'count'
+          ? added(input, `${prefix}count`, 'number', false)
+          : (step.params.attrsToKeep ?? []).reduce(
+              (acc, a) => added(acc, `${prefix}${a}`, 'string'),
+              input,
+            );
+      const aliases = step.params.aliases;
+      return aliases
+        ? out.map((f) => (aliases[f.name] ? { ...f, label: aliases[f.name]! } : f))
+        : out;
     }
     case 'aggregate': {
       const out: FeatureField[] = [];

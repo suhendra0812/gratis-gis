@@ -50,6 +50,38 @@ describe('stepInputSchemas', () => {
     expect(schemas[2]).toEqual([]);
   });
 
+  it('adds a count column for an attribute join', () => {
+    const pipeline = [
+      {
+        tool: 'attribute-join',
+        params: {
+          otherSource: { kind: 'data_layer', itemId: 'x' },
+          leftField: '$id',
+          rightField: 'parent_id',
+          joinType: 'left',
+          attributeStrategy: 'count',
+          attrPrefix: 'kids_',
+        },
+      },
+      { tool: 'filter', params: { expression: '{{kids_count}} > 0' } },
+    ] as unknown as ToolStep[];
+    const schemas = stepInputSchemas(source, pipeline);
+    expect(names(schemas[1]!)).toEqual(['elev', 'name', 'kids_count']);
+
+    const trimmed = stepInputSchemas(source, [
+      { ...pipeline[0], params: { ...pipeline[0]!.params, keepFields: ['name'] } } as ToolStep,
+      pipeline[1]!,
+    ]);
+    expect(names(trimmed[1]!)).toEqual(['name', 'kids_count']);
+
+    const aliased = stepInputSchemas(source, [
+      { ...pipeline[0], params: { ...pipeline[0]!.params, aliases: { kids_count: 'Kids' } } } as ToolStep,
+      pipeline[1]!,
+    ]);
+    expect(aliased[1]!.map((f) => f.label)).toEqual(['Elevation', 'Name', 'Kids']);
+    expect(schemas[1]![2]!.type).toBe('number');
+  });
+
   it('adds prefixed columns for a spatial join', () => {
     const pipeline = [
       {
@@ -67,6 +99,17 @@ describe('stepInputSchemas', () => {
       'elev',
       'name',
       'joined_fips',
+    ]);
+    const trimmed = stepInputSchemas(source, [
+      {
+        ...pipeline[0],
+        params: { ...pipeline[0]!.params, keepFields: ['name'], aliases: { joined_fips: 'FIPS' } },
+      } as ToolStep,
+      pipeline[1]!,
+    ])[1]!;
+    expect(trimmed.map((f) => [f.name, f.label])).toEqual([
+      ['name', 'Name'],
+      ['joined_fips', 'FIPS'],
     ]);
   });
 });

@@ -14,6 +14,7 @@ related:
   - analysis-spatial-filter
   - analysis-group-by
   - analysis-clip
+  - analysis-attribute-join
 ---
 
 A **spatial join** step looks up matches from a second **data
@@ -42,10 +43,18 @@ explode into multiple output rows. Use attribute strategy
   - **count** — add one numeric column (`joined_count` by
     default) with how many other features matched.
   - **first** — copy named fields from one matching other
-    feature. You must list `attrsToKeep` (up to 16). Prefixed
-    names default to `joined_<field>`.
+    feature. Tick them in the list of the other layer's fields (up
+    to 16). Prefixed names default to `joined_<field>`.
+- **Fields to keep from this layer**. All input fields carry over
+  by default. Untick **Keep all fields** and clear the ones you do
+  not want.
 - **Attribute prefix** (optional). Defaults to `joined_`. Must
-  not collide with existing upstream field names.
+  not collide with the input fields you keep.
+- **Field aliases** (optional). The label shown for each output
+  field, kept input fields and joined ones alike. **Use the other
+  layer's labels** fills the joined fields from the other layer's
+  own labels. Field names stay the same, so expressions and later
+  steps keep working.
 
 **Not options:** Contains, Within distance as its own predicate,
 one-to-many cardinality, or "bring all join fields by default".
@@ -56,7 +65,7 @@ need it (including **contains** / **touches** / **near**).
 ## Output
 
 - Geometry: from the pipeline input (unchanged).
-- Attributes: input fields plus either `{prefix}count` or the
+- Attributes: the kept input fields plus either `{prefix}count` or the
   prefixed `attrsToKeep` columns (`first` strategy; nullable when
   nothing matched).
 - Row count: same as the input (null geometries on the input are
@@ -89,6 +98,9 @@ need it (including **contains** / **touches** / **near**).
   attrs to keep: `name`.
 
 ## Notes
+
+- **Matching on a key instead of location?** Use
+  [Join by attribute](analysis-attribute-join).
 
 - **No cartesian explode.** If a parcel intersects three
   hydrants, **count** returns `3` on one row; it does not emit

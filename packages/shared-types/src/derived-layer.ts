@@ -328,8 +328,62 @@ export interface SpatialJoinStep {
     /** Prefix prepended to every joined attribute name to avoid
      *  collisions with upstream field names.  Defaults to 'joined_'. */
     attrPrefix?: string;
+    /** Input fields that carry over. Unset keeps all of them. */
+    keepFields?: string[];
+    /** Display label per output field name. Names never change. */
+    aliases?: Record<string, string>;
   };
 }
+
+/**
+ * Attribute-join step. Looks up rows of a second data_layer whose key
+ * field equals the upstream row's key field, the table join of a
+ * desktop GIS ("Join by field value"). Either key may be the feature
+ * id (`ATTRIBUTE_JOIN_FEATURE_ID`), so a child layer can join its
+ * parent through a foreign key that holds the parent's global id.
+ *
+ * Same strategies as spatial-join: 'count' adds `<prefix>count`,
+ * 'first' copies `attrsToKeep` from one matching row. That row is the
+ * first by `orderBy` when set (numbers by value, other text in text
+ * order, empty last), with ties and the default going to the lowest
+ * global id so repeated reads agree. No row explosion either way.
+ *
+ * joinType 'left' keeps every upstream row; 'inner' drops rows with
+ * no match. Keys compare as trimmed text; `ignoreCase` lowercases
+ * both sides first. Empty keys never match.
+ */
+export interface AttributeJoinStep {
+  tool: 'attribute-join';
+  params: {
+    otherSource: {
+      kind: 'data_layer';
+      itemId: string;
+      layerKey?: string;
+    };
+    /** Upstream field holding the key, or `ATTRIBUTE_JOIN_FEATURE_ID`. */
+    leftField: string;
+    /** Other layer's field holding the key, or `ATTRIBUTE_JOIN_FEATURE_ID`. */
+    rightField: string;
+    joinType: 'left' | 'inner';
+    ignoreCase?: boolean;
+    attributeStrategy: 'count' | 'first';
+    attrsToKeep?: string[];
+    /** Input fields to keep on the output, in input order. Unset
+     *  keeps them all. The key field may be left out. */
+    keepFields?: string[];
+    /** Display labels (aliases) for output fields, keyed by output
+     *  field name: kept input fields and joined ones alike. Names do
+     *  not change; only `label` in the output schema does. */
+    aliases?: Record<string, string>;
+    /** For 'first': which matching row wins. A field of the other
+     *  layer, or `ATTRIBUTE_JOIN_FEATURE_ID`. */
+    orderBy?: { field: string; direction: 'asc' | 'desc' };
+    attrPrefix?: string;
+  };
+}
+
+/** Key name meaning "the feature's own id" in an attribute join. */
+export const ATTRIBUTE_JOIN_FEATURE_ID = '$id';
 
 /**
  * Group-by aggregation step (#80).  The principled generalization
@@ -668,6 +722,7 @@ export type ToolStep =
   | CalculateFieldStep
   | AggregateStep
   | SpatialJoinStep
+  | AttributeJoinStep
   | SpatialFilterStep
   | ClipStep
   | EraseStep
@@ -896,6 +951,18 @@ export const DEFAULT_SPATIAL_JOIN_STEP: SpatialJoinStep = {
     attrPrefix: 'joined_',
   },
 };
+export const DEFAULT_ATTRIBUTE_JOIN_STEP: AttributeJoinStep = {
+  tool: 'attribute-join',
+  params: {
+    otherSource: { kind: 'data_layer', itemId: '' },
+    leftField: '',
+    rightField: '',
+    joinType: 'left',
+    attributeStrategy: 'first',
+    attrsToKeep: [],
+    attrPrefix: 'joined_',
+  },
+};
 export const DEFAULT_SPATIAL_FILTER_STEP: SpatialFilterStep = {
   tool: 'spatial-filter',
   // Defaults match the most common Select-By-Location workflow:
@@ -958,6 +1025,7 @@ export const DEFAULT_STEPS: Record<ToolStep['tool'], ToolStep> = {
   'calculate-field': DEFAULT_CALCULATE_FIELD_STEP,
   aggregate: DEFAULT_AGGREGATE_STEP,
   'spatial-join': DEFAULT_SPATIAL_JOIN_STEP,
+  'attribute-join': DEFAULT_ATTRIBUTE_JOIN_STEP,
   'spatial-filter': DEFAULT_SPATIAL_FILTER_STEP,
   clip: DEFAULT_CLIP_STEP,
   erase: DEFAULT_ERASE_STEP,

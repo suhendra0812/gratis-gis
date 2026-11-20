@@ -198,6 +198,10 @@ function labelForTool(step: ToolStep): string {
       return 'Fishnet';
     case 'calculate-geometry':
       return 'Calculate geometry';
+    case 'spatial-join':
+      return 'Spatial join';
+    case 'attribute-join':
+      return 'Join by attribute';
     default:
       // Future tools land in this default until they grow a label;
       // shows the raw kind so the panel never goes silently blank
@@ -254,6 +258,32 @@ function summarizeStep(step: ToolStep, locale: SupportedLocale): string {
         : `${formatNumber(step.params.value, locale)} rows`;
     case 'nearest-neighbor':
       return 'distance to closest neighbor (m)';
+    case 'attribute-join': {
+      const p = step.params;
+      const key = (f: string) => (f === '$id' ? 'feature ID' : f);
+      const what =
+        p.attributeStrategy === 'count'
+          ? 'count of matches'
+          : (p.attrsToKeep ?? []).join(', ');
+      const order = p.orderBy
+        ? ` by ${key(p.orderBy.field)} ${p.orderBy.direction}`
+        : '';
+      return `${key(p.leftField)} = ${key(p.rightField)}${
+        p.otherSource.layerKey ? ` (${p.otherSource.layerKey})` : ''
+      }: ${what}${order}${p.joinType === 'inner' ? ', matched rows only' : ''}`;
+    }
+    case 'spatial-join': {
+      const p = step.params;
+      const what =
+        p.attributeStrategy === 'count'
+          ? 'count of matches'
+          : (p.attrsToKeep ?? []).join(', ');
+      const pred =
+        p.predicate === 'nearest'
+          ? `nearest within ${formatNumber(p.nearestMaxMeters ?? 1000, locale)} m`
+          : p.predicate;
+      return `${pred}${p.otherSource.layerKey ? ` (${p.otherSource.layerKey})` : ''}: ${what}`;
+    }
     case 'fishnet': {
       const u = UNIT_LABELS[step.params.unit] ?? step.params.unit;
       return `${formatNumber(step.params.cellSize, locale)} ${u} cells (${step.params.output})`;
