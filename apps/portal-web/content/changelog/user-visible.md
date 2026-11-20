@@ -21,6 +21,9 @@ new release banner when cutting a version tag.
 
 <!-- entries below this line are surfaced on the public landing page -->
 
+## 2026-11-20 - Join layers by attribute
+Derived layers can now join another layer by a shared field, such as an ID or a code, not only by location. Find it under "Compare with another layer": bring over the matching row's fields or a count of matches, and keep every row or only the ones that matched. Both this and the spatial join now let you pick which fields to keep from each layer and give the results friendlier names.
+
 ## 2026-11-06 - Photos and files in map popups
 A map popup can show a feature's photos, signatures and files, as a gallery of thumbnails or as a list. Popups for form submissions no longer show "[object Object]" for locations, photos and signatures.
 

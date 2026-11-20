@@ -23,6 +23,7 @@ const TOOL_KINDS: ToolStep['tool'][] = [
   'calculate-field',
   'aggregate',
   'spatial-join',
+  'attribute-join',
   'spatial-filter',
   'clip',
   'erase',
@@ -61,7 +62,7 @@ const TOOL_GROUP_DEFS = [
   { id: 'interpolate', tools: ['contour'] },
   {
     id: 'compare',
-    tools: ['spatial-join', 'spatial-filter', 'clip', 'erase'],
+    tools: ['spatial-join', 'attribute-join', 'spatial-filter', 'clip', 'erase'],
   },
 ] as const satisfies ReadonlyArray<{
   id: ToolGroupId;

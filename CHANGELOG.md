@@ -8,6 +8,19 @@ versioning policy is in [docs/VERSIONING.md](./docs/VERSIONING.md).
 
 ### Added
 
+- Join by attribute, a derived-layer step under "Compare with another
+  layer". Each row looks up rows of another data layer whose key field
+  matches its own and gains a match count or the attributes of one
+  match. Either key can be the feature ID, so a child layer can join
+  its parent through a global-ID foreign key. Keep all rows or only
+  the matched ones, and optionally ignore case. When copying fields,
+  choose which match wins by ordering on a field of the other layer,
+  such as the latest date, choose which of the layer's own fields to
+  keep, and give any output field an alias.
+- Spatial join gets the same field options: choose which of the input
+  layer's fields to keep, tick the other layer's fields to copy from a
+  list instead of typing their names, and give any output field an
+  alias.
 - Map popups: an attachments section for data layers (**Show
   attachments** in the layer's Popup tab), as a thumbnail **Gallery**
   or a **List** of file names and sizes. Files are read from the

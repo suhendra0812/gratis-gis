@@ -14,11 +14,13 @@ import type { FeatureField } from '@gratis-gis/shared-types';
 
 import { applyTestMigrations } from '../../testing/apply-test-migrations.js';
 import { aggregateGenerator } from './aggregate.js';
+import { attributeJoinGenerator } from './attribute-join.js';
 import { calculateFieldGenerator } from './calculate-field.js';
 import { calculateGeometryGenerator } from './calculate-geometry.js';
 import { contourGenerator } from './contour.js';
 import { filterGenerator } from './filter.js';
 import { spatialFilterGenerator } from './spatial-filter.js';
+import { spatialJoinGenerator } from './spatial-join.js';
 import { topNGenerator } from './top-n.js';
 import type { ToolGenerator } from './types.js';
 
@@ -145,6 +147,123 @@ d('derived-layer tool SQL runs against Postgres', () => {
     );
     expect(r.rows[0].n).toBeGreaterThan(4);
     expect(r.rows[0].levels).toBe(2);
+  });
+
+  it('attribute-join matches by a field or by the feature id', async () => {
+    const itemId = '00000000-0000-4000-8000-0000000000f1';
+    const scope = `data_layer:${itemId}:zones`;
+    // Zone A has two rows, zone B one, zone C none. The other layer's
+    // feature ids are fixed so the source can point at one of them.
+    // rank 10 sorts before 9 as text, after it as a number.
+    const rows: Array<[string, string, string, string]> = [
+      ['00000000-0000-4000-8000-00000000a001', ' a ', 'Alpha 1', '10'],
+      ['00000000-0000-4000-8000-00000000a002', 'A', 'Alpha 2', '9'],
+      ['00000000-0000-4000-8000-00000000b001', 'B', 'Bravo', ''],
+    ];
+    for (const [entity, code, name, rank] of rows) {
+      await pool.query(
+        `INSERT INTO observation (id, tx_time, valid_from, scope, entity, kind, author_sub, source, parents, geom, attrs)
+         VALUES (gen_random_uuid(), now(), now(), $1, $2, 'create', 'test', '{}'::jsonb, '{}'::uuid[],
+                 ST_SetSRID(ST_MakePoint(0, 0), 4326), jsonb_build_object('code', $3::text, 'name', $4::text, 'rank', $5::text))`,
+        [scope, entity, code, name, rank],
+      );
+    }
+    const otherSource = { kind: 'data_layer', itemId, layerKey: 'zones' };
+
+    const count = await run(
+      attributeJoinGenerator,
+      { otherSource, leftField: 'zone', rightField: 'code', attributeStrategy: 'count', ignoreCase: true },
+      "SELECT properties->>'zone' AS zone, min((properties->>'joined_count')::int) AS n, count(*)::int AS rows FROM q GROUP BY 1 ORDER BY 1",
+    );
+    expect(count.rows).toEqual([
+      { zone: 'A', n: 2, rows: 10 },
+      { zone: 'B', n: 1, rows: 15 },
+      { zone: 'C', n: 0, rows: 1 },
+    ]);
+
+    // Case-sensitive: " a " no longer matches, so A finds only Alpha 2.
+    const first = await run(
+      attributeJoinGenerator,
+      { otherSource, leftField: 'zone', rightField: 'code', attributeStrategy: 'first', attrsToKeep: ['name'], joinType: 'inner' },
+      "SELECT DISTINCT properties->>'zone' AS zone, properties->>'joined_name' AS name FROM q ORDER BY 1",
+    );
+    expect(first.rows).toEqual([
+      { zone: 'A', name: 'Alpha 2' },
+      { zone: 'B', name: 'Bravo' },
+    ]);
+
+    // orderBy picks which match wins: rank as a number, both ways.
+    for (const [direction, expected] of [['asc', 'Alpha 2'], ['desc', 'Alpha 1']] as const) {
+      const ordered = await run(
+        attributeJoinGenerator,
+        {
+          otherSource, leftField: 'zone', rightField: 'code', ignoreCase: true,
+          attributeStrategy: 'first', attrsToKeep: ['name'], orderBy: { field: 'rank', direction },
+        },
+        "SELECT DISTINCT properties->>'joined_name' AS name FROM q WHERE properties->>'zone' = 'A'",
+      );
+      expect(ordered.rows).toEqual([{ name: expected }]);
+    }
+
+    // keepFields cuts the input fields down; the key need not be kept.
+    const kept = await run(
+      attributeJoinGenerator,
+      {
+        otherSource, leftField: 'zone', rightField: 'code', joinType: 'inner',
+        attributeStrategy: 'first', attrsToKeep: ['name'], keepFields: ['acres'],
+      },
+      "SELECT DISTINCT (SELECT array_agg(k ORDER BY k) FROM jsonb_object_keys(properties) k) AS keys FROM q",
+    );
+    expect(kept.rows).toEqual([{ keys: ['acres', 'joined_name'] }]);
+
+    // Feature id on the right: a foreign key holding the parent's id.
+    const params = attributeJoinGenerator.validate({
+      otherSource,
+      leftField: 'parent',
+      rightField: '$id',
+      attributeStrategy: 'first',
+      attrsToKeep: ['name'],
+    });
+    const frag = attributeJoinGenerator.toSql('kids', params, 0);
+    const byId = await pool.query(
+      `WITH kids AS (
+         SELECT gen_random_uuid() AS global_id, NULL::geometry AS geom,
+                jsonb_build_object('parent', p) AS properties
+         FROM unnest(ARRAY['00000000-0000-4000-8000-00000000b001', 'missing']) p
+       ), q AS (${frag.sql})
+       SELECT properties->>'parent' AS parent, properties->'joined_name' AS name FROM q ORDER BY 1`,
+      frag.params,
+    );
+    expect(byId.rows).toEqual([
+      { parent: '00000000-0000-4000-8000-00000000b001', name: 'Bravo' },
+      { parent: 'missing', name: null },
+    ]);
+  });
+
+  it('spatial-join keeps only the chosen input fields', async () => {
+    const itemId = '00000000-0000-4000-8000-0000000000d1';
+    await pool.query(
+      `INSERT INTO observation (id, tx_time, valid_from, scope, entity, kind, author_sub, source, parents, geom, attrs)
+       VALUES (gen_random_uuid(), now(), now(), $1, gen_random_uuid(), 'create', 'test', '{}'::jsonb, '{}'::uuid[],
+               ST_MakeEnvelope(-0.001, -0.001, 0.015, 0.015, 4326), '{"name": "Box"}'::jsonb)`,
+      [`data_layer:${itemId}:default`],
+    );
+    const otherSource = { kind: 'data_layer', itemId };
+    // The box holds the four points with x, y in {0, 1} and touches
+    // the source polygon. Aliases do not change the stored keys.
+    const r = await run(
+      spatialJoinGenerator,
+      {
+        otherSource, predicate: 'intersects', attributeStrategy: 'first',
+        attrsToKeep: ['name'], keepFields: ['zone'], aliases: { zone: 'Zona', joined_name: 'Nama' },
+      },
+      `SELECT (SELECT array_agg(k ORDER BY k) FROM jsonb_object_keys(properties) k) AS keys, count(*)::int AS n
+       FROM q GROUP BY 1 ORDER BY 2`,
+    );
+    expect(r.rows).toEqual([
+      { keys: ['joined_name', 'zone'], n: 5 },
+      { keys: ['zone'], n: 21 },
+    ]);
   });
 
   it('spatial-filter restricts the other layer to a selection of uuids', async () => {

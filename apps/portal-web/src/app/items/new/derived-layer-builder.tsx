@@ -24,6 +24,7 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog';
 import {
+  ATTRIBUTE_JOIN_FEATURE_ID,
   AREA_UNITS,
   AREA_UNIT_LABELS,
   DEFAULT_BUFFER_STEP,
@@ -37,12 +38,14 @@ import {
   parseExpression,
   validateExpression,
   type AreaUnit,
+  type AttributeJoinStep,
   type BufferParams,
   type CalculateGeometryParams,
   type DerivedLayerData,
   type FeatureField,
   type Item,
   type LengthUnit,
+  type SpatialJoinStep,
   type ToolStep,
 } from '@gratis-gis/shared-types';
 import { useFormat } from '@/lib/i18n/format';
@@ -50,7 +53,7 @@ import { useT } from '@/lib/i18n/locale-context';
 import { useDerivedLayerCatalog } from './use-derived-layer-catalog';
 import { StableKeys } from '@/lib/stable-keys';
 import { clampBufferDistance } from '@/lib/analyze-buffer-derived';
-import { stepInputSchemas } from '@/lib/derived-step-schema';
+import { stepInputSchemas, stepOutputSchema } from '@/lib/derived-step-schema';
 
 /**
  * Inline builder for derived layers.
@@ -325,7 +328,13 @@ interface ItemWithLite extends Item {
 function SourceLayerPicker({
   selectedRef,
   onSelect,
+  dataLayersOnly = false,
+  placeholder,
 }: {
+  /** Leave derived layers out (a step's other layer must be a data layer). */
+  dataLayersOnly?: boolean;
+  /** Trigger text while nothing is picked. */
+  placeholder?: string;
   selectedRef: {
     kind: 'data_layer' | 'derived_layer';
     itemId: string;
@@ -392,7 +401,9 @@ function SourceLayerPicker({
         // `type` so we fan out to keep each response simple to parse.
         const [r1, r2] = await Promise.all([
           fetch(`/api/portal/items?${qs1}`, { signal: controller.signal }),
-          fetch(`/api/portal/items?${qs2}`, { signal: controller.signal }),
+          dataLayersOnly
+            ? new Response('[]')
+            : fetch(`/api/portal/items?${qs2}`, { signal: controller.signal }),
         ]);
         if (!r1.ok) throw new Error(`HTTP ${r1.status} on data_layer fetch`);
         if (!r2.ok) throw new Error(`HTTP ${r2.status} on derived_layer fetch`);
@@ -483,7 +494,7 @@ function SourceLayerPicker({
       clearTimeout(handle);
       controller.abort();
     };
-  }, [open, query]);
+  }, [open, query, dataLayersOnly]);
 
   // Resolve the selected ref to a full PickerRow once on mount (and
   // again if the parent passes a new ref we don't already have
@@ -607,7 +618,7 @@ function SourceLayerPicker({
         : base;
     }
     if (selectedRefKey) return t('derivedLayerBuilder.sourcePickerResolving');
-    return t('derivedLayerBuilder.sourcePickerPlaceholder');
+    return placeholder ?? t('derivedLayerBuilder.sourcePickerPlaceholder');
   })();
 
   const triggerSubtitle =
@@ -1187,6 +1198,13 @@ function StepCard({
         <SpatialJoinStepEditor
           params={step.params}
           onChange={(params) => onChange({ tool: 'spatial-join', params })}
+          sourceFields={sourceFields}
+        />
+      ) : step.tool === 'attribute-join' ? (
+        <AttributeJoinStepEditor
+          params={step.params}
+          onChange={(params) => onChange({ tool: 'attribute-join', params })}
+          sourceFields={sourceFields}
         />
       ) : step.tool === 'spatial-filter' ? (
         <SpatialFilterStepEditor
@@ -1663,19 +1681,10 @@ function ToolToolbox({
 }
 
 /**
- * Reusable data_layer picker for step editors that take an "other
- * source" parameter (spatial-join, spatial-filter, ...).  Combobox
- * over the user's accessible data_layer items + a free-text
- * sublayer-key input below it.  v3 data_layer items have multiple
- * sublayers and the sublayer key lives on the URL of the layer's
- * detail page; a real per-layer sublayer dropdown is a follow-up
- * once we expose layer schemas in the item-list payload.
- *
- * Fetches the list once on mount and caches it locally.  When a
- * widget references an itemId the user can't read (deleted or
- * sharing changed since the recipe was saved), it stays in the
- * select as "(unknown layer · <id-prefix>)" so editing doesn't
- * silently drop the binding.
+ * Other-layer picker for two-input steps (spatial join, attribute
+ * join, spatial filter, clip, erase). The same searchable list as the
+ * source layer, with one row per spatial sublayer, but data layers
+ * only: the other side of a step cannot be a derived layer yet.
  */
 function DataLayerPicker({
   itemId,
@@ -1691,115 +1700,27 @@ function DataLayerPicker({
   hint?: string;
 }) {
   const { t } = useDerivedLayerCatalog();
-  const resolvedLabel =
-    label ?? t('derivedLayerBuilder.otherLayerDefault');
-
-  const [available, setAvailable] = useState<
-    Array<{ id: string; title: string }> | null
-  >(null);
-  useEffect(() => {
-    let cancelled = false;
-    void (async () => {
-      try {
-        // The list endpoint returns one page (500 by default), so page
-        // through it. Without this, layers past the first page could
-        // not be chosen at all. Bounded so a huge org cannot spin.
-        const PAGE = 1000;
-        const rows: Array<{ id: string; title: string }> = [];
-        for (let page = 0; page < 10; page += 1) {
-          const res = await fetch(
-            `/api/portal/items?type=data_layer&limit=${PAGE}&offset=${page * PAGE}`,
-            { cache: 'no-store' },
-          );
-          if (!res.ok) {
-            if (!cancelled) setAvailable([]);
-            return;
-          }
-          const batch = (await res.json()) as Array<{
-            id: string;
-            title: string;
-          }>;
-          rows.push(...batch);
-          if (batch.length < PAGE || cancelled) break;
-        }
-        if (!cancelled) {
-          setAvailable(
-            rows
-              .map((r) => ({ id: r.id, title: r.title }))
-              .sort((a, b) => a.title.localeCompare(b.title)),
-          );
-        }
-      } catch {
-        if (!cancelled) setAvailable([]);
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  const knownItem = available?.find((x) => x.id === itemId);
-
   return (
-    <div className="space-y-2">
-      <label className="flex flex-col gap-1">
-        <span className="text-2xs uppercase tracking-wide text-muted">
-          {resolvedLabel}
-        </span>
-        <select
-          value={itemId}
-          disabled={available === null}
-          // A sublayer key belongs to one item, so a new item starts
-          // without one rather than carrying the old item's key.
-          onChange={(e) =>
-            onChange(
-              e.target.value === itemId && layerKey
-                ? { itemId, layerKey }
-                : { itemId: e.target.value },
-            )
-          }
-          className="h-9 rounded-md border border-border bg-surface-1 px-3 text-xs focus:border-accent focus:outline-hidden"
-        >
-          {available === null ? (
-            <option value="">{t('derivedLayerBuilder.loading')}</option>
-          ) : (
-            <>
-              <option value="">{t('derivedLayerBuilder.pickDataLayer')}</option>
-              {available.map((t) => (
-                <option key={t.id} value={t.id}>
-                  {t.title}
-                </option>
-              ))}
-              {itemId && !knownItem ? (
-                <option value={itemId} key="__unknown">
-                  {t('derivedLayerBuilder.unknownLayer', { id: itemId.slice(0, 8) })}
-                </option>
-              ) : null}
-            </>
-          )}
-        </select>
-        {hint ? (
-          <span className="text-2xs text-muted">{hint}</span>
-        ) : null}
-      </label>
-      <label className="flex flex-col gap-1">
-        <span className="text-2xs uppercase tracking-wide text-muted">
-          {t('derivedLayerBuilder.sublayerKey')}
-        </span>
-        <input
-          type="text"
-          value={layerKey ?? ''}
-          onChange={(e) => {
-            const v = e.target.value.trim();
-            onChange({ itemId, ...(v ? { layerKey: v } : {}) });
-          }}
-          placeholder={t('derivedLayerBuilder.sublayerPlaceholder')}
-          className="h-9 rounded-md border border-border bg-surface-1 px-3 font-mono text-xs focus:border-accent focus:outline-hidden"
-        />
-        <span className="text-2xs text-muted">
-          {t('derivedLayerBuilder.sublayerHint')}
-        </span>
-      </label>
+    <div className="flex flex-col gap-1">
+      <span className="text-2xs uppercase tracking-wide text-muted">
+        {label ?? t('derivedLayerBuilder.otherLayerDefault')}
+      </span>
+      <SourceLayerPicker
+        dataLayersOnly
+        placeholder={t('derivedLayerBuilder.otherLayerPlaceholder')}
+        selectedRef={
+          itemId
+            ? { kind: 'data_layer', itemId, ...(layerKey ? { layerKey } : {}) }
+            : null
+        }
+        onSelect={(ref) =>
+          onChange({
+            itemId: ref.itemId,
+            ...(ref.layerKey ? { layerKey: ref.layerKey } : {}),
+          })
+        }
+      />
+      {hint ? <span className="text-2xs text-muted">{hint}</span> : null}
     </div>
   );
 }
@@ -3044,18 +2965,17 @@ function AggregateStepEditor({
 function SpatialJoinStepEditor({
   params,
   onChange,
+  sourceFields,
 }: {
-  params: {
-    otherSource: { kind: 'data_layer'; itemId: string; layerKey?: string };
-    predicate: 'within' | 'intersects' | 'nearest';
-    nearestMaxMeters?: number;
-    attributeStrategy: 'count' | 'first';
-    attrsToKeep?: string[];
-    attrPrefix?: string;
-  };
-  onChange: (next: typeof params) => void;
+  params: SpatialJoinStep['params'];
+  onChange: (next: SpatialJoinStep['params']) => void;
+  sourceFields: FeatureField[];
 }) {
   const { t } = useDerivedLayerCatalog();
+  const other = useOtherLayerFields(
+    params.otherSource.itemId,
+    params.otherSource.layerKey,
+  );
 
   const prefix = params.attrPrefix ?? 'joined_';
   return (
@@ -3064,13 +2984,33 @@ function SpatialJoinStepEditor({
         itemId={params.otherSource.itemId}
         layerKey={params.otherSource.layerKey}
         onChange={(next) =>
+          // The old attributes belong to the old layer.
           onChange({
             ...params,
             otherSource: { kind: 'data_layer', ...next },
+            ...(next.itemId !== params.otherSource.itemId ||
+            next.layerKey !== params.otherSource.layerKey
+              ? { attrsToKeep: [] }
+              : {}),
           })
         }
         label={t('derivedLayerBuilder.otherSource')}
         hint={t('derivedLayerBuilder.spatialJoinOtherHint')}
+      />
+      {params.otherSource.itemId && other.fields.length === 0 ? (
+        <p className="text-2xs text-warn">
+          {t('derivedLayerBuilder.joinFieldsUnavailable')}
+        </p>
+      ) : null}
+
+      <JoinKeepFieldsEditor
+        keepFields={params.keepFields}
+        sourceFields={sourceFields}
+        onChange={(keepFields) => {
+          const { keepFields: _drop, ...rest } = params;
+          void _drop;
+          onChange(keepFields ? { ...rest, keepFields } : rest);
+        }}
       />
 
       <div>
@@ -3150,22 +3090,12 @@ function SpatialJoinStepEditor({
       </div>
 
       {params.attributeStrategy === 'first' ? (
-        <label className="flex flex-col gap-1">
-          <span className="text-2xs uppercase tracking-wide text-muted">
-            {t('derivedLayerBuilder.attrsToKeep')}
-          </span>
-          <ListTextInput
-            value={params.attrsToKeep}
-            format={(attrs) => (attrs ?? []).join(', ')}
-            parse={splitList}
-            onValue={(next) => onChange({ ...params, attrsToKeep: next })}
-            placeholder={t('derivedLayerBuilder.attrsToKeepPlaceholder')}
-            className="h-9 rounded-md border border-border bg-surface-1 px-3 font-mono text-xs focus:border-accent focus:outline-hidden"
-          />
-          <span className="text-2xs text-muted">
-            {t('derivedLayerBuilder.attrsToKeepHint', { prefix })}
-          </span>
-        </label>
+        <JoinAttrsPicker
+          attrs={params.attrsToKeep}
+          otherFields={other.fields}
+          onChange={(attrsToKeep) => onChange({ ...params, attrsToKeep })}
+          hint={t('derivedLayerBuilder.attributeJoinPickAttrs', { prefix })}
+        />
       ) : null}
 
       <label className="flex flex-col gap-1">
@@ -3184,9 +3114,546 @@ function SpatialJoinStepEditor({
           className="h-9 w-40 rounded-md border border-border bg-surface-1 px-3 font-mono text-xs focus:border-accent focus:outline-hidden"
         />
         <span className="text-2xs text-muted">
-{t('derivedLayerBuilder.outputPrefixHint')}
+          {t('derivedLayerBuilder.outputPrefixHint')}
         </span>
       </label>
+
+      <JoinAliasEditor
+        tool="spatial-join"
+        params={params}
+        sourceFields={sourceFields}
+        otherFields={other.fields}
+        onChange={onChange}
+      />
+    </div>
+  );
+}
+
+/** Fields of another data layer's sublayer, for pickers that read its columns. */
+function useOtherLayerFields(itemId: string, layerKey: string | undefined) {
+  const [fields, setFields] = useState<FeatureField[]>([]);
+  useEffect(() => {
+    setFields([]);
+    if (!itemId) return;
+    let cancelled = false;
+    fetch(`/api/portal/items/${itemId}`)
+      .then(async (r) => {
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        return r.json() as Promise<Item>;
+      })
+      .then((it) => {
+        if (!cancelled) setFields(extractFields(it.data, layerKey));
+      })
+      .catch(() => {
+        if (!cancelled) setFields([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [itemId, layerKey]);
+  return { fields };
+}
+
+/**
+ * Attribute-join step editor: pick the other layer, the key field on
+ * each side (either may be the feature id), which rows to keep, and
+ * what to bring over. Field pickers read the other layer's schema;
+ * when it can't be read the attribute list falls back to free text.
+ */
+function AttributeJoinStepEditor({
+  params,
+  onChange,
+  sourceFields,
+}: {
+  params: AttributeJoinStep['params'];
+  onChange: (next: AttributeJoinStep['params']) => void;
+  sourceFields: FeatureField[];
+}) {
+  const { t } = useDerivedLayerCatalog();
+  const other = useOtherLayerFields(
+    params.otherSource.itemId,
+    params.otherSource.layerKey,
+  );
+  const prefix = params.attrPrefix ?? 'joined_';
+  const selectCls =
+    'h-9 rounded-md border border-border bg-surface-1 px-2 text-xs focus:border-accent focus:outline-hidden';
+  const radioCls = (on: boolean) =>
+    `flex items-center justify-center rounded-md border p-2 text-xs transition-colors ${
+      on
+        ? 'border-accent bg-accent/5 text-ink-0 ring-2 ring-accent/30'
+        : 'border-border bg-surface-1 text-ink-1 hover:bg-surface-2'
+    }`;
+
+  const keySelect = (
+    value: string,
+    fields: FeatureField[],
+    set: (v: string) => void,
+  ) => (
+    <select value={value} onChange={(e) => set(e.target.value)} className={selectCls}>
+      <option value="">{t('derivedLayerBuilder.pickField')}</option>
+      <option value={ATTRIBUTE_JOIN_FEATURE_ID}>
+        {t('derivedLayerBuilder.featureIdOption')}
+      </option>
+      {fields.map((f) => (
+        <option key={f.name} value={f.name}>
+          {f.label && f.label !== f.name ? `${f.label} (${f.name})` : f.name}
+        </option>
+      ))}
+      {value && value !== ATTRIBUTE_JOIN_FEATURE_ID && !fields.some((f) => f.name === value) ? (
+        <option value={value}>
+          {t('derivedLayerBuilder.missingFieldOption', { field: value })}
+        </option>
+      ) : null}
+    </select>
+  );
+
+  return (
+    <div className="space-y-3">
+      <DataLayerPicker
+        itemId={params.otherSource.itemId}
+        layerKey={params.otherSource.layerKey}
+        onChange={(next) =>
+          // The old key and attributes belong to the old layer.
+          onChange({
+            ...params,
+            otherSource: { kind: 'data_layer', ...next },
+            ...(next.itemId !== params.otherSource.itemId ||
+            next.layerKey !== params.otherSource.layerKey
+              ? { rightField: '', attrsToKeep: [] }
+              : {}),
+          })
+        }
+        label={t('derivedLayerBuilder.otherSource')}
+        hint={t('derivedLayerBuilder.attributeJoinOtherHint')}
+      />
+      {params.otherSource.itemId && other.fields.length === 0 ? (
+        <p className="text-2xs text-warn">
+          {t('derivedLayerBuilder.joinFieldsUnavailable')}
+        </p>
+      ) : null}
+
+      <div className="grid gap-2 sm:grid-cols-2">
+        <label className="flex flex-col gap-1">
+          <span className="text-2xs uppercase tracking-wide text-muted">
+            {t('derivedLayerBuilder.joinLeftField')}
+          </span>
+          {keySelect(params.leftField, sourceFields, (v) =>
+            onChange({ ...params, leftField: v }),
+          )}
+        </label>
+        <label className="flex flex-col gap-1">
+          <span className="text-2xs uppercase tracking-wide text-muted">
+            {t('derivedLayerBuilder.joinRightField')}
+          </span>
+          {keySelect(params.rightField, other.fields, (v) =>
+            onChange({ ...params, rightField: v }),
+          )}
+        </label>
+      </div>
+      <label className="flex items-center gap-2 text-xs text-ink-1">
+        <input
+          type="checkbox"
+          checked={params.ignoreCase === true}
+          onChange={(e) => onChange({ ...params, ignoreCase: e.target.checked })}
+        />
+        {t('derivedLayerBuilder.joinIgnoreCase')}
+      </label>
+
+      <JoinKeepFieldsEditor
+        keepFields={params.keepFields}
+        sourceFields={sourceFields}
+        onChange={(keepFields) => {
+          const { keepFields: _drop, ...rest } = params;
+          void _drop;
+          onChange(keepFields ? { ...rest, keepFields } : rest);
+        }}
+      />
+
+      <div>
+        <p className="mb-1 text-2xs uppercase tracking-wide text-muted">
+          {t('derivedLayerBuilder.joinType')}
+        </p>
+        <div className="grid grid-cols-2 gap-2" role="radiogroup">
+          {(['left', 'inner'] as const).map((j) => (
+            <button
+              key={j}
+              type="button"
+              role="radio"
+              aria-checked={params.joinType === j}
+              onClick={() => onChange({ ...params, joinType: j })}
+              className={radioCls(params.joinType === j)}
+            >
+              {j === 'left'
+                ? t('derivedLayerBuilder.joinTypeLeft')
+                : t('derivedLayerBuilder.joinTypeInner')}
+            </button>
+          ))}
+        </div>
+        <p className="mt-1 text-2xs text-muted">
+          {params.joinType === 'inner'
+            ? t('derivedLayerBuilder.joinTypeInnerHint')
+            : t('derivedLayerBuilder.joinTypeLeftHint')}
+        </p>
+      </div>
+
+      <div>
+        <p className="mb-1 text-2xs uppercase tracking-wide text-muted">
+          {t('derivedLayerBuilder.bringOver')}
+        </p>
+        <div className="grid grid-cols-2 gap-2" role="radiogroup">
+          {(['first', 'count'] as const).map((s) => (
+            <button
+              key={s}
+              type="button"
+              role="radio"
+              aria-checked={params.attributeStrategy === s}
+              onClick={() => onChange({ ...params, attributeStrategy: s })}
+              className={radioCls(params.attributeStrategy === s)}
+            >
+              {s === 'count'
+                ? t('derivedLayerBuilder.countOfMatches')
+                : t('derivedLayerBuilder.attrsFromFirst')}
+            </button>
+          ))}
+        </div>
+        {params.attributeStrategy === 'count' ? (
+          <p className="mt-1 text-2xs text-muted">
+            {t('derivedLayerBuilder.attributeJoinCountHint', { prefix })}
+          </p>
+        ) : null}
+      </div>
+
+      {params.attributeStrategy === 'first' ? (
+        <JoinAttrsPicker
+          attrs={params.attrsToKeep}
+          otherFields={other.fields}
+          onChange={(attrsToKeep) => onChange({ ...params, attrsToKeep })}
+          hint={t('derivedLayerBuilder.attributeJoinPickAttrs', { prefix })}
+        />
+      ) : null}
+
+      {params.attributeStrategy === 'first' ? (
+        <div className="flex flex-col gap-1">
+          <span className="text-2xs uppercase tracking-wide text-muted">
+            {t('derivedLayerBuilder.joinOrderBy')}
+          </span>
+          <div className="grid gap-2 sm:grid-cols-2">
+            <select
+              aria-label={t('derivedLayerBuilder.joinOrderBy')}
+              value={params.orderBy?.field ?? ''}
+              onChange={(e) => {
+                const field = e.target.value;
+                const { orderBy: _drop, ...rest } = params;
+                void _drop;
+                onChange(
+                  field
+                    ? { ...rest, orderBy: { field, direction: params.orderBy?.direction ?? 'asc' } }
+                    : rest,
+                );
+              }}
+              className={selectCls}
+            >
+              <option value="">{t('derivedLayerBuilder.joinOrderNone')}</option>
+              <option value={ATTRIBUTE_JOIN_FEATURE_ID}>
+                {t('derivedLayerBuilder.featureIdOption')}
+              </option>
+              {other.fields.map((f) => (
+                <option key={f.name} value={f.name}>
+                  {f.label && f.label !== f.name ? `${f.label} (${f.name})` : f.name}
+                </option>
+              ))}
+              {params.orderBy &&
+              params.orderBy.field !== ATTRIBUTE_JOIN_FEATURE_ID &&
+              !other.fields.some((f) => f.name === params.orderBy!.field) ? (
+                <option value={params.orderBy.field}>
+                  {t('derivedLayerBuilder.missingFieldOption', { field: params.orderBy.field })}
+                </option>
+              ) : null}
+            </select>
+            <select
+              aria-label={t('derivedLayerBuilder.joinOrderDirection')}
+              value={params.orderBy?.direction ?? 'asc'}
+              disabled={!params.orderBy}
+              onChange={(e) =>
+                params.orderBy &&
+                onChange({
+                  ...params,
+                  orderBy: {
+                    ...params.orderBy,
+                    direction: e.target.value as 'asc' | 'desc',
+                  },
+                })
+              }
+              className={selectCls}
+            >
+              <option value="asc">{t('derivedLayerBuilder.joinOrderAsc')}</option>
+              <option value="desc">{t('derivedLayerBuilder.joinOrderDesc')}</option>
+            </select>
+          </div>
+          <span className="text-2xs text-muted">
+            {t('derivedLayerBuilder.joinOrderHint')}
+          </span>
+        </div>
+      ) : null}
+
+      <label className="flex flex-col gap-1">
+        <span className="text-2xs uppercase tracking-wide text-muted">
+          {t('derivedLayerBuilder.outputPrefix')}
+        </span>
+        <input
+          type="text"
+          value={prefix}
+          onChange={(e) =>
+            onChange({
+              ...params,
+              attrPrefix: e.target.value.replace(/[^a-zA-Z0-9_]/g, '_'),
+            })
+          }
+          className="h-9 w-40 rounded-md border border-border bg-surface-1 px-3 font-mono text-xs focus:border-accent focus:outline-hidden"
+        />
+        <span className="text-2xs text-muted">
+          {t('derivedLayerBuilder.outputPrefixHint')}
+        </span>
+      </label>
+
+      <JoinAliasEditor
+        tool="attribute-join"
+        params={params}
+        sourceFields={sourceFields}
+        otherFields={other.fields}
+        onChange={onChange}
+      />
+    </div>
+  );
+}
+
+/** Field options both join steps share. */
+type JoinFieldParams = {
+  attributeStrategy: 'count' | 'first';
+  attrsToKeep?: string[];
+  attrPrefix?: string;
+  keepFields?: string[];
+  aliases?: Record<string, string>;
+};
+
+/**
+ * Which input fields a join carries over. "Keep all fields" stores
+ * nothing; unticking it starts from every field, so nothing vanishes
+ * until the author clears it. Ticked fields stay in input order.
+ */
+function JoinKeepFieldsEditor({
+  keepFields,
+  sourceFields,
+  onChange,
+}: {
+  keepFields: string[] | undefined;
+  sourceFields: FeatureField[];
+  onChange: (next: string[] | undefined) => void;
+}) {
+  const { t } = useDerivedLayerCatalog();
+  return (
+    <div className="flex flex-col gap-1">
+      <span className="text-2xs uppercase tracking-wide text-muted">
+        {t('derivedLayerBuilder.joinKeepFields')}
+      </span>
+      <label className="flex items-center gap-2 text-xs text-ink-1">
+        <input
+          type="checkbox"
+          checked={keepFields === undefined}
+          onChange={(e) =>
+            onChange(e.target.checked ? undefined : sourceFields.map((f) => f.name))
+          }
+        />
+        {t('derivedLayerBuilder.joinKeepAllFields')}
+      </label>
+      {keepFields !== undefined ? (
+        <div className="grid max-h-48 gap-1 overflow-y-auto rounded-md border border-border bg-surface-1 p-2 sm:grid-cols-2">
+          {sourceFields.map((f) => (
+            <label key={f.name} className="flex items-center gap-2 text-xs text-ink-1">
+              <input
+                type="checkbox"
+                checked={keepFields.includes(f.name)}
+                onChange={() =>
+                  onChange(
+                    keepFields.includes(f.name)
+                      ? keepFields.filter((n) => n !== f.name)
+                      : sourceFields
+                          .map((s) => s.name)
+                          .filter((n) => n === f.name || keepFields.includes(n)),
+                  )
+                }
+              />
+              <span className="truncate">{f.label ?? f.name}</span>
+            </label>
+          ))}
+        </div>
+      ) : null}
+      <span className="text-2xs text-muted">
+        {t('derivedLayerBuilder.joinKeepFieldsHint')}
+      </span>
+    </div>
+  );
+}
+
+/**
+ * The other layer's attributes to copy. A checklist when its schema
+ * can be read, free text otherwise.
+ */
+function JoinAttrsPicker({
+  attrs,
+  otherFields,
+  onChange,
+  hint,
+}: {
+  attrs: string[] | undefined;
+  otherFields: FeatureField[];
+  onChange: (next: string[]) => void;
+  hint: string;
+}) {
+  const { t } = useDerivedLayerCatalog();
+  const kept = attrs ?? [];
+  return (
+    <div className="flex flex-col gap-1">
+      <span className="text-2xs uppercase tracking-wide text-muted">
+        {t('derivedLayerBuilder.attrsToKeep')}
+      </span>
+      {otherFields.length > 0 ? (
+        <div className="grid max-h-48 gap-1 overflow-y-auto rounded-md border border-border bg-surface-1 p-2 sm:grid-cols-2">
+          {otherFields.map((f) => (
+            <label key={f.name} className="flex items-center gap-2 text-xs text-ink-1">
+              <input
+                type="checkbox"
+                checked={kept.includes(f.name)}
+                onChange={() =>
+                  onChange(
+                    kept.includes(f.name)
+                      ? kept.filter((a) => a !== f.name)
+                      : [...kept, f.name],
+                  )
+                }
+              />
+              <span className="truncate">{f.label ?? f.name}</span>
+            </label>
+          ))}
+        </div>
+      ) : (
+        <ListTextInput
+          value={attrs}
+          format={(a) => (a ?? []).join(', ')}
+          parse={splitList}
+          onValue={onChange}
+          placeholder={t('derivedLayerBuilder.attrsToKeepPlaceholder')}
+          className="h-9 rounded-md border border-border bg-surface-1 px-3 font-mono text-xs focus:border-accent focus:outline-hidden"
+        />
+      )}
+      <span className="text-2xs text-muted">{hint}</span>
+    </div>
+  );
+}
+
+/**
+ * Aliases (display labels) for every field the join outputs: the kept
+ * input fields and the joined ones. A blank box keeps the default
+ * label. Field names never change, so expressions and later steps that
+ * use them keep working.
+ */
+function JoinAliasEditor<P extends JoinFieldParams>({
+  tool,
+  params,
+  sourceFields,
+  otherFields,
+  onChange,
+}: {
+  tool: 'attribute-join' | 'spatial-join';
+  params: P;
+  sourceFields: FeatureField[];
+  otherFields: FeatureField[];
+  onChange: (next: P) => void;
+}) {
+  const { t } = useDerivedLayerCatalog();
+  const [open, setOpen] = useState(
+    () => Object.keys(params.aliases ?? {}).length > 0,
+  );
+  const { aliases: _drop, ...rest } = params;
+  void _drop;
+  const plain = rest as P;
+  // Default labels, before any alias.
+  const fields = stepOutputSchema(sourceFields, { tool, params: plain } as unknown as ToolStep);
+  const aliases = params.aliases ?? {};
+  const prefix = params.attrPrefix ?? 'joined_';
+  const setAlias = (name: string, label: string) => {
+    const next = { ...aliases };
+    if (label.trim()) next[name] = label;
+    else delete next[name];
+    onChange(
+      Object.keys(next).length > 0 ? { ...plain, aliases: next } : plain,
+    );
+  };
+  // Joined fields default to the prefixed name; the other layer's own
+  // labels usually read better.
+  const fromOtherLayer = () => {
+    const next = { ...aliases };
+    for (const a of params.attrsToKeep ?? []) {
+      const label = otherFields.find((f) => f.name === a)?.label;
+      if (label && !next[`${prefix}${a}`]) next[`${prefix}${a}`] = label;
+    }
+    onChange(Object.keys(next).length > 0 ? { ...plain, aliases: next } : plain);
+  };
+  return (
+    <div className="flex flex-col gap-1">
+      <button
+        type="button"
+        aria-expanded={open}
+        onClick={() => setOpen((o) => !o)}
+        className="flex items-center gap-1 self-start text-2xs uppercase tracking-wide text-muted hover:text-ink-1"
+      >
+        <ChevronDown
+          className={`h-3 w-3 transition-transform ${open ? '' : '-rotate-90'}`}
+          aria-hidden="true"
+        />
+        {t('derivedLayerBuilder.joinAliases', {
+          count: Object.keys(aliases).length,
+        })}
+      </button>
+      {open ? (
+        <>
+          {params.attributeStrategy === 'first' &&
+          (params.attrsToKeep ?? []).length > 0 &&
+          otherFields.length > 0 ? (
+            <button
+              type="button"
+              onClick={fromOtherLayer}
+              className="self-start rounded-md border border-border bg-surface-1 px-2 py-1 text-2xs text-ink-1 hover:bg-surface-2"
+            >
+              {t('derivedLayerBuilder.joinAliasesFromOther')}
+            </button>
+          ) : null}
+          <div className="max-h-64 space-y-1 overflow-y-auto rounded-md border border-border bg-surface-1 p-2">
+            {fields.map((f) => (
+              <label
+                key={f.name}
+                className="grid items-center gap-2 text-xs sm:grid-cols-[minmax(0,2fr)_minmax(0,3fr)]"
+              >
+                <span className="truncate font-mono text-2xs text-muted" title={f.name}>
+                  {f.name}
+                </span>
+                <input
+                  type="text"
+                  maxLength={120}
+                  value={aliases[f.name] ?? ''}
+                  placeholder={f.label || f.name}
+                  aria-label={t('derivedLayerBuilder.joinAliasFor', { field: f.name })}
+                  onChange={(e) => setAlias(f.name, e.target.value)}
+                  className="h-8 rounded-md border border-border bg-surface-0 px-2 text-xs focus:border-accent focus:outline-hidden"
+                />
+              </label>
+            ))}
+          </div>
+          <span className="text-2xs text-muted">
+            {t('derivedLayerBuilder.joinAliasesHint')}
+          </span>
+        </>
+      ) : null}
     </div>
   );
 }
