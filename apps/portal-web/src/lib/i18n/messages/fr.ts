@@ -70,6 +70,41 @@ export const fr: Partial<CatalogShape> = {
     configurationTitle: 'Configuration du visualiseur',
     removeLayerAria: 'Retirer la couche',
   },
+  adminHome: {
+    title: 'Administration',
+    intro: 'Réglages et outils pour gérer ce portail, regroupés selon ce que vous voulez faire.',
+    searchLabel: 'Rechercher dans l’administration',
+    searchPlaceholder: 'Rechercher, p. ex. inviter, sauvegarde, e-mail',
+    noMatch: 'Rien dans l’administration ne correspond à « {query} ».',
+    gettingStartedTitle: 'Terminer la configuration',
+    gettingStartedDesc: 'Étapes restantes de la liste de configuration : {count}.',
+    operatorNote: 'La sauvegarde, la connexion, les retours et l’état du système sont réservés aux administrateurs de l’organisation qui exploite cette installation.',
+    operatorBadge: 'Toute l’installation',
+    groups: {
+      people: 'Personnes et accès',
+      portal: 'Votre portail',
+      data: 'Données',
+      system: 'Système',
+    },
+    cards: {
+      users: { title: 'Utilisateurs', desc: 'Inviter des personnes, changer les rôles, réinitialiser les mots de passe et couper l’accès.' },
+      sharing: { title: 'Revue des partages', desc: 'Qui peut ouvrir chaque élément en ce moment, y compris les accès laissés par des personnes ou groupes disparus.' },
+      audit: { title: 'Journal d’audit', desc: 'Modifications privilégiées : utilisateurs, rôles, partages, propriété, sauvegarde et réglages.' },
+      signIn: { title: 'Connexion', desc: 'Comptes professionnels utilisés pour se connecter, et si un authentificateur est exigé.' },
+      landing: { title: 'Page d’accueil', desc: 'Ce que les visiteurs voient sur la page d’accueil avant de se connecter.' },
+      ai: { title: 'Assistant IA', desc: 'Connecter un fournisseur d’IA pour rédiger et construire. Désactivé tant qu’aucun n’est ajouté.' },
+      feedback: { title: 'Boîte des retours', desc: 'Ce que les personnes ont envoyé depuis le portail, du plus récent au plus ancien.' },
+      jobs: { title: 'Imports et analyses', desc: 'Imports et analyses en cours et récents, avec annulation et nouvel essai.' },
+      fieldQueues: { title: 'Files terrain', desc: 'Ce que chaque appareil de terrain attend de synchroniser, et sa dernière connexion.' },
+      cleanup: { title: 'Suggestions de nettoyage', desc: 'Éléments et comptes qui pourraient être revus ou retirés.' },
+      agoImport: { title: 'Import et export ArcGIS Online', desc: 'Déplacer du contenu entre ArcGIS Online et ce portail, avec un aperçu avant toute création.' },
+      health: { title: 'État du système', desc: 'Si les services derrière ce portail sont prêts, et le mode maintenance.' },
+      backup: { title: 'Sauvegarde', desc: 'Enregistrer et restaurer un instantané complet du portail.' },
+      updates: { title: 'Mises à jour', desc: 'Les nouveautés de la dernière version et comment mettre à jour cette installation.' },
+      email: { title: 'Envoi des e-mails', desc: 'Réglages du serveur de messagerie, état des envois et messages bloqués.' },
+      support: { title: 'Paquet d’assistance', desc: 'Un fichier de versions et de comptages à joindre à une demande d’aide. Les secrets sont retirés.' },
+    },
+  },
   nav: {
     items: 'Éléments',
     home: 'Accueil',
@@ -117,6 +152,8 @@ export const fr: Partial<CatalogShape> = {
     downloadBackup: 'Download backup',
     backupPage: 'Open the backup page',
     backupFailed: 'Could not start a backup',
+    backupOperatorOnly:
+      "Les sauvegardes sont faites par les administrateurs de l’organisation qui exploite cette installation. Demandez-leur d’en faire une avant la mise à jour.",
     loadFailed: 'Could not load update information',
     nasCompose: 'Copy the new compose file for this channel:',
     nasComposePaste: 'In TrueNAS, edit the app and paste the file, then Save. In Dockge, open the stack, paste the file, and Save. Keep GRATIS_HTTP_PORT if you changed it.',
@@ -1721,6 +1758,9 @@ export const fr: Partial<CatalogShape> = {
   buildPage: {
     title: 'Créer à partir d’une description',
     intro: 'Décrivez une couche, une carte, un formulaire ou une app. Un tableau de bord est un modèle d’application web, pas cette page. Rien n’est créé tant que vous ne choisissez pas de le créer.',
+    notConfigured:
+      "La construction a besoin d’un fournisseur d’IA, et aucun n’est connecté pour cette organisation.",
+    connectProvider: "Connecter un fournisseur dans Administration, Assistant IA",
   },
   fieldQueue: {
     rejectedChip:

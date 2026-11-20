@@ -70,6 +70,41 @@ export const de: Partial<CatalogShape> = {
     configurationTitle: 'Viewer-Konfiguration',
     removeLayerAria: 'Layer entfernen',
   },
+  adminHome: {
+    title: 'Admin',
+    intro: 'Einstellungen und Werkzeuge für den Betrieb dieses Portals, nach Aufgaben gruppiert.',
+    searchLabel: 'Admin durchsuchen',
+    searchPlaceholder: 'Suchen, z. B. einladen, Sicherung, E-Mail',
+    noMatch: 'Nichts im Admin-Bereich passt zu „{query}“.',
+    gettingStartedTitle: 'Einrichtung abschließen',
+    gettingStartedDesc: 'Offene Schritte auf der Einrichtungsliste: {count}.',
+    operatorNote: 'Sicherung, Anmeldung, Feedback und Systemzustand sind den Admins der Organisation vorbehalten, die diese Installation betreibt.',
+    operatorBadge: 'Installationsweit',
+    groups: {
+      people: 'Personen und Zugriff',
+      portal: 'Ihr Portal',
+      data: 'Daten',
+      system: 'System',
+    },
+    cards: {
+      users: { title: 'Benutzer', desc: 'Personen einladen, Rollen ändern, Passwörter zurücksetzen und Zugriff sperren.' },
+      sharing: { title: 'Freigabeprüfung', desc: 'Wer jedes Element gerade öffnen kann, auch Zugriffe von gelöschten Personen oder Gruppen.' },
+      audit: { title: 'Prüfprotokoll', desc: 'Privilegierte Änderungen: Benutzer, Rollen, Freigaben, Besitz, Sicherung und Einstellungen.' },
+      signIn: { title: 'Anmeldung', desc: 'Arbeitskonten für die Anmeldung und ob ein Authentifikator verlangt wird.' },
+      landing: { title: 'Startseite', desc: 'Was Besucher vor der Anmeldung auf der Startseite sehen.' },
+      ai: { title: 'KI-Assistent', desc: 'Einen KI-Anbieter für Entwürfe und das Erstellen verbinden. Aus, bis einer hinzugefügt wird.' },
+      feedback: { title: 'Feedback-Eingang', desc: 'Was Personen aus dem Portal gesendet haben, neueste zuerst.' },
+      jobs: { title: 'Importe und Analysen', desc: 'Laufende und letzte Importe und Analysen, mit Abbrechen und Wiederholen.' },
+      fieldQueues: { title: 'Feld-Warteschlangen', desc: 'Was jedes Feldgerät zur Synchronisierung bereithält und wann es sich zuletzt gemeldet hat.' },
+      cleanup: { title: 'Aufräumvorschläge', desc: 'Elemente und Konten, die geprüft oder stillgelegt werden könnten.' },
+      agoImport: { title: 'ArcGIS Online Import und Export', desc: 'Inhalte zwischen ArcGIS Online und diesem Portal verschieben, mit Vorschau vor dem Anlegen.' },
+      health: { title: 'Systemzustand', desc: 'Ob die Dienste hinter diesem Portal bereit sind, und der Wartungsmodus.' },
+      backup: { title: 'Sicherung', desc: 'Einen vollständigen Schnappschuss des Portals speichern und wiederherstellen.' },
+      updates: { title: 'Updates', desc: 'Neues in der aktuellen Version und wie diese Installation aktualisiert wird.' },
+      email: { title: 'E-Mail-Zustellung', desc: 'Mailserver-Einstellungen, Zustellstatus und hängende Nachrichten.' },
+      support: { title: 'Support-Paket', desc: 'Eine Datei mit Versionen und Zahlen für Hilfeanfragen. Geheimnisse werden entfernt.' },
+    },
+  },
   nav: {
     items: 'Elemente',
     home: 'Startseite',
@@ -117,6 +152,8 @@ export const de: Partial<CatalogShape> = {
     downloadBackup: 'Download backup',
     backupPage: 'Open the backup page',
     backupFailed: 'Could not start a backup',
+    backupOperatorOnly:
+      "Sicherungen erstellen die Admins der Organisation, die diese Installation betreibt. Bitten Sie sie vor dem Update darum.",
     loadFailed: 'Could not load update information',
     nasCompose: 'Copy the new compose file for this channel:',
     nasComposePaste: 'In TrueNAS, edit the app and paste the file, then Save. In Dockge, open the stack, paste the file, and Save. Keep GRATIS_HTTP_PORT if you changed it.',
@@ -1720,6 +1757,9 @@ export const de: Partial<CatalogShape> = {
   buildPage: {
     title: 'Aus einer Beschreibung erstellen',
     intro: 'Beschreiben Sie einen Layer, eine Karte, ein Formular oder eine App. Ein Dashboard ist eine Web-App-Vorlage, nicht diese Seite. Es wird nichts erstellt, bis Sie das auswählen.',
+    notConfigured:
+      "Erstellen braucht einen KI-Anbieter, und für diese Organisation ist keiner verbunden.",
+    connectProvider: "Einen Anbieter unter Admin, KI-Assistent verbinden",
   },
   fieldQueue: {
     rejectedChip:

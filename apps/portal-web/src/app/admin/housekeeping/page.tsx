@@ -1,8 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { Suspense } from 'react';
-import Link from 'next/link';
 import { redirect } from 'next/navigation';
-import { ArrowLeft, Sparkles } from 'lucide-react';
+import { Sparkles } from 'lucide-react';
 import { apiFetch } from '@/lib/api';
 import { t } from '@/lib/i18n';
 import type { SupportedLocale } from '@/lib/i18n/locales';
@@ -73,24 +72,14 @@ export default async function AdminHousekeepingPage() {
   const locale = await getServerLocale();
 
   return (
-    <div className="mx-auto w-full max-w-5xl px-6 py-10">
-      <Link
-        href="/items"
-        className="mb-3 inline-flex items-center gap-1 text-xs text-muted hover:text-ink-0"
-      >
-        <ArrowLeft className="h-3.5 w-3.5" />
-        {t('adminHousekeeping.backToPortal', undefined, locale)}
-      </Link>
+    <div className="w-full max-w-5xl pb-10 pt-4">
       <header className="mb-6 flex items-center gap-3">
         <span className="flex h-10 w-10 items-center justify-center rounded-md bg-accent/10 text-accent">
           <Sparkles className="h-5 w-5" />
         </span>
         <div>
-          <p className="text-xs text-muted">
-            {t('nav.admin', undefined, locale)}
-          </p>
           <h1 className="text-2xl font-semibold tracking-tight">
-            {t('nav.housekeeping', undefined, locale)}
+            {t('adminHome.cards.cleanup.title', undefined, locale)}
           </h1>
           <p className="mt-0.5 text-sm text-muted">
             {t('adminHousekeeping.pageIntro', undefined, locale)}
@@ -318,9 +307,14 @@ async function BundleSection() {
       apiFetch<HousekeepingBundle['storage']>(
         '/api/admin/housekeeping/storage',
       ).catch(() => null),
+      // Also install-wide and operator-only. A 403 hides the card;
+      // it used to fail the whole Review tab for other org admins.
       apiFetch<HousekeepingBundle['largestDataLayers']>(
         '/api/admin/housekeeping/largest-data-layers',
-      ),
+      ).catch((err: unknown) => {
+        if (isForbidden(err)) return null;
+        throw err;
+      }),
     ]);
     const bundle: HousekeepingBundle = {
       summary,
