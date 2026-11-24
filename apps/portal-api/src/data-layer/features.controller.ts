@@ -11,6 +11,7 @@ import {
   HttpStatus,
   InternalServerErrorException,
   NotFoundException,
+  Optional,
   Param,
   Patch,
   Post,
@@ -59,14 +60,18 @@ import {
 
 import type { ItemShare } from '@prisma/client';
 import {
+  decodeTileExpressions,
   isEditorItem,
   type FeatureField,
   type FeatureRecord,
   type MapLayerFilter,
 } from '@gratis-gis/shared-types';
-import { isUuid, type GeoJsonGeometry } from '@gratis-gis/engine';
+import type { GeoJsonGeometry } from '@gratis-gis/engine';
 
 import { CurrentUser } from '../auth/current-user.decorator.js';
+import { ExpressionsService } from '../expressions/expressions.service.js';
+import type { ItemWithShares } from '../expressions/expression-data.js';
+import type { TileComputed } from '../engine/data-layer.js';
 import { PrintReadable } from '../auth/print-readable.decorator.js';
 import type { AuthUser } from '../auth/auth-sync.service.js';
 import { ItemsService } from '../items/items.service.js';
@@ -77,6 +82,7 @@ import {
 } from '../items/sharing.service.js';
 import { EditorPolicyService } from '../items/editor-policy.service.js';
 import { PrismaService } from '../prisma/prisma.service.js';
+import { resolveClipBoundaryGeometry } from '../items/clip-boundary.js';
 import {
   DataLayerFeaturesService,
   type EngineVia,
@@ -241,6 +247,7 @@ export class DataLayerFeaturesController {
     private readonly prisma: PrismaService,
     private readonly editorPolicy: EditorPolicyService,
     private readonly notifications: NotificationsService,
+    @Optional() private readonly expressions?: ExpressionsService,
   ) {}
 
   @Get('features')
@@ -618,6 +625,7 @@ export class DataLayerFeaturesController {
     @Query('where') whereRaw?: string,
     @Query('via') viaRaw?: string,
     @Query('include') includeRaw?: string,
+    @Query('expr') exprRaw?: string,
   ) {
     const { geoLimit, rowScope, isTable, layer } = await this.assertV3Layer(
       user,
@@ -652,6 +660,7 @@ export class DataLayerFeaturesController {
       maxFeaturesPerTile?: number;
       zoomRange?: { min: number; max: number };
       labelPoints?: boolean;
+      computed?: TileComputed;
     } = {};
     if (isTable) opts.isTable = true;
     if (geoLimit) opts.geoLimit = geoLimit;
@@ -712,6 +721,17 @@ export class DataLayerFeaturesController {
     }
     if (plan.zoomRange) opts.zoomRange = plan.zoomRange;
     if (plan.labelPoints) opts.labelPoints = true;
+    // Expression fields from the map layer (`expr`): computed into
+    // the tile under this viewer's own access to anything they read.
+    if (exprRaw) {
+      const exprs = decodeTileExpressions(exprRaw);
+      if (exprs === null) throw new BadRequestException('Invalid expr parameter.');
+      const item = (await this.items.get(user, itemId)) as unknown as ItemWithShares;
+      const computed = this.expressions
+        ? await this.expressions.tileComputed(user, item, layerId, exprs)
+        : null;
+      if (computed) opts.computed = computed;
+    }
     const cacheControl = tileCacheControl(tileSettings, 'private');
     let mvt: Buffer;
     let etag: string;
@@ -1627,45 +1647,23 @@ export class DataLayerFeaturesController {
 
   /**
    * Look up a geo_boundary item by id and return its geometry. Used
-   * by the layer-level clip path (#34). Bypasses per-user authz
-   * because the clip is layer-content scope, not access (see the
-   * docstring on MapLayer.boundaryFilterItemId in shared-types).
-   * Returns null when the item is missing, soft-deleted, the wrong
-   * type, or has no geometry yet -- all of which the caller treats
-   * as "no clip applied" rather than an error so a stale layer
-   * config never blocks the map from rendering.
+   * by the layer-level clip path (#34). The clip is layer content
+   * scope, not access (see the docstring on
+   * MapLayer.boundaryFilterItemId in shared-types). The rule for which
+   * boundaries apply lives in resolveClipBoundaryGeometry, shared with
+   * the item-level GeoJSON read. Null means "no clip applied".
    */
   private async resolveBoundaryGeometry(
     user: AuthUser,
     layerItemId: string,
     boundaryItemId: string,
   ): Promise<unknown | null> {
-    // A non-UUID id would make Prisma throw (a 500); it can never match.
-    if (!boundaryItemId || !isUuid(boundaryItemId)) return null;
-    const row = await this.prisma.item.findFirst({
-      where: {
-        id: boundaryItemId,
-        type: 'geo_boundary',
-        deletedAt: null,
-      },
-      include: { shares: true },
-    });
-    if (!row) return null;
-    // The clip skips the caller's own access to the boundary on
-    // purpose (a map author picks it for the layer). It must still
-    // belong with the layer: in the layer's org, or readable by the
-    // caller. Otherwise any id from another org works as a geometry
-    // oracle: fill a layer with a point grid and see which survive.
-    if (!this.sharing.canRead(user, row, row.shares)) {
-      const layerItem = await this.prisma.item.findUnique({
-        where: { id: layerItemId },
-        select: { orgId: true },
-      });
-      if (!layerItem || layerItem.orgId !== row.orgId) return null;
-    }
-    const geom = (row.data as { geometry?: unknown } | null)?.geometry;
-    if (!geom || typeof geom !== 'object') return null;
-    return geom;
+    return resolveClipBoundaryGeometry(
+      { prisma: this.prisma, sharing: this.sharing },
+      user,
+      { id: layerItemId },
+      boundaryItemId,
+    );
   }
 
   /**

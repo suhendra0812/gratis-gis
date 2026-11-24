@@ -2,6 +2,7 @@
 import type { MetadataRoute } from 'next';
 import { loadAllDocs } from '@/lib/help/content';
 import { portalUrl } from '@/lib/portal-url';
+import { IS_PUBLIC_TEST_INSTANCE } from '@/lib/seo';
 
 /**
  * sitemap.xml generator (#SEO).  Next.js serves this at
@@ -20,6 +21,10 @@ import { portalUrl } from '@/lib/portal-url';
  * crawlers still see a reasonable freshness signal.
  */
 export default async function sitemap(): Promise<MetadataRoute.Sitemap> {
+  // A public test instance keeps every page out of search (see
+  // lib/seo.ts), so it lists none. A sitemap of noindex pages would
+  // send search engines mixed signals.
+  if (IS_PUBLIC_TEST_INSTANCE) return [];
   const now = new Date();
   const staticEntries: MetadataRoute.Sitemap = [
     {

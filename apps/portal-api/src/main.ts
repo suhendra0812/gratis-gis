@@ -13,6 +13,8 @@ import {
   rejectRepeatedQueryKeys,
 } from './common/body-limits.js';
 import { installMetrics } from './metrics/install-metrics.js';
+import { writeStartupStatus } from './startup-status.js';
+import { logTenancyMode } from './common/tenancy.js';
 
 // Process-level safety net (#117). Node >= 16 exits the process on an
 // uncaughtException OR an unhandledRejection by default; in prod that
@@ -37,6 +39,7 @@ process.on('uncaughtException', (err) => {
 });
 
 async function bootstrap() {
+  logTenancyMode(processLogger);
   const app = await NestFactory.create<NestExpressApplication>(AppModule);
   // Flush in-memory work (bbox windows, in-flight jobs) on SIGTERM
   // instead of dropping it when a deploy stops the container.
@@ -136,6 +139,7 @@ async function bootstrap() {
   await app.listen(port);
   // eslint-disable-next-line no-console
   console.log(`portal-api listening on http://localhost:${port}`);
+  writeStartupStatus('ready');
 }
 
 // A failed startup (a throwing onModuleInit, a port in use) used to be
@@ -143,8 +147,8 @@ async function bootstrap() {
 // running with no listener, so the container never restarted. Exit
 // instead and let the restart policy try again.
 bootstrap().catch((err: unknown) => {
-  processLogger.error(
-    `Startup failed: ${err instanceof Error ? err.stack ?? err.message : String(err)}`,
-  );
+  const text = err instanceof Error ? err.stack ?? err.message : String(err);
+  processLogger.error(`Startup failed: ${text}`);
+  writeStartupStatus('failed', { log: `Startup failed: ${text}` });
   process.exit(1);
 });

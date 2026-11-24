@@ -77,6 +77,13 @@ jobs:
       - name: Lint
         run: pnpm lint
 
+      # Every raw SQL call site in portal-api has a reviewed row in
+      # docs/security/raw-sql-inventory.md. A new or moved site fails
+      # here until the inventory and scripts/raw-sql-baseline.json are
+      # updated. Plain Node, no dependencies.
+      - name: Raw SQL inventory guard
+        run: node scripts/check-raw-sql.mjs --self-test
+
       - name: Typecheck
         run: pnpm typecheck
 
@@ -234,6 +241,7 @@ jobs:
           node infra/field-bundle/read-recovery.test.mjs
           bash infra/publish-gate.test.sh
           bash infra/lib-deploy.test.sh
+          bash infra/install.test.sh
 
   recovery-integration:
     name: Keycloak reset and maintenance gate

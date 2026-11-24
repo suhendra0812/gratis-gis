@@ -1,6 +1,7 @@
 ---
 id: map-editing-popups
 title: Popups
+seoTitle: "Configure map popups: fields, attachments and actions"
 summary: "Customize what shows when a user clicks a feature: title, body, field list, attachments, links."
 category: map-editing
 order: 40
@@ -9,6 +10,7 @@ tags:
   - popup
   - map-editing
 related:
+  - map-editing-expression-fields
   - map-editing-labels
   - map-editing-filters
 ---

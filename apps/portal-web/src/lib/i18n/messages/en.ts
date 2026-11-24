@@ -365,6 +365,11 @@ export const en = {
       desc:
         'Reusable color palette + geometry tokens applied to web apps. Edit the colors and a live preview shell shows where each one appears.',
     },
+    report_template: {
+      label: 'Report template',
+      desc:
+        'A document filled once per feature or form submission, such as an inspection report. Write it with field and expression placeholders and photos, then download PDFs.',
+    },
     print_template: {
       label: 'Print template',
       desc:
@@ -658,6 +663,7 @@ export const en = {
   outputTypeNumber: 'Number',
   outputTypeString: 'String',
   outputTypeBoolean: 'Boolean',
+  outputTypeDate: 'Date',
   expression: 'Expression',
   calcFieldHint: 'e.g. {{acres}} * 0.4047  •  concat({{first_name}}, \' \', {{last_name}})  •  if({{population}} > 1000, \'urban\', \'rural\')',
   insert: 'Insert:',
@@ -1007,6 +1013,19 @@ export const en = {
     surfaceLabel: 'Slope surface',
     perimeterLabel: 'Perimeter',
     newMeasurement: 'New measurement',
+    labels: 'Labels on the map',
+    showLengths: 'Side lengths',
+    showArea: 'Area',
+    hintEdit: 'Drag the shape to move it. Drag a corner to reshape it, or a midpoint to add a corner.',
+    setArea: 'Set area',
+    setAreaAria: 'Target area in the chosen unit',
+    apply: 'Apply',
+    targetInvalid: 'Enter an area greater than zero.',
+    targetFailed: 'That size does not fit on the map.',
+    saveToMarkup: 'Save to markup',
+    saving: 'Saving...',
+    savedTo: 'Saved to "{title}".',
+    saveFailed: 'Could not save the measurement.',
   },
   /** Bottom-left area square next to the distance scale bar. */
   mapAreaScale: {
@@ -1839,6 +1858,8 @@ export const en = {
     createDeployment: 'Create a deployment',
     loadFailedTitle: 'Field deployments could not be loaded',
     loadFailedBody: 'The catalog did not answer. This is not an empty list. Try again in a moment.',
+    sectionDeployments: 'Deployments',
+    openPortal: 'Open the portal',
   },
   buildPage: {
     title: 'Build from a description',
@@ -1985,6 +2006,8 @@ export const en = {
     pointManualHint: 'Tap the map or drag the point to move it.',
     pointGpsHint: 'The point follows your GPS position (±{accuracy} m).',
     pointGpsWaiting: 'Waiting for a GPS fix...',
+    leftHandedControls: 'Collect and locate buttons on the left',
+    leftHandedControlsHint: 'For holding the phone in your left hand. Saved on this device.',
     saveFeature: 'Save feature',
     saveChanges: 'Save changes',
     relatedUnsynced: 'unsynced',
@@ -2031,6 +2054,17 @@ export const en = {
   // refusal gets a line of the viewport rather than a tooltip.
   fieldGps: {
     accuracy: 'GPS accuracy {meters} m',
+    receiverAccuracy: '{fixType} · {sats} sats · ±{meters} m',
+    receiverAccuracyEstimated: '{fixType} · {sats} sats · about ±{meters} m',
+    receiverWaiting: 'Receiver connected, waiting for a fix',
+    receiverTitle: 'GNSS receiver',
+    receiverConnect: 'Connect a GNSS receiver',
+    receiverConnectHint: 'Bluetooth or USB receiver that sends NMEA. Pair it in the phone settings first.',
+    receiverConnecting: 'Connecting',
+    receiverDisconnect: 'Disconnect receiver',
+    receiverInUse: '{receiver} in use',
+    receiverUnsupported: 'Connecting a receiver needs Chrome on Android or a desktop browser. Other browsers use the device location, which an app on the phone can feed from a receiver.',
+    receiverError: 'Receiver: {message}',
     denied:
       'Location is blocked. Allow it in your browser settings to capture at your position.',
     unavailable:
@@ -3279,6 +3313,10 @@ export const en = {
       'No markup yet. Add a set, then draw pins, lines, polygons, text, arrows, or circles on the map.',
     dropPin: 'Drop pin at map center',
     dropPinShort: 'Center',
+    dimLengths: 'Lengths',
+    dimAreas: 'Areas',
+    dimLengthsTitle: 'Show or hide side lengths on this set\'s lines and shapes',
+    dimAreasTitle: 'Show or hide areas on this set\'s shapes',
     addMarkup: 'Add markup',
     signInToMarkup: 'Sign in to add markup to this map.',
     anonymousHint:
@@ -3709,6 +3747,17 @@ export const en = {
     fileMissing: 'File no longer on the server',
     fileMissingTitle:
       'This backup finished, but its file is no longer in the backup folder. It may have been moved, deleted by hand, or belong to an earlier restore of the database. It cannot be downloaded or restored.',
+  },
+  // Shown instead of welcome.intro on a new portal, where "My items"
+  // holds only the catalog every org starts with.
+  // The landing page's public-items box for someone already signed in.
+  landingSignedIn: {
+    publicItemsEmpty:
+      'Nothing is shared publicly yet. Your own maps and data are in My items.',
+  },
+  welcomeDefaults: {
+    intro:
+      'Pick a starting point. The basemaps and templates in your list come with every new portal, ready to use.',
   },
   welcome: {
     title: 'Welcome to GratisGIS',
@@ -6332,6 +6381,94 @@ export const en = {
     channelEmail: 'email',
     defaultBadge: 'default',
     errSaveChange: 'Could not save change.',
+  },
+
+  adminTimeZone: {
+    label: 'Time zone',
+    hint: "Expressions use this for today(), so a filter such as 'due before today' means the same day on the map, in previews and in the field app. Leave empty for UTC.",
+    placeholder: 'UTC',
+    useDevice: 'Use this device ({zone})',
+  },
+
+  expressionBuilder: {
+    reference: 'Expression reference',
+    fields: 'Fields',
+    functions: 'Functions',
+    otherData: 'Other data',
+    returns: 'Returns {type}',
+    noFields: 'This layer has no fields yet.',
+    searchFunctions: 'Search functions',
+    useExample: 'Insert this example',
+    loadingSources: 'Loading related tables and layers...',
+    dataHint: "Read related records, other layers and nearby features. Insert a source, then summarize it, for example count(related('inspections')).",
+    relatedTables: 'Related tables',
+    layers: 'Layers',
+    insert: 'Insert',
+    preview: 'Preview',
+    previewFailed: 'The preview could not run.',
+    moreProblems: '{count} more to fix after this one.',
+    convertArcade: 'This looks like Arcade: convert it',
+    wrongType: 'This needs {want}, but the expression gives {got}.',
+    type_number: 'number',
+    type_string: 'text',
+    type_boolean: 'true/false',
+    type_date: 'date',
+    type_list: 'list',
+    type_unknown: 'any value',
+    type_null: 'empty',
+    type_feature: 'feature',
+    type_set: 'rows',
+    type_any: 'any value',
+    cat_all: 'All',
+    cat_logic: 'Logic',
+    cat_text: 'Text',
+    cat_math: 'Math',
+    cat_date: 'Dates',
+    cat_list: 'Lists',
+    cat_conversion: 'Conversion',
+    cat_geometry: 'Geometry',
+    cat_data: 'Other data',
+  },
+
+  reportTemplate: {
+    layer: 'Layer to report on',
+    sublayer: 'Sublayer',
+    pickLayer: 'Pick a data layer',
+    loading: 'Loading',
+    page: 'Page',
+    portrait: 'Portrait',
+    landscape: 'Landscape',
+    fileName: 'PDF file name',
+    template: 'Template',
+    save: 'Save',
+    saved: 'Saved.',
+    saveFailed: 'Save failed',
+    syntaxHint:
+      'Use {{field}} for a value, {{= expression }} for anything the expression language can work out, including related records, and {{photos}} for photo attachments. Markdown works: # headings, **bold**, lists, tables and --- rules. \\pagebreak starts a new page.',
+    preview: 'Preview',
+    refreshPreview: 'Preview',
+    previewEmpty: 'Pick a layer, then preview the report filled for one feature.',
+    previewFailed: 'Preview failed',
+    previewThis: 'Preview',
+    generate: 'Download reports',
+    search: 'Search features',
+    selectAll: 'Select all {count}',
+    noFeatures: 'No features found.',
+    downloadPdf: 'Download PDF ({count})',
+    saveFirst: 'Save the template before downloading.',
+    pdfFailed: 'The PDF could not be made',
+  },
+  mapLayerExpressions: {
+    tab: 'Expressions',
+    intro: 'Expression fields are values computed for every feature. Use them like fields in labels, popups, styling and filters, as expr.name. They can read related records, other layers and nearby features.',
+    dataLayerOnly: 'Expression fields are computed by the server, so they work on data layers only.',
+    name: 'Name',
+    label: 'Label',
+    remove: 'Remove expression field',
+    add: 'Add expression field',
+    badName: 'Use letters, digits and underscores, starting with a letter.',
+    duplicateName: 'Another expression field already has this name.',
+    useAs: 'Use it as {token}.',
   },
 
 } as const;

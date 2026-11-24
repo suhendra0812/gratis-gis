@@ -33,9 +33,27 @@ Images are `ghcr.io/palavido-dev/gratis-gis/*` (linux/amd64), tag
    other `8080` in the file alone. That number is the port inside
    the container.
 
-5. Click **Save**. The first start downloads the images. Wait until
-   the app is running. Then open the **bootstrap** logs. They look
-   like this:
+5. Click **Save**. The first start downloads the images. As soon as
+   the web page answers, open `http://<your NAS address>:8080` from a
+   computer or phone on your home network. A status page shows each
+   step of the first start and switches to GratisGIS by itself when
+   it is ready.
+
+   If the page asks **Is this the address you will use to open
+   GratisGIS?**, click **Yes, use this address**. That happens when
+   the stack cannot see your NAS address by itself (see below).
+
+6. The page then asks you to **choose your admin password**. Type it
+   twice and click **Save and finish setup**. When setup is done, the
+   page opens GratisGIS. Sign in as `admin` with that password.
+
+   The password you choose is never written to disk or printed in a
+   log. If setting it fails, the bootstrap log prints a first-start
+   password to sign in with instead.
+
+   Installing from a script, or with `GRATIS_UNATTENDED=1`? The page
+   does not ask, and the first-start password is in the **bootstrap**
+   log instead:
 
 ```
 ========== GratisGIS ==========
@@ -45,25 +63,35 @@ Password:           (a long random password)
 This log contains the admin password. Do not post it publicly.
 ```
 
-Open that address from a computer on your home network. Sign in as
-`admin`. Keycloak asks you to choose your own password.
-
-The password appears in the bootstrap log only on that first start.
-Copy it before you change it. A later restart does not print it
-again, and it is not saved as a file on the volume. Do not post the
-first-start log on a forum, in a GitHub issue, or in a screenshot.
-If you already changed the password, you do not need that log.
+   Keycloak asks you to change that one on your first sign-in. It is
+   printed only on the first start. Do not post that log on a forum,
+   in a GitHub issue, or in a screenshot. A public install
+   (`GRATIS_MODE=public`) always uses the log, because it is on the
+   internet before anyone has signed in.
 
 Dockge works the same way: create a stack, paste the same file,
-leave the env box empty, deploy. Then read the bootstrap logs.
+leave the env box empty, deploy, then open the web page.
 
-## If the log asks you to set GRATIS_BASE_URL
+## The status page
 
-The stack could not see a LAN address that opens from another
-computer. It skips network addresses (those end in `.0`), broadcast
-addresses (those end in `.255`), and Docker or TrueNAS bridge
-addresses. In the YAML you pasted, set your NAS address and start
-the app again:
+While GratisGIS starts, updates, or fails to start, its address shows
+a status page instead of an error. It says what is happening (setting
+up, updating the database, starting) and refreshes by itself. When a
+start fails, it shows the error in plain words, with the full details
+to copy into a bug report. It never shows passwords: values from the
+env file are removed before anything reaches the page.
+
+## If the stack cannot find your NAS address
+
+It skips network addresses (those end in `.0`), broadcast addresses
+(those end in `.255`), and Docker or TrueNAS bridge addresses. When
+nothing is left, the status page asks you to confirm the address in
+your browser's address bar. Open the page from another computer or a
+phone, using the NAS address, and click **Yes, use this address**.
+The choice is saved on the boot volume and kept on later starts.
+
+To set the address in the file instead (it wins over the page), set
+it in the YAML you pasted and start the app again:
 
 ```yaml
 GRATIS_BASE_URL: http://192.168.1.20:8080

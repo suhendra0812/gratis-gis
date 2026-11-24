@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   CircleDashed,
   ChevronDown,
@@ -54,6 +54,7 @@ import { FilterEditor } from './filter-editor';
 import { PopupEditor } from './popup-editor';
 import { LayerSourcePanel } from './layer-source-panel';
 import { LabelsEditor } from './labels-editor';
+import { ExpressionsEditor, withExpressionFields } from './expressions-editor';
 import { TemplateInput } from './template-input';
 import { makeEmptyGroupLayer, uniqueGroupTitle } from './group-factory';
 import {
@@ -1109,6 +1110,7 @@ type LayerTab =
   | 'labels'
   | 'filter'
   | 'popup'
+  | 'expressions'
   | 'interactions'
   | 'source';
 
@@ -1138,6 +1140,7 @@ function LayerTabStrip({
     { id: 'labels', label: t('mapLayerPanel.tabs.labels') },
     { id: 'filter', label: t('mapLayerPanel.tabs.filter') },
     { id: 'popup', label: t('mapLayerPanel.tabs.popup') },
+    { id: 'expressions', label: t('mapLayerExpressions.tab') },
     { id: 'interactions', label: t('mapLayerPanel.tabs.actions') },
     { id: 'source', label: t('mapLayerPanel.tabs.source') },
   ];
@@ -1223,6 +1226,12 @@ function LayerRow({
   // the legend's geometry swatches are not meaningful. We detect
   // them once metadata has loaded and suppress the irrelevant UI.
   // (#73)
+  // Expression fields show up wherever a field can be picked, as
+  // `expr.<name>`, since the tiles carry them as properties.
+  const editorMetadata = useMemo(
+    () => ({ ...metadata, fields: withExpressionFields(metadata.fields, layer) }),
+    [metadata, layer],
+  );
   const isTable = isTableLayer(layer, metadata);
   // #179 unit 3: point-cloud layers render through the 3D overlay,
   // not the 2D pipeline, so the geometry-bound editors (symbology,
@@ -1515,7 +1524,7 @@ function LayerRow({
                 <LayerTabPanel tab="style" active={tab}>
                   <RendererEditor
                     value={layer.renderer}
-                    metadata={metadata}
+                    metadata={editorMetadata}
                     layer={layer}
                     onChange={(renderer) => onPatch({ renderer })}
                   />
@@ -1526,7 +1535,7 @@ function LayerRow({
                       {...(metadata.geometryTypes
                         ? { geometryTypes: metadata.geometryTypes }
                         : {})}
-                      fields={metadata.fields}
+                      fields={editorMetadata.fields}
                     />
                   </div>
                   <div className="mt-3 border-t border-border pt-3">
@@ -1559,7 +1568,7 @@ function LayerRow({
                 <LayerTabPanel tab="labels" active={tab}>
                   <LabelsEditor
                     value={layer.labels}
-                    metadata={metadata}
+                    metadata={editorMetadata}
                     onChange={(labels) => onPatch({ labels })}
                   />
                   <div className="mt-3 border-t border-border pt-3">
@@ -1575,7 +1584,7 @@ function LayerRow({
                 <LayerTabPanel tab="filter" active={tab}>
                   <FilterEditor
                     value={layer.filter}
-                    metadata={metadata}
+                    metadata={editorMetadata}
                     onChange={(filter) => onPatch({ filter })}
                   />
                 </LayerTabPanel>
@@ -1612,7 +1621,7 @@ function LayerRow({
                     <PopupEditor
                       value={layer.popup}
                       source={layer.source}
-                      metadata={metadata}
+                      metadata={editorMetadata}
                       onChange={(popup) => onPatch({ popup })}
                     />
                   </div>
@@ -1626,6 +1635,14 @@ function LayerRow({
                     not popup settings and nobody would look there.
                     The layer's own data model already calls this
                     group `interactions`. */}
+                <LayerTabPanel tab="expressions" active={tab}>
+                  <ExpressionsEditor
+                    layer={layer}
+                    fieldNames={metadata.fields}
+                    onChange={(expressions) => onPatch({ expressions })}
+                  />
+                </LayerTabPanel>
+
                 <LayerTabPanel tab="interactions" active={tab}>
                   <div className="space-y-1.5 text-sm">
                     <Toggle

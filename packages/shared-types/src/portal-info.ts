@@ -54,6 +54,13 @@ export interface PortalInfo {
     baseUrl: string;
   };
 
+  /**
+   * The organization's time zone (IANA name). Expressions use it for
+   * today() so every client agrees on the date. Absent on older
+   * servers; treat as UTC.
+   */
+  timeZone?: string;
+
   auth: {
     /**
      * OIDC authentication. Today this is always 'oidc' (against the
@@ -71,6 +78,14 @@ export interface PortalInfo {
      */
     issuer: string;
   };
+
+  /**
+   * Whether this install serves one organization (`single`, every
+   * self-hosted install) or many (`multi`, the hosted service). Set by
+   * `GRATIS_TENANCY` on the server. Absent on older servers; treat as
+   * `single`.
+   */
+  tenancy?: 'single' | 'multi';
 
   /**
    * Optional capabilities this portal has switched on. Absent members

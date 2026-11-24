@@ -1,7 +1,8 @@
 ---
 id: map-editing-markup
 title: Markup and redlining
-summary: Draw colored pins, lines, polygons, text, arrows, and circles on a shared map to flag issues or call out places for the team to discuss, then download a set as GeoJSON or promote it into a real data layer when you are ready.
+seoTitle: "Markup and redlining on a shared web map"
+summary: "Draw pins, lines, polygons, text and arrows on a shared map to flag issues for the team. Download the markup as GeoJSON or turn it into a data layer."
 category: map-editing
 order: 40
 complexity: basic
@@ -28,7 +29,7 @@ layer — that still needs a signed-in account.
 
 When two signed-in people edit the same markup set at once, the
 portal merges their sketches live (see
-[Live presence](map-editing-presence)). Anonymous markup does not
+[Live presence](/help/map-editing/presence)). Anonymous markup does not
 use that path.
 
 The classic use case: a project manager opens a shared parcel map,
@@ -105,6 +106,29 @@ your own view; the set is still there for everyone else.
   created in the same browser; clearing site cookies loses that
   edit right, though the markup stays on the map.
 
+## Measurements and dimension labels
+
+The **Measure** tool in the map builder draws a line or an area and
+shows its size. A finished measurement stays selected: drag it to
+move it, drag a corner to reshape it, or drag a midpoint to add a
+corner. The numbers follow every change.
+
+- **Labels on the map.** Each side shows its length and an area shows
+  its size in the middle. Turn **Side lengths** and **Area** on or
+  off in the Measure panel. When sides are too short on screen to fit
+  their labels, some are left out until you zoom in.
+- **Set area.** With an area finished, type a size (for example 10
+  with the unit set to acres) and choose **Apply**. The shape keeps
+  its form and its middle and scales to exactly that size.
+- **Save to markup.** Signed-in users can keep a measurement. It goes
+  into your most recent visible markup set, or a new one, with the
+  labels that were on. The labels are worked out from the shape, so
+  they stay right if the shape changes later.
+
+On a markup set you can edit, the **Lengths** and **Areas** buttons
+turn these labels on or off for every line and shape in the set, not
+only saved measurements.
+
 ## Tips
 
 - Drawings persist on the map item. A new visitor sees every set
@@ -114,5 +138,5 @@ your own view; the set is still there for everyone else.
   want styling, sharing, OGC access, or derived-layer pipelines on
   the result.
 - Comments threaded against the map and against individual pins
-  pair nicely with markup. See [Comments](map-editing-comments)
+  pair nicely with markup. See [Comments](/help/map-editing/comments)
   for the conversation side.
