@@ -2315,6 +2315,17 @@ export function MapEditor({
             open={measureOpen}
             onClose={() => setMeasureOpen(false)}
             onDrawActiveChange={onClickToolActive}
+            save={
+              !scratch && currentUser
+                ? {
+                    mapId: itemId,
+                    currentUser,
+                    canEditMap: canEdit,
+                    drawings,
+                    onDrawingsChange: setDrawings,
+                  }
+                : undefined
+            }
           />
           {hasElevation ? (
             <ElevationProfileTool

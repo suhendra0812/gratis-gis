@@ -4,10 +4,12 @@ import { ApiTags } from '@nestjs/swagger';
 import type { Request } from 'express';
 
 import type { PortalInfo } from '@gratis-gis/shared-types';
+import { expressionTimeZone } from './expressions/time-zone.js';
 
 import { isAnalysisEnabled } from './analysis/analysis-tiers.js';
 import { Public } from './auth/public.decorator.js';
 import { textEnv } from './common/env.js';
+import { tenancyMode } from './common/tenancy.js';
 import { isFeedbackEnabled } from './feedback/feedback-config.js';
 import { PrismaService } from './prisma/prisma.service.js';
 import { isScriptsEnabled } from './scripts/scripts-config.js';
@@ -57,6 +59,8 @@ export class PortalInfoController {
         type: 'oidc',
         issuer: this.resolveIssuer(),
       },
+      timeZone: await expressionTimeZone(this.prisma),
+      tenancy: tenancyMode(),
       features: {
         feedback: isFeedbackEnabled(),
         scripts: isScriptsEnabled(),

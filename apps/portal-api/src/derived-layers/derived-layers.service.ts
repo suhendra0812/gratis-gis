@@ -9,6 +9,10 @@ import {
   type ToolStep,
 } from '@gratis-gis/shared-types';
 
+import { expressionTimeZone } from '../expressions/time-zone.js';
+import { storedExpressionData } from '../expressions/expression-data.js';
+import { readDataRefs } from './tools/expression-step.js';
+import type { DataResolver } from '@gratis-gis/shared-types';
 import { PrismaService } from '../prisma/prisma.service.js';
 import {
   dataLayerScope,
@@ -128,9 +132,22 @@ export class DerivedLayersService {
    * against `sourceItem`. This method only verifies the source's
    * type and shape.
    */
+  /**
+   * Sources stored on the pipeline's expression steps, ready for
+   * compiling. Null when no step reads other layers.
+   */
+  private async expressionDataFor(pipeline: ToolStep[]) {
+    const refs = pipeline.flatMap((st) =>
+      readDataRefs((st.params as { dataRefs?: unknown } | null)?.dataRefs),
+    );
+    if (refs.length === 0) return null;
+    return storedExpressionData(this.prisma, refs);
+  }
+
   async validateAndEnrich(
     rawData: unknown,
     sourceItem: Pick<Item, 'id' | 'type' | 'data' | 'bbox'>,
+    opts: { expressionData?: DataResolver } = {},
   ): Promise<DerivedLayerData> {
     if (!rawData || typeof rawData !== 'object') {
       throw new BadRequestException('derived_layer data must be an object');
@@ -287,6 +304,7 @@ export class DerivedLayersService {
       const validated = await this.resolveOtherSourceLayer(
         generator.validate((stepRaw as { params?: unknown }).params, {
           sourceSchema: schema,
+          ...(opts.expressionData ? { expressionData: opts.expressionData } : {}),
         }),
         i,
       );
@@ -501,7 +519,8 @@ export class DerivedLayersService {
     opts: {
       bbox?: [number, number, number, number];
       at?: string;
-      boundaryClipId?: string;
+      /** Clip geometry, already resolved and approved by the caller. */
+      boundaryGeometry?: object;
     } = {},
   ): Promise<{ type: 'FeatureCollection'; features: unknown[] }> {
     const data = item.data as unknown as DerivedLayerData | null;
@@ -623,7 +642,7 @@ export class DerivedLayersService {
     opts: {
       bbox?: [number, number, number, number];
       at?: string;
-      boundaryClipId?: string;
+      boundaryGeometry?: object;
     };
     visited: Set<string>;
     /** The source item's data when the caller already has it. */
@@ -767,23 +786,15 @@ export class DerivedLayersService {
           `geom IS NOT NULL AND ST_Intersects(geom, ST_MakeEnvelope($${b - 3}, $${b - 2}, $${b - 1}, $${b}, 4326))`,
         );
       }
-      if (opts.boundaryClipId) {
-        const boundary = await this.prisma.item.findFirst({
-          where: {
-            id: opts.boundaryClipId,
-            type: 'geo_boundary',
-            deletedAt: null,
-          },
-          select: { data: true },
-        });
-        const g = (boundary?.data as { geometry?: unknown } | null)?.geometry;
-        if (g && typeof g === 'object') {
-          params.push(JSON.stringify(g));
-          const p = params.length;
-          contentConditions.push(
-            `geom IS NOT NULL AND ST_Intersects(geom, ST_SetSRID(ST_GeomFromGeoJSON($${p}::text), 4326))`,
-          );
-        }
+      // The caller (ItemsService.getGeoJson) resolves the clip and
+      // applies the boundary access rule; only an approved geometry
+      // reaches this point.
+      if (opts.boundaryGeometry) {
+        params.push(JSON.stringify(opts.boundaryGeometry));
+        const p = params.length;
+        contentConditions.push(
+          `geom IS NOT NULL AND ST_Intersects(geom, ST_SetSRID(ST_GeomFromGeoJSON($${p}::text), 4326))`,
+        );
       }
 
       sourceAlias = `${prefix}_source`;
@@ -800,12 +811,16 @@ export class DerivedLayersService {
     // are depth-prefixed so adjacent levels never collide.
     let inputAlias = sourceAlias;
     let schema = inputSchema;
+    const expressionData = await this.expressionDataFor(layerData.pipeline);
+    const timeZone = await expressionTimeZone(this.prisma);
     for (let i = 0; i < layerData.pipeline.length; i++) {
       const step = layerData.pipeline[i]!;
       const generator = getGeneratorForStep(step);
       const stepParams = generator.validate(step.params);
       const fragment = generator.toSql(inputAlias, stepParams, params.length, {
         inputSchema: schema,
+        timeZone,
+        ...(expressionData ? { expressionData } : {}),
       });
       const cteName = `${prefix}_step_${i + 1}`;
       ctes.push(`${cteName} AS (${fragment.sql})`);
@@ -830,6 +845,8 @@ export class DerivedLayersService {
    * access on the source.
    */
   async previewRecipe(args: {
+    /** Resolves layers the recipe's expressions read. */
+    expressionData?: DataResolver;
     source: DerivedLayerData['source'];
     pipeline: ToolStep[];
     sourceItem: Pick<Item, 'id' | 'type' | 'data' | 'bbox'>;
@@ -926,6 +943,7 @@ export class DerivedLayersService {
       const generator = getGeneratorForStep(step);
       const validated = generator.validate(step.params, {
         sourceSchema: schema,
+        ...(args.expressionData ? { expressionData: args.expressionData } : {}),
       });
       const enriched = generator.enrich
         ? await generator.enrich(
@@ -1002,6 +1020,7 @@ export class DerivedLayersService {
     opts: {
       bbox?: [number, number, number, number];
       at?: string;
+      timeZone?: string;
     } = {},
   ): { sql: string; params: unknown[] } {
     const data = item.data as unknown as DerivedLayerData;
@@ -1059,7 +1078,7 @@ export class DerivedLayersService {
         inputAlias,
         params,
         queryParams.length,
-        { inputSchema: schema },
+        { inputSchema: schema, ...(opts.timeZone ? { timeZone: opts.timeZone } : {}) },
       );
       const cteName = `step_${i + 1}`;
       ctes.push(`${cteName} AS (${fragment.sql})`);

@@ -15,6 +15,7 @@ import * as maplibregl from 'maplibre-gl';
 import type {
   MapData,
   MapLayer,
+  MapLayerExpression,
   MapLayerVia,
 } from '@gratis-gis/shared-types';
 import {
@@ -28,6 +29,8 @@ import {
   ZOOM_MIN,
   dashArrayFor,
   effectiveLayerScale,
+  encodeTileExpressions,
+  EXPRESSION_FIELD_PREFIX,
   sanitizeAttributionHtml,
   sanitizePopupHtml,
   scaledStyleExpression,
@@ -276,6 +279,16 @@ interface Props {
    */
   hideNavigationControl?: boolean;
   /**
+   * Corner for the distance scale and area square. The field app
+   * passes the corner opposite its thumb controls (#772), so the +
+   * button never sits on the scale. Changing it moves the controls on
+   * the live map. Default bottom-left.
+   */
+  scalePosition?: 'bottom-left' | 'bottom-right';
+  /** Corner for the attribution. Moves on the live map like
+   *  scalePosition. Default bottom-right. */
+  attributionPosition?: 'bottom-left' | 'bottom-right';
+  /**
    * #154 Drawings overlay. Each `DrawingSet` carries its own
    * color, visibility flag, and an array of pin features. The
    * canvas adds a single GeoJSON source named `drawings:overlay`
@@ -420,6 +433,8 @@ export const MapCanvas = forwardRef<MapCanvasHandle, Props>(function MapCanvas(
     onEditClaimedClick,
     popupActions,
     hideNavigationControl = false,
+    scalePosition = 'bottom-left',
+    attributionPosition = 'bottom-right',
     drawings,
   }: Props,
   ref,
@@ -434,6 +449,21 @@ export const MapCanvas = forwardRef<MapCanvasHandle, Props>(function MapCanvas(
   const basemapsRef = useRef<CustomBasemap[]>(basemaps);
   basemapsRef.current = basemaps;
   const mapRef = useRef<maplibregl.Map | null>(null);
+  // The scale controls, so a scalePosition change can move them. The
+  // ref holds the position they were last added at.
+  const scaleControlsRef = useRef<{
+    scale: maplibregl.IControl;
+    area: maplibregl.IControl;
+    at: 'bottom-left' | 'bottom-right';
+  } | null>(null);
+  const scalePositionRef = useRef(scalePosition);
+  scalePositionRef.current = scalePosition;
+  const attributionRef = useRef<{
+    control: maplibregl.IControl;
+    at: 'bottom-left' | 'bottom-right';
+  } | null>(null);
+  const attributionPositionRef = useRef(attributionPosition);
+  attributionPositionRef.current = attributionPosition;
   const hoveredRef = useRef<{ sourceId: string; featureId: string | number } | null>(null);
   const popupRef = useRef<maplibregl.Popup | null>(null);
   // Hover popup (#74 follow-up). Separate from popupRef so a
@@ -866,9 +896,14 @@ export const MapCanvas = forwardRef<MapCanvasHandle, Props>(function MapCanvas(
         scaleControl.setUnit(scaleUnitForAreaUnit(unit));
       },
     });
-    m.addControl(scaleControl, 'bottom-left');
-    m.addControl(areaScale, 'bottom-left');
-    m.addControl(new maplibregl.AttributionControl({ compact: true }), 'bottom-right');
+    const scaleAt = scalePositionRef.current;
+    m.addControl(scaleControl, scaleAt);
+    m.addControl(areaScale, scaleAt);
+    scaleControlsRef.current = { scale: scaleControl, area: areaScale, at: scaleAt };
+    const attribution = new maplibregl.AttributionControl({ compact: true });
+    const attributionAt = attributionPositionRef.current;
+    m.addControl(attribution, attributionAt);
+    attributionRef.current = { control: attribution, at: attributionAt };
 
     const markCamera = (e: { originalEvent?: unknown }) => {
       if (!e.originalEvent) return;
@@ -959,11 +994,35 @@ export const MapCanvas = forwardRef<MapCanvasHandle, Props>(function MapCanvas(
       teardownPointCloudOverlay(m);
       m.remove();
       mapRef.current = null;
+      scaleControlsRef.current = null;
+      attributionRef.current = null;
     };
     // We intentionally create the map from initial props only; updates
     // are handled by the effects below.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Move the scale controls when scalePosition changes (the field
+  // app's left-handed setting). Scale first, then area, as at setup.
+  useEffect(() => {
+    const m = mapRef.current;
+    const c = scaleControlsRef.current;
+    if (!m || !c || c.at === scalePosition) return;
+    m.removeControl(c.area);
+    m.removeControl(c.scale);
+    m.addControl(c.scale, scalePosition);
+    m.addControl(c.area, scalePosition);
+    scaleControlsRef.current = { ...c, at: scalePosition };
+  }, [scalePosition]);
+
+  useEffect(() => {
+    const m = mapRef.current;
+    const a = attributionRef.current;
+    if (!m || !a || a.at === attributionPosition) return;
+    m.removeControl(a.control);
+    m.addControl(a.control, attributionPosition);
+    attributionRef.current = { ...a, at: attributionPosition };
+  }, [attributionPosition]);
 
 
   // Basemap swap. Preserves camera + overlays so it feels seamless.
@@ -1875,7 +1934,15 @@ export const MapCanvas = forwardRef<MapCanvasHandle, Props>(function MapCanvas(
                 if (popupRef.current !== popup) return; // user already closed / moved on
                 const full = fc?.features?.[0];
                 if (full?.geometry) zoomGeometry = full.geometry;
-                popup.setDOMContent(showFeature(full?.properties ?? fallbackProps));
+                // Expression fields come only from the tile; the
+                // feature read carries stored attributes.
+                const props: Record<string, unknown> = {
+                  ...(full?.properties ?? fallbackProps),
+                };
+                for (const [k, v] of Object.entries(fallbackProps as Record<string, unknown>)) {
+                  if (k.startsWith(EXPRESSION_FIELD_PREFIX)) props[k] = v;
+                }
+                popup.setDOMContent(showFeature(props));
               },
             )
             .catch(() => {
@@ -3010,6 +3077,13 @@ function dataLayerTileUrl(
    * refetches the tiles with the new set, as it must.
    */
   include: string[] = [],
+  /**
+   * The layer's expression fields. The server computes them into the
+   * tile as `expr.<name>` properties, which is what lets labels,
+   * styling and popups use values a MapLibre expression cannot work
+   * out (a related table's latest date, the nearest hydrant).
+   */
+  expressions?: MapLayerExpression[],
 ): string {
   const base = source.layerKey
     ? `/api/portal/items/${pathId(source.itemId)}/layers/${encodeURIComponent(source.layerKey)}/tile/{z}/{x}/{y}.mvt`
@@ -3038,6 +3112,8 @@ function dataLayerTileUrl(
       `${TILE_INCLUDE_PARAM}=${include.map(encodeURIComponent).join(',')}`,
     );
   }
+  const expr = encodeTileExpressions(expressions);
+  if (expr) tileParams.push(`expr=${expr}`);
   return tileParams.length > 0 ? `${base}?${tileParams.join('&')}` : base;
 }
 
@@ -3140,6 +3216,7 @@ function syncOverlays(
         mapClipBoundaryId,
         asOfTime,
         tileFieldRefs(l),
+        l.expressions,
       );
       keepDataUrl.set(`gg:${l.id}`, {
         url,
@@ -3416,6 +3493,7 @@ function syncOverlays(
             mapClipBoundaryId,
             asOfTime,
             tileFieldRefs(layer),
+            layer.expressions,
           );
         // The layer's tile zoom range (from its TileJSON): past the
         // deepest built zoom MapLibre overzooms instead of drawing the
@@ -4868,14 +4946,17 @@ function renderPopupHtml(
             .sort();
     // Structured values (a form's geopoint, photo or signature
     // answer) have no text form; popupDisplayValue skips them.
+    const exprLabels = new Map(
+      (layer.expressions ?? []).map((x) => [`${EXPRESSION_FIELD_PREFIX}${x.name}`, x.label || x.name]),
+    );
     const rows = keys
       .map((k) => {
         const v = popupDisplayValue(props[k]);
         if (v === null) return '';
         return `
           <div class="gg-popup-row">
-            <dt>${escapeHtml(k)}</dt>
-            <dd>${escapeHtml(v)}</dd>
+            <dt>${escapeHtml(exprLabels.get(k) ?? k)}</dt>
+            <dd>${escapeHtml(String(v))}</dd>
           </div>
         `;
       })

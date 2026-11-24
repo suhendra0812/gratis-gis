@@ -34,7 +34,7 @@
  * that writes progress to an ago_import_job row. POST /run still
  * runs it inside the request for API callers.
  */
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, Optional } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import type { EsriWebMap } from '@gratis-gis/engine';
 import { DEFAULT_FILE, DEFAULT_FOLDER } from '@gratis-gis/shared-types';
@@ -48,7 +48,13 @@ import { WebMapJsonImportService } from '../items/web-map-json-import.service.js
 import { AgoApiError, AgoClient } from './ago-client.js';
 import { agoTokenMayGoTo, agoTokenOrigins } from './ago-url.js';
 import { agoAccessToPortal, type DryRunItem, type DryRunReport } from './dry-run.js';
+import {
+  createFieldMapsCollection,
+  isFieldMapsMap,
+  type CreatedExtra,
+} from './field-maps-collection.js';
 import { AgoHostedFsImportService, redactToken } from './hosted-fs.js';
+import { AgoPeopleImportService, type PeopleMaps, type PeopleOptions, type PeopleReport } from './people.js';
 import { classifyAgoType, sortByImportOrder } from './type-mapping.js';
 
 /**
@@ -70,6 +76,9 @@ export interface ImportResult {
   warnings: string[];
   /** Set when status is 'failed'. */
   error?: string;
+  /** Items made alongside the main one, e.g. a Field Maps web map's
+   *  data collection and forms. */
+  alsoCreated?: CreatedExtra[];
 }
 
 /**
@@ -91,6 +100,8 @@ export interface ImportReport {
   startedAt: string;
   completedAt: string;
   durationMs: number;
+  /** Users and groups, when the run imported them. */
+  people?: PeopleReport;
 }
 
 /** One folder the importer created. The dialog uses this to show
@@ -129,6 +140,7 @@ export class AgoImportService {
     private readonly webMapImport: WebMapJsonImportService,
     private readonly hostedFs: AgoHostedFsImportService,
     private readonly storage: StorageService,
+    @Optional() private readonly people?: AgoPeopleImportService,
   ) {}
 
   /**
@@ -142,6 +154,8 @@ export class AgoImportService {
     portalUrl: string;
     token: string;
     report: DryRunReport;
+    /** Bring the organization's users and groups over first. */
+    people?: PeopleOptions;
     /** Per-item callback so the dialog / async job runner can
      *  stream progress without buffering. May be async; the
      *  importer awaits it before moving to the next item. The
@@ -161,6 +175,12 @@ export class AgoImportService {
       portalUrl: args.portalUrl,
       token: args.token,
     });
+
+    // Users and groups first, so items can be shared with the groups.
+    let people: { report: PeopleReport; maps: PeopleMaps } | null = null;
+    if (args.people?.import && this.people) {
+      people = await this.people.run({ user: args.user, client, options: args.people });
+    }
 
     // Phase 6: pre-create one portal folder per AGO folder that
     // actually contains at least one importable item. Skipping
@@ -287,7 +307,9 @@ export class AgoImportService {
         item.ownerFolder &&
         folderChildIds.has(item.ownerFolder)
       ) {
-        folderChildIds.get(item.ownerFolder)!.push(result.portalItemId);
+        folderChildIds
+          .get(item.ownerFolder)!
+          .push(result.portalItemId, ...(result.alsoCreated ?? []).map((c) => c.portalItemId));
       }
       // Progress hook fires AFTER folder bookkeeping so the runner
       // sees the final state for this item. The callback can also
@@ -307,6 +329,37 @@ export class AgoImportService {
       } catch (e) {
         stopped = { error: e };
         break;
+      }
+    }
+
+    // Share each imported item with the groups it was shared with in
+    // ArcGIS, now that both exist here.
+    if (people && people.maps.groupIdByAgo.size > 0) {
+      for (const r of results) {
+        if (r.status !== 'created' || !r.portalItemId) continue;
+        let groups: Array<{ id: string }>;
+        try {
+          groups = await client.itemGroups(r.agoId);
+        } catch {
+          continue;
+        }
+        const ids = [r.portalItemId, ...(r.alsoCreated ?? []).map((c) => c.portalItemId)];
+        for (const g of groups) {
+          const groupId = people.maps.groupIdByAgo.get(g.id);
+          if (!groupId) continue;
+          for (const itemId of ids) {
+            try {
+              await this.items.share(args.user, itemId, {
+                principalType: 'group',
+                principalId: groupId,
+                permission: 'view',
+              });
+              people.report.sharesAdded += 1;
+            } catch (e) {
+              r.warnings.push(`Sharing with a group failed: ${errorMessage(e)}`);
+            }
+          }
+        }
       }
     }
 
@@ -362,6 +415,7 @@ export class AgoImportService {
       startedAt: startedAt.toISOString(),
       completedAt: completedAt.toISOString(),
       durationMs: completedAt.getTime() - startedAt.getTime(),
+      ...(people ? { people: people.report } : {}),
     };
     if (stopped) throw new ImportStoppedError(stopped.error, report);
     return report;
@@ -635,13 +689,33 @@ export class AgoImportService {
     } catch (e) {
       return failed(row, `Fetching WebMap JSON failed: ${errorMessage(e)}`);
     }
+    const access = agoAccessToPortal(row.access);
     const result = await this.webMapImport.import({
       user,
       webMap,
       title: row.title,
-      access: agoAccessToPortal(row.access),
+      access,
       agoDataLayerLookup: agoUrlToPortalDataLayer,
     });
+    // A map set up for Field Maps also becomes a data collection,
+    // with its Field Maps forms and offline areas.
+    let fieldMaps: Awaited<ReturnType<typeof createFieldMapsCollection>> | null = null;
+    if (isFieldMapsMap(row.agoTypeKeywords ?? [], result.fieldLayers ?? [])) {
+      try {
+        fieldMaps = await createFieldMapsCollection({
+          items: this.items,
+          client,
+          user,
+          agoMapId: row.agoId,
+          title: row.title,
+          mapItemId: result.itemId,
+          access,
+          layers: result.fieldLayers,
+        });
+      } catch (e) {
+        result.warnings.push(`The Field Maps data collection was not created: ${errorMessage(e)}`);
+      }
+    }
     return {
       agoId: row.agoId,
       agoType: row.agoType,
@@ -656,7 +730,16 @@ export class AgoImportService {
             ]
           : []),
         ...result.warnings,
+        ...(fieldMaps
+          ? [
+              `Also created a data collection for Field Maps${
+                fieldMaps.created.length > 1 ? ` with ${fieldMaps.created.length - 1} form(s)` : ''
+              }.`,
+              ...fieldMaps.warnings,
+            ]
+          : []),
       ],
+      ...(fieldMaps ? { alsoCreated: fieldMaps.created } : {}),
     };
   }
 

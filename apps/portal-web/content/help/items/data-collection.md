@@ -1,6 +1,7 @@
 ---
 id: items-data-collection
 title: Data collection
+seoTitle: "Field data collection deployments with offline sync"
 summary: A field deployment that opens a map plus editable layers and forms on a phone or tablet, with offline download, sync, and QR / link share.
 category: items/field-and-forms
 order: 35
@@ -39,7 +40,17 @@ honest Field Maps / Survey123 mapping.
   deployments appear in Add / edit flows. View-only layers still
   draw.
 - **Forms**. By default each editable layer uses a form drawn from
-  its schema. Optional per-layer form bindings override that.
+  its schema. Optional per-layer form bindings override that. The
+  map tap supplies the location, so a bound form's own location
+  question is hidden in the field app. The form still shows it when
+  someone fills it in on its own page.
+- **One-handed use**. Layers, Locate and the + button (collect) sit
+  in one stack in the bottom right corner, in reach of the thumb
+  holding the phone. The map scale and credits are in the other
+  corner, and Search is at the top left. For the left hand, open the
+  **More** menu (the three dots at the top right) and turn on
+  **Collect and locate buttons on the left**. The setting is saved on
+  that device.
 - **Optional offline areas**. Prepared extents and detail levels
   for basemap / tile warm-up on the item page. Feature download for
   offline still happens on the device (see below).
@@ -96,6 +107,47 @@ the compass and **Locate**. Only the **+** button gives way.
 All of this works offline: adds, edits and deletes go to the sync
 queue (below), and a feature captured offline and deleted before it
 synced never reaches the portal.
+## GNSS receivers and location details
+
+The field app uses the phone's own location by default. For better
+accuracy, connect an external GNSS receiver:
+
+1. Pair the receiver with the phone or computer in its Bluetooth
+   settings, or plug in a USB receiver on a computer.
+2. In the field app, open the **More** menu and tap **Connect a GNSS
+   receiver**, then pick the receiver.
+3. The strip under the header shows the fix type, satellites and
+   accuracy, for example "RTK fixed · 18 sats · ±0.02 m". When the
+   receiver does not send its own error estimate (an NMEA GST
+   sentence), the accuracy is a rough figure from HDOP and reads
+   "about".
+
+Connecting a receiver needs Chrome on Android, or Chrome or Edge on a
+computer. Other browsers, including every browser on iPhone and
+iPad, cannot reach a receiver directly. There, use the receiver
+maker's app to feed the device's own location (a mock location app
+on Android, or the receiver's app on iOS), and the field app picks it
+up like any other location.
+
+**Location details on new points.** When a point is collected at the
+current location, the app fills these columns if the layer has them,
+and leaves them alone otherwise:
+
+| Detail | Column names |
+|---|---|
+| Latitude, longitude, altitude | `lat`, `lon`, `altitude`, `esrignss_latitude`, `esrignss_longitude`, `esrignss_altitude` and similar |
+| Horizontal and vertical accuracy | `h_accuracy`, `v_accuracy`, `esrignss_h_rms`, `esrignss_v_rms` |
+| Fix type | `fix_type`, `esrignss_fixtype` (a code in a number column, text in a text column) |
+| Satellites | `num_sats`, `esrignss_numsats` |
+| PDOP, HDOP, VDOP | `pdop`, `hdop`, `vdop`, `esrignss_pdop`, `esrignss_hdop`, `esrignss_vdop` |
+| Correction age and base station | `corr_age`, `station_id`, `esrignss_correctionage`, `esrignss_stationid` |
+| Receiver and source | `gnss_receiver`, `position_source_type`, `esrignss_receiver`, `esrignss_positionsourcetype` |
+| Fix time | `fix_at`, `esrignss_fixdatetime` |
+
+The `esrignss_` names are the ones ArcGIS Field Maps uses, so a layer
+moved from ArcGIS Online keeps filling the same columns. Receiver
+details stay empty when the point came from the phone's own location.
+A value the form already has is never overwritten.
 
 ## Offline: Download and Refresh
 
@@ -127,7 +179,7 @@ Queued **updates** and **deletes** dry-run with `checkOnly=true`
 before the real write. A conflict or schema refusal parks that edit
 on the device with the server reason. New creates upload without a
 dry-run. Review recent conflicts on the paired
-[Data layer](items-data-layer) item (**Layer data** panel):
+[Data layer](/help/items/data-layer) item (**Layer data** panel):
 **Re-apply** or **Dismiss**. That page's **Sync versions and
 conflicts** section is the full Re-apply / Dismiss guide.
 
@@ -146,6 +198,6 @@ conflicts** section is the full Re-apply / Dismiss guide.
 
 - **Map** — the deployed composition.
 - **Form** — custom bindings and survey-style capture.
-- [Data layer](items-data-layer) — sync versions, delta refresh,
+- [Data layer](/help/items/data-layer) — sync versions, delta refresh,
   **Layer data** conflict **Re-apply** / **Dismiss**.
 - **Item types** — catalog one-liner for this type.

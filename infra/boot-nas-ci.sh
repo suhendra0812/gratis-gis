@@ -20,6 +20,9 @@ export GRATIS_BASE_URL="http://127.0.0.1:${WEB_PORT}"
 export GRATIS_S3_URL="http://127.0.0.1:${S3_PORT}"
 # The boot must not call GitHub. The endpoint still reports this install.
 export UPDATE_CHECK=off
+# No setup questions on the status page: CI reads the first-start
+# password from the boot env instead of choosing one in a browser.
+export GRATIS_UNATTENDED=1
 
 command -v docker >/dev/null 2>&1 || { echo "docker is required" >&2; exit 1; }
 docker compose version >/dev/null 2>&1 || { echo "docker compose v2 is required" >&2; exit 1; }
@@ -44,6 +47,10 @@ cleanup() {
   exit "$status"
 }
 trap cleanup EXIT
+# Name the command that failed. Without it a red run only says "exit
+# code 255" and the logs above show a healthy stack (PR #787's run).
+set -E
+trap 'echo "boot-nas-ci: failed at line ${LINENO} (exit $?): ${BASH_COMMAND}" >&2' ERR
 
 # A previous run may have left the fixed bootstrap container name.
 docker rm -f gratis-gis-bootstrap >/dev/null 2>&1 || true

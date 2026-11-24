@@ -70,7 +70,7 @@ Matches never multiply rows: each input row comes out once. Use
 - Geometry: from the pipeline input (unchanged).
 - Attributes: the kept input fields plus `{prefix}count` or the prefixed
   copied fields. Copied fields arrive as text; turn a number back
-  into a number with a [Calculate field](analysis-calculate) step
+  into a number with a [Calculate field](/help/analysis/calculate) step
   when a later step needs it.
 - Row count: the same as the input with **All rows**, or the number
   of matched rows with **Only matched rows**.
@@ -105,6 +105,6 @@ Matches never multiply rows: each input row comes out once. Use
 ## Notes
 
 - **Matching on location instead of a key?** Use
-  [Spatial join](analysis-spatial-join).
+  [Spatial join](/help/analysis/spatial-join).
 - **Other source is data_layer only.** A derived layer cannot be
   the other side yet.

@@ -12,7 +12,7 @@ field collection, and QGIS. It is not a full ArcGIS Online replacement,
 and it is not a drop-in for Experience Builder, Survey123, Field Maps,
 or enterprise identity depth.
 
-**Status:** [v1.6.1](./CHANGELOG.md). The public surface follows
+**Status:** [v1.7.0](./CHANGELOG.md). The public surface follows
 [semantic versioning](./docs/VERSIONING.md). For what ships today, see
 [docs/walkthrough.md](./docs/walkthrough.md) and the
 [changelog](./CHANGELOG.md). Store-listed native mobile apps are not
@@ -72,6 +72,10 @@ org (the public demo runs on that).
 ```bash
 curl -fsSL https://raw.githubusercontent.com/palavido-dev/gratis-gis/main/infra/install.sh | bash
 ```
+
+It checks the server first and says in plain words what to fix, offers
+to install Docker if it is missing, and waits until the portal answers.
+Add `-s -- --check` after `bash` to only check a server.
 
 Or by hand:
 

@@ -72,6 +72,8 @@ interface ImportResult {
   portalItemType?: string;
   warnings: string[];
   error?: string;
+  /** Made alongside, e.g. a Field Maps map's data collection and forms. */
+  alsoCreated?: Array<{ portalItemId: string; portalItemType: string; title: string }>;
 }
 
 interface ImportedFolder {
@@ -91,6 +93,23 @@ interface ImportReport {
   startedAt: string;
   completedAt: string;
   durationMs: number;
+  people?: PeopleReport;
+}
+
+interface PeopleReport {
+  usersCreated: number;
+  usersMatched: number;
+  usersFailed: number;
+  groupsCreated: number;
+  groupsMatched: number;
+  memberships: number;
+  sharesAdded: number;
+  warnings: string[];
+}
+
+interface PeopleOptions {
+  import: boolean;
+  sendSetupEmail: boolean;
 }
 
 interface SessionState {
@@ -141,6 +160,7 @@ export function FromAgoView() {
   const [session, setSession] = useState<SessionState | null>(null);
   const [preview, setPreview] = useState<DryRunReport | null>(null);
   const [importReport, setImportReport] = useState<ImportReport | null>(null);
+  const [people, setPeople] = useState<PeopleOptions>({ import: false, sendSetupEmail: false });
   const [busy, setBusy] = useState<'auth' | 'preview' | 'run' | null>(null);
   const [error, setError] = useState<string | null>(null);
   const popupRef = useRef<Window | null>(null);
@@ -492,6 +512,7 @@ export function FromAgoView() {
             portalUrl: session.sharingRestBase,
             token: session.token,
             report: effective,
+            ...(people.import ? { people } : {}),
           }),
         },
       );
@@ -696,6 +717,8 @@ export function FromAgoView() {
             onPreview={runPreview}
             onRun={runImport}
             canRun={!!preview}
+            people={people}
+            onPeopleChange={setPeople}
           />
         ) : (
           <PickConnectionPanel
@@ -965,6 +988,24 @@ export function FromAgoView() {
               </>
             ) : null}
           </p>
+          {importReport.people ? (
+            <div className="mt-2 text-xs text-ink-1">
+              <p>
+                Users: {importReport.people.usersCreated} created, {importReport.people.usersMatched} already here
+                {importReport.people.usersFailed > 0 ? `, ${importReport.people.usersFailed} not created` : ''}. Groups:{' '}
+                {importReport.people.groupsCreated} created
+                {importReport.people.groupsMatched > 0 ? `, ${importReport.people.groupsMatched} reused` : ''} with{' '}
+                {importReport.people.memberships} memberships. Item shares with groups: {importReport.people.sharesAdded}.
+              </p>
+              {importReport.people.warnings.length > 0 ? (
+                <ul className="mt-1 list-disc pl-5 text-warn">
+                  {importReport.people.warnings.map((w, i) => (
+                    <li key={i}>{w}</li>
+                  ))}
+                </ul>
+              ) : null}
+            </div>
+          ) : null}
           <div className="mt-3 grid grid-cols-3 gap-2 text-sm">
             <Counter label="Created" value={importReport.created} tone="ok" />
             <Counter
@@ -1021,6 +1062,16 @@ export function FromAgoView() {
                       ) : (
                         ''
                       )}
+                      {row.alsoCreated?.map((extra) => (
+                        <a
+                          key={extra.portalItemId}
+                          className="block hover:underline"
+                          href={`/items/${extra.portalItemId}`}
+                          title={extra.title}
+                        >
+                          {extra.portalItemType === 'data_collection' ? 'data collection' : 'form'}
+                        </a>
+                      ))}
                     </td>
                     <td className="px-2 py-1.5 text-muted">
                       {row.error ?? row.warnings.join('; ')}
@@ -1142,6 +1193,8 @@ function SignedInPanel({
   onPreview,
   onRun,
   canRun,
+  people,
+  onPeopleChange,
 }: {
   session: SessionState;
   onSignOut: () => void;
@@ -1149,6 +1202,8 @@ function SignedInPanel({
   onPreview: () => void;
   onRun: () => void;
   canRun: boolean;
+  people: PeopleOptions;
+  onPeopleChange: (next: PeopleOptions) => void;
 }) {
   const minutesLeft = Math.max(
     0,
@@ -1202,6 +1257,41 @@ function SignedInPanel({
           Run import
         </button>
       </div>
+      <fieldset className="mt-4 space-y-1.5 text-sm">
+        <label className="flex items-start gap-2">
+          <input
+            type="checkbox"
+            className="mt-0.5"
+            checked={people.import}
+            disabled={busy !== null}
+            onChange={(e) => onPeopleChange({ ...people, import: e.target.checked })}
+          />
+          <span>
+            Also import users and groups
+            <span className="block text-xs text-muted">
+              Needs an ArcGIS administrator. Makes an account for each member, recreates groups with their
+              members, and shares imported items with the same groups.
+            </span>
+          </span>
+        </label>
+        {people.import ? (
+          <label className="ml-6 flex items-start gap-2">
+            <input
+              type="checkbox"
+              className="mt-0.5"
+              checked={people.sendSetupEmail}
+              disabled={busy !== null}
+              onChange={(e) => onPeopleChange({ ...people, sendSetupEmail: e.target.checked })}
+            />
+            <span>
+              Email new users a link to set their password
+              <span className="block text-xs text-muted">
+                Leave off to invite people later from Admin, Users.
+              </span>
+            </span>
+          </label>
+        ) : null}
+      </fieldset>
     </>
   );
 }

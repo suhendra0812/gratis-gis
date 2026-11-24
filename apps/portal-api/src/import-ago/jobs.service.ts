@@ -10,6 +10,7 @@ import { Prisma } from '@prisma/client';
 
 import { PrismaService } from '../prisma/prisma.service.js';
 import { LeaderElectionService } from '../cron/leader-election.service.js';
+import { runAsOrg, runAsSystem } from '../common/tenant-context.js';
 import type { AuthUser } from '../auth/auth-sync.service.js';
 import {
   AgoImportService,
@@ -17,6 +18,7 @@ import {
   type ImportReport,
 } from './import.js';
 import type { DryRunReport } from './dry-run.js';
+import type { PeopleOptions } from './people.js';
 
 /** How often the runner beats last_heartbeat_at while a job runs. A
  *  long single-item Feature Service copy produces no per-item progress
@@ -71,6 +73,8 @@ export interface StartJobInput {
   portalUrl: string;
   token: string;
   report: DryRunReport;
+  /** Bring the organization's users and groups over first. */
+  people?: PeopleOptions;
 }
 
 /**
@@ -153,14 +157,15 @@ export class AgoImportJobsService
 
   private async beatWaiting(): Promise<void> {
     if (this.waiting.length === 0) return;
-    await this.prisma.agoImportJob
-      .updateMany({
+    // The waiting list can hold jobs of several orgs.
+    await runAsSystem('job-heartbeat', () =>
+      this.prisma.agoImportJob.updateMany({
         where: { id: { in: this.waiting.map((w) => w.id) }, status: 'queued' },
         data: { lastHeartbeatAt: new Date() },
-      })
-      .catch(() => {
-        /* a missed beat just risks an early reclaim; never fatal */
-      });
+      }),
+    ).catch(() => {
+      /* a missed beat just risks an early reclaim; never fatal */
+    });
   }
 
   /** Start waiting runners while this process has a free slot. */
@@ -187,7 +192,7 @@ export class AgoImportJobsService
     // (the update is status-guarded and idempotent) but pointless.
     if (!this.leader.shouldRun()) return;
     try {
-      await this.recoverStaleRunning();
+      await runAsSystem('job-recover', () => this.recoverStaleRunning());
     } catch (err) {
       this.log.warn(
         `AGO stale-job recovery failed: ${
@@ -287,9 +292,15 @@ export class AgoImportJobsService
     // `errorMessage` and flips status to `failed`; the .catch() here
     // is defensive and just logs (any real failure should already
     // have been captured by the runner's own try/catch).
+    //
+    // The runner sets its own tenant context. pump() starts it from
+    // whichever call frees a slot, which can be another org's job
+    // finishing, and a timer started there would otherwise carry that
+    // job's context.
+    const orgId = input.user.orgId;
     this.waiting.push({
       id: row.id,
-      run: () => this.runJob(row.id, input).catch((e) => {
+      run: () => runAsOrg(orgId, () => this.runJob(row.id, input)).catch((e) => {
         this.log.error(
           `AGO import job ${row.id} threw outside its handler: ${
             e instanceof Error ? e.message : e
@@ -401,6 +412,7 @@ export class AgoImportJobsService
         portalUrl: input.portalUrl,
         token: input.token,
         report: input.report,
+        ...(input.people ? { people: input.people } : {}),
         // Per-item progress callback. The runner uses this to bump
         // done + currentItem on the row so the polling endpoint
         // can render a smooth progress bar. Cheap UPDATE; no need

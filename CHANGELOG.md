@@ -90,22 +90,21 @@ versioning policy is in [docs/VERSIONING.md](./docs/VERSIONING.md).
   in settings. Any inline container can switch with **Arrange**. On
   a phone rows stack and grids drop to two columns. The KPI Dashboard
   template now puts its indicators and its charts in Rows.
-- An hourly check that pg_partman keeps partitions ahead of the data.
-  The API logs an error when rows have landed in a default partition
-  and a warning when an active partition set is under one interval
-  from its last partition, with the command that fixes each.
-  `infra/doctor.sh` runs the same check. pg_partman's background worker
-  errors on every run on Postgres 17.12 (upstream bug), and this makes
-  sure nothing goes wrong quietly while that is open (#758).
-- AI caps and lock for public installs. Daily call limits per
-  organization and per user, plus a per-minute limit per user, apply
-  before every model call and answer 429 `ai_quota_exceeded` when
-  reached. With public-testing hardening on (`PORTAL_LOCK_ADMIN_TIER`),
-  Admin, AI settings cannot be changed or cleared and AI build is off
-  unless `PORTAL_LOCK_AI_CONFIG` or `PORTAL_AI_DISABLE_BUILD` says
-  otherwise. `PORTAL_AI_BOOTSTRAP_*` can re-apply a provider key from
-  the host environment on every API start, so a database reset does not
-  lose it. All of this is off unless configured.
+- The one-command installer checks the server first and says in plain
+  words what to fix (memory, disk, web ports, internet access, Docker),
+  stopping before it changes anything. It offers to install Docker and
+  the basic tools when they are missing, the setup explains which DNS
+  records to add and can wait for them, and the install ends by waiting
+  for the portal to answer over HTTPS, with the doctor's findings if it
+  does not. `install.sh --check` only checks.
+- `GET /api/portal-info` reports `tenancy` (`single` unless `GRATIS_TENANCY=multi`).
+
+### Security
+
+- Installs with more than one organization: a layer's boundary clip on
+  the item GeoJSON read now follows the same rule as the feature
+  routes, and a map's or editor's stored extent only draws on layers
+  from its own organization or public ones.
 
 ### Changed
 
@@ -117,37 +116,6 @@ versioning policy is in [docs/VERSIONING.md](./docs/VERSIONING.md).
   feature**. Clicking a feature opens the Edit feature panel, where
   the shape is edited alongside the attributes, instead of a
   shape-only session with its own Save shape bar.
-- AI screens stay out of the way until an AI provider is connected.
-  The sidebar Build entry and the item page's AI draft panel are hidden
-  while no provider is set, and opening the Build address directly
-  shows a short notice (with a link to Admin, AI assistant for org
-  admins). Saving or clearing the provider updates the sidebar without
-  a reload.
-- Admin pages share one column with the breadcrumb, so every page
-  starts at the same left edge. The old "Back to portal" links and
-  "Admin" labels on each page are gone; the breadcrumb replaces them.
-- `GRATIS_OPERATOR_ORG_ID=none` makes nobody the operator, with no
-  warning in the log. For installs whose admin login is shared.
-- Admin is now one sidebar entry that opens an admin home: every admin
-  page as a card in four groups (People and access, Your portal, Data,
-  System), with a search box and the setup checklist on top. Each
-  admin page shows a breadcrumb back to it. Pages that only the
-  operator organization can use (Sign-in, Feedback inbox, System
-  health, Backup) are hidden from other admins, and `/users/me` now
-  says whether an admin is an operator. Several pages have clearer
-  names: Sharing review (Permissions), Imports and analyses (Jobs),
-  Cleanup suggestions (Housekeeping), ArcGIS Online import and export
-  (Migrations), System health (Operations), Email delivery
-  (Notifications) and Support bundle (Diagnostics).
-- The Postgres image moves from `postgis/postgis:17-3.5` (Debian
-  bullseye, end of life, no OS security updates) to `17-3.6` (Debian
-  trixie). Postgres stays on 17 and the data volume opens as it is.
-  On first start the API rebuilds text indexes whose sort order may
-  have changed with the newer C library, and upgrades PostGIS to 3.6.
-  Take a backup before upgrading. See docs/UPGRADING.md (#748).
-- Map point icons regenerated from the installed lucide-react. 85
-  shapes had changed upstream (for example the rounded star), so map
-  symbols now match the same icons elsewhere in the app.
 
 ### Fixed
 
@@ -186,6 +154,202 @@ versioning policy is in [docs/VERSIONING.md](./docs/VERSIONING.md).
   layer. Every table with a link column used to appear under every
   spatial layer of the data layer, so one asset's inspections showed
   up under unrelated layers.
+
+
+## [1.7.0] - 2026-11-23
+
+Minor release: a full expression language with data access, Field
+Maps and users-and-groups import from ArcGIS Online, external GNSS
+receivers in the field app, and report templates.
+
+### Added
+
+- **Expressions that work like Arcade.** Dates (`date_add`,
+  `date_diff`, `format_date`, `today()`), lists and `IN`, `BETWEEN`,
+  `LIKE`, `CASE`, and text, math and geometry functions. Expressions
+  can read other data: `related()`, `layer()`, `filter()`, `count()`,
+  `nearest()` and `within_distance()`, under the viewer's own access.
+  A **Convert from Arcade** button translates common Arcade. Map layers
+  get an **Expressions** tab for fields that labels and popups use,
+  and the field app works them out offline. Layers an expression reads
+  show under the item's dependencies and travel with sharing.
+- Organization time zone (Admin, Branding) for `today()` and dates in
+  expressions.
+- **Field Maps import.** A web map set up for Field Maps also becomes a
+  data collection, with a form for each layer's Field Maps form
+  (groups, labels, controls, and show, required, editable and
+  calculated rules converted from Arcade where they fit) and an offline
+  area for each offline map area. Arcade labels and popups in imported
+  web maps are converted too.
+- **Users and groups import** from ArcGIS Online (optional, needs an
+  ArcGIS administrator). Accounts with mapped roles, groups with their
+  members, and imported items shared with the same groups. Existing
+  users and groups are matched, not duplicated.
+- **External GNSS receivers** in the field app: connect a Bluetooth or
+  USB receiver in Chrome (Android and desktop) from the More menu. The
+  status strip shows fix type, satellites and accuracy, and new points
+  fill fix type, satellites, DOP, correction age, base station and
+  error columns, including Field Maps' `esrignss_*` names.
+- **Report templates.** A new item that fills a Markdown template with
+  `{{field}}`, `{{= expression }}` and `{{photos}}` placeholders once
+  per feature or form submission and downloads a PDF (up to 100 at a
+  time). Uses the print service's Chromium (`CHROMIUM_WS_ENDPOINTS`).
+
+- The map builder's Measure tool shows a length on each side and the
+  area in the middle of the shape, with a switch for each. A finished
+  measurement stays selected, so it can be dragged, reshaped and
+  given new corners, and the numbers follow. **Set area** scales an
+  area to an exact size, and **Save to markup** keeps a measurement
+  with its labels. Markup sets gain **Lengths** and **Areas**
+  switches that label every line and shape in the set. Labels are
+  worked out from the geometry, so they stay right after an edit.
+- An hourly check that pg_partman keeps partitions ahead of the data.
+  The API logs an error when rows have landed in a default partition
+  and a warning when an active partition set is under one interval
+  from its last partition, with the command that fixes each.
+  `infra/doctor.sh` runs the same check. pg_partman's background worker
+  errors on every run on Postgres 17.12 (upstream bug), and this makes
+  sure nothing goes wrong quietly while that is open (#758).
+- AI caps and lock for public installs. Daily call limits per
+  organization and per user, plus a per-minute limit per user, apply
+  before every model call and answer 429 `ai_quota_exceeded` when
+  reached. With public-testing hardening on (`PORTAL_LOCK_ADMIN_TIER`),
+  Admin, AI settings cannot be changed or cleared and AI build is off
+  unless `PORTAL_LOCK_AI_CONFIG` or `PORTAL_AI_DISABLE_BUILD` says
+  otherwise. `PORTAL_AI_BOOTSTRAP_*` can re-apply a provider key from
+  the host environment on every API start, so a database reset does not
+  lose it. All of this is off unless configured.
+
+### Changed
+
+- `area()` in expressions measures on the WGS84 ellipsoid, like
+  `ST_Area(geography)`. Results differ from 1.6 by about 0.25%.
+- ArcGIS Online import: a hosted layer that allowed editing keeps
+  editing on as a data layer, and imported web map layers stay
+  editable unless the web map turned editing off. Who can edit still
+  follows sharing. Before, every imported layer had editing off.
+- The item page shows Sharing above Depends on.
+- The open-source project section on the home page (what GratisGIS is
+  and is not) is off by default, in the published images and in
+  `docker-compose.prod.yml`. On your own portal it read as the
+  project's sales copy. Set `PROJECT_LANDING=1` to turn it back on.
+
+- NAS stack: on the first start, the status page asks you to choose
+  the admin password, so you no longer copy one out of the bootstrap
+  log. The chosen password stays in memory and is set in Keycloak once
+  sign-in is running; it is never written to disk. Public installs and
+  `GRATIS_UNATTENDED=1` keep the old log password.
+
+- NAS stack: the web address shows a status page from the first
+  minute: setting up, updating the database, starting, or the error
+  when a start fails, in plain words with details to copy. When the
+  stack cannot detect the NAS address, the page asks for it with one
+  click instead of asking you to edit the compose file. Caddy no
+  longer waits for the rest of the stack, and services that wait on
+  the first start or a long database update keep waiting instead of
+  being left in "Created". Paste the new `docker-compose.nas.yml` to
+  get it; older pasted files keep working as before.
+
+- The help is published on the project website at
+  gratisgis.org/help. Help pages on a portal name that copy as their
+  canonical URL, and the public demo (`NEXT_PUBLIC_PUBLIC_TESTING=1`)
+  now asks search engines not to index any of its pages.
+
+- A public test instance (`PUBLIC_TESTING=1`) asks search engines not
+  to index its home page and leaves it out of the sitemap, so the
+  project demo stops competing with gratisgis.org for the project's
+  name. Its help pages stay indexable. Other installs are unchanged.
+- The field app has its own look, tuned for reading outdoors: the
+  phone's system font, a larger type scale (17 px body text), neutral
+  greys with pure black behind dark mode, and one saturated teal for
+  everything tappable, including the header and map control icons.
+  Sheet titles are large and bold, the GPS accuracy strip is a neutral
+  band with coloured text, and switches are full size. The /field
+  deployment list drops the portal's search bar and sidebar for a
+  large title, a portal button at the top left, and full-width rows
+  with the deployment's thumbnail. The rest of the portal is unchanged
+  (#768).
+- Layers, Locate and the + collect button in the field app sit in one
+  stack in the bottom corner, in reach of the thumb holding the phone.
+  The + button is the saturated brand teal with a white ring, so it
+  stands out on green basemaps. The map scale and attribution move to
+  the other bottom corner, and Search takes the top left. A new
+  setting in the field app's More menu mirrors all of it for
+  left-handed use, saved per device (#772).
+- The field app is easier to read outdoors and to use with one hand.
+  Text across the field screens is one size larger, the queued-edit
+  and rejected-edit chips are bigger and bolder, and the GPS accuracy
+  strip is easier to read. Submit on the collect form is now a
+  full-width button at the bottom of the sheet, within reach of the
+  thumb holding the phone, and the button that cancels a collect is a
+  full-size tap target (#768).
+- The sample "Road and trail issue report" form asks whether a
+  vehicle or hiker can get through, and its description hint asks for
+  a photo. Installs that already loaded sample data, including the
+  public demo's golden snapshot, keep their copy.
+- AI screens stay out of the way until an AI provider is connected.
+  The sidebar Build entry and the item page's AI draft panel are hidden
+  while no provider is set, and opening the Build address directly
+  shows a short notice (with a link to Admin, AI assistant for org
+  admins). Saving or clearing the provider updates the sidebar without
+  a reload.
+- Admin pages share one column with the breadcrumb, so every page
+  starts at the same left edge. The old "Back to portal" links and
+  "Admin" labels on each page are gone; the breadcrumb replaces them.
+- `GRATIS_OPERATOR_ORG_ID=none` makes nobody the operator, with no
+  warning in the log. For installs whose admin login is shared.
+- Admin is now one sidebar entry that opens an admin home: every admin
+  page as a card in four groups (People and access, Your portal, Data,
+  System), with a search box and the setup checklist on top. Each
+  admin page shows a breadcrumb back to it. Pages that only the
+  operator organization can use (Sign-in, Feedback inbox, System
+  health, Backup) are hidden from other admins, and `/users/me` now
+  says whether an admin is an operator. Several pages have clearer
+  names: Sharing review (Permissions), Imports and analyses (Jobs),
+  Cleanup suggestions (Housekeeping), ArcGIS Online import and export
+  (Migrations), System health (Operations), Email delivery
+  (Notifications) and Support bundle (Diagnostics).
+- The Postgres image moves from `postgis/postgis:17-3.5` (Debian
+  bullseye, end of life, no OS security updates) to `17-3.6` (Debian
+  trixie). Postgres stays on 17 and the data volume opens as it is.
+  On first start the API rebuilds text indexes whose sort order may
+  have changed with the newer C library, and upgrades PostGIS to 3.6.
+  Take a backup before upgrading. See docs/UPGRADING.md (#748).
+- Map point icons regenerated from the installed lucide-react. 85
+  shapes had changed upstream (for example the rounded star), so map
+  symbols now match the same icons elsewhere in the app.
+
+### Fixed
+
+- After the Postgres image moved to Debian trixie, portal-api could
+  refuse to start on every try ("portal-api is unhealthy"): rebuilding
+  the database's indexes ran into the app role's 30 s statement
+  timeout on larger databases and was cancelled (#766). The rebuild
+  now runs with no time limit, like the migrate step. Nothing was lost:
+  update and start again, and the rebuild finishes on its own.
+
+- The first-run welcome panel (make a map, upload data, load sample
+  data) never showed on a new portal: the first admin owns the
+  basemaps and templates every org starts with, so "My items" was
+  never empty. It now shows above the list while every item there is
+  one of those defaults. Item list rows now include `seedKind`.
+- A signed-in user with no public items on the home page was told to
+  sign in. It now points to My items.
+
+- Imagery and elevation layers stored as a single file (COG) draw on
+  the map again. The page security policy was blocking the workers
+  that decode them, so the layer stayed blank.
+- The "Your session expired" bar sits below the iPhone status bar in
+  the installed app, so its Sign in button can be tapped, and the
+  button is full size.
+- The field app no longer asks for a location twice. When a layer's
+  bound form has a location question, the field app hides it and takes
+  the point from the map tap, and that answer is no longer saved as an
+  attribute next to the geometry. The form still shows the question on
+  its own page. A feature whose first value is an object (a location or
+  a list) no longer shows "[object Object]" as its title in the field
+  app (#767, #769).
+
 - Admins outside the operator organization can use Cleanup
   suggestions again. Its Review tab failed whole on the one
   install-wide list it shows (storage by data layer); that card is now
@@ -253,6 +417,18 @@ versioning policy is in [docs/VERSIONING.md](./docs/VERSIONING.md).
   the item's extent.
 
 ### Documentation
+
+- Help pages for moving from ArcGIS Online: sharing and roles, Field
+  Maps to data collection, Arcade to expressions, and analysis tools
+  compared. The terminology map's roles table now matches the three
+  roles the portal has.
+- The expression language reference now matches what the Filter and
+  Calculate field steps accept (`==`, `~~`, `if()` and the rest). It
+  used to list SQL syntax the parser refuses.
+- Help links that named a page by its id (110 of them) were broken
+  in the portal. They now use the page's full path.
+- Every help page has a search title (`seoTitle`) and a summary short
+  enough for search results.
 
 - Help: task-shaped landing hub, collapsed sidebar, and nested Analysis / Items / Coming-from-ArcGIS groups (URLs unchanged).
 - Help: real UI screenshots for getting-started, form designer, map editing (markup/comments/symbology), admin surfaces, web app detail, and analysis derived-layer recipes (Buffer, Clip, and the other guided steps).

@@ -85,6 +85,16 @@ import {
 } from '../map/search-sources';
 import { FormRuntime } from '@/components/form-runtime';
 import { PwaInstallButton } from '@/components/pwa-install-button';
+import {
+  pickRowTitle,
+  withoutMapGeometryAnswer,
+  withoutMapGeometryQuestion,
+} from '@/lib/field-form';
+import {
+  readHandedness,
+  writeHandedness,
+  type Handedness,
+} from '@/lib/field-handedness';
 import { removeDeploymentFromDevice } from '@/lib/offline-remove';
 import {
   deleteFeatures,
@@ -175,6 +185,7 @@ import { FieldAttachments } from './field-attachments';
 import { uploadPendingAttachmentsInResponse } from '@/lib/form-attachment-upload';
 import { describeZoom } from '@/lib/map-scale';
 import { parseApiError } from '@/lib/api-error';
+import { applyOfflineExpressionFields, type OfflineSource } from '@/lib/offline-expressions';
 import { useT } from '@/lib/i18n/locale-context';
 import { useFormat } from '@/lib/i18n/format';
 import { RelativeTime } from '@/components/relative-time';
@@ -187,6 +198,28 @@ import type { Translator } from '@/lib/i18n';
  * this layer; otherwise the runtime falls through to schema-derived
  * forms via generateFormFromLayer (Slice 1).
  */
+/** One cached layer, as offline expression fields read it. */
+function offlineSourceFor(
+  l: EditableLayer,
+  features: Record<string, GeoJSON.FeatureCollection>,
+  all: EditableLayer[],
+): OfflineSource {
+  // A related table's key column is declared on its parent.
+  const parentFk = all
+    .flatMap((p) => (p.dataLayerId === l.dataLayerId ? (p.childLayers ?? []) : []))
+    .find((c) => c.layerKey === l.layerKey)?.parentFkColumn;
+  const src: OfflineSource = {
+    itemId: l.dataLayerId,
+    layerKey: l.layerKey,
+    label: l.layerLabel,
+    fields: l.fields,
+    hasGeometry: l.geometryType !== null,
+    features: features[`${l.dataLayerId}:${l.layerKey}`]?.features ?? [],
+  };
+  if (parentFk) src.parentFk = parentFk;
+  return src;
+}
+
 export interface EditableLayer {
   /** data_layer item id this sublayer belongs to. */
   dataLayerId: string;
@@ -711,6 +744,17 @@ export function FieldRuntime({
   // top-right zoom controls. Tapping the magnifier expands an input;
   // tapping the X collapses it again.
   const [searchExpanded, setSearchExpanded] = useState(false);
+  // Which side the thumb controls (+ and Locate) sit on (#772). Read
+  // after mount: localStorage does not exist during server render.
+  const [handedness, setHandedness] = useState<Handedness>('right');
+  useEffect(() => {
+    setHandedness(readHandedness(window.localStorage));
+  }, []);
+  const changeHandedness = useCallback((next: Handedness) => {
+    setHandedness(next);
+    writeHandedness(window.localStorage, next);
+  }, []);
+  const thumbSide = handedness === 'left' ? 'left-3' : 'right-3';
 
   // #249.16 / #253: Field-Maps-style feature popup state. Both shapes
   // live in ./field-surfaces now; declaring them in this function body
@@ -1060,6 +1104,16 @@ export function FieldRuntime({
   // offline substitution (when offline + cached + the source has an
   // inline FC available), and basemap (when the user has picked one
   // via the layer panel chip).
+  // Cached layers as sources for offline expression fields.
+  const offlineSources = useMemo(() => {
+    const out = new Map<string, OfflineSource>();
+    for (const l of editableLayers) {
+      out.set(`${l.dataLayerId}:${l.layerKey}`, offlineSourceFor(l, offlineFeatures, editableLayers));
+    }
+    return out;
+  }, [editableLayers, offlineFeatures]);
+  const deviceTimeZone = useMemo(() => Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC', []);
+
   const effectiveMapData = useMemo<MapData>(() => {
     const offlineActive = !isOnline && Object.keys(offlineFeatures).length > 0;
     const basemapOverride =
@@ -1089,9 +1143,22 @@ export function FieldRuntime({
               : undefined) ??
             offlineFeatures[`${next.source.itemId}:${next.source.layerKey ?? ''}`];
           if (fc) {
+            // Expression fields come from the server's tiles online;
+            // offline they are worked out here from the cache.
+            const own = resolved ?? undefined;
+            const withExpr =
+              own && (next.expressions?.length ?? 0) > 0
+                ? applyOfflineExpressionFields(
+                    next,
+                    fc,
+                    offlineSourceFor(own, offlineFeatures, editableLayers),
+                    offlineSources,
+                    deviceTimeZone,
+                  )
+                : fc;
             next = {
               ...next,
-              source: { kind: 'geojson-inline', geojson: fc },
+              source: { kind: 'geojson-inline', geojson: withExpr },
             };
           }
           // If no cached FC, fall through to the original source.
@@ -1109,6 +1176,8 @@ export function FieldRuntime({
     offlineFeatures,
     basemapOverrideId,
     editableLayers,
+    offlineSources,
+    deviceTimeZone,
   ]);
 
   // Effective pickLists. When offline, pick from IndexedDB instead of
@@ -2648,10 +2717,10 @@ export function FieldRuntime({
       <header className="flex shrink-0 items-center gap-2 border-b border-border bg-surface-1 px-2 py-2 pt-[max(0.5rem,env(safe-area-inset-top))]">
         <Link
           href={backHref}
-          className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-md text-ink-1 hover:bg-surface-2"
+          className="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-full text-accent hover:bg-surface-2"
           aria-label={t('fieldRuntime.backAria')}
         >
-          <ArrowLeft className="h-4 w-4" />
+          <ArrowLeft className="h-6 w-6" strokeWidth={2.25} />
         </Link>
         {/* Single-line title. Subtitle ("Field deployment of <map>")
             moved into the More menu's header; field workers care
@@ -2659,7 +2728,7 @@ export function FieldRuntime({
             and the secondary line was eating vertical space + visual
             weight. */}
         <div className="min-w-0 flex-1">
-          <h1 className="truncate text-sm font-semibold text-ink-0">
+          <h1 className="truncate text-base font-semibold text-ink-0">
             {title}
           </h1>
         </div>
@@ -2681,10 +2750,10 @@ export function FieldRuntime({
           <button
             type="button"
             onClick={() => setRejectedOpen(true)}
-            className="inline-flex shrink-0 items-center gap-1 rounded-full border border-danger/30 bg-danger/10 px-2 py-0.5 text-2xs font-medium text-danger hover:bg-danger/20"
+            className="inline-flex h-9 shrink-0 items-center gap-1.5 rounded-full border border-danger/40 bg-danger/15 px-3 text-sm font-semibold text-danger hover:bg-danger/20"
             title={t('fieldQueue.rejectedChipTitle')}
           >
-            <AlertTriangle className="h-3 w-3" />
+            <AlertTriangle className="h-4 w-4" />
             {t('fieldQueue.rejectedChip', { count: rejectedRecords.length })}
           </button>
         ) : null}
@@ -2713,8 +2782,15 @@ export function FieldRuntime({
           parkedForOthers={parkedForOthers}
           gpsStatus={gps.status}
           gpsAccuracyM={gps.position?.accuracyM ?? null}
+          receiver={gps.external}
+          onConnectReceiver={() => {
+            void gps.connectExternal();
+          }}
+          onDisconnectReceiver={gps.disconnectExternal}
           onDownload={() => void startDownload()}
           onRemoveCache={() => void removeCache()}
+          handedness={handedness}
+          onHandednessChange={changeHandedness}
         />
       </header>
 
@@ -2749,6 +2825,8 @@ export function FieldRuntime({
       <FieldGpsStrip
           gpsStatus={gps.status}
           accuracyM={gps.position?.accuracyM ?? null}
+          gnss={gps.position?.gnss ?? null}
+          receiverStatus={gps.external.status}
         />
 
       <div className="relative min-h-0 flex-1">
@@ -2774,6 +2852,11 @@ export function FieldRuntime({
           // sized to match Layers / Search / Locate / FAB. The default
           // 29px buttons looked tiny next to the 44px field controls.
           hideNavigationControl
+          // The scale, area square and attribution go in the corner
+          // opposite the thumb stack (Layers, Locate, +), so nothing
+          // sits under the + button (#772).
+          scalePosition={handedness === 'left' ? 'bottom-right' : 'bottom-left'}
+          attributionPosition={handedness === 'left' ? 'bottom-right' : 'bottom-left'}
           // #253 fix: suppress MapLibre's HTML popup. The field
           // runtime now owns the click-on-feature surface via
           // FieldFeaturePopupSheet (a bottom sheet). Without this,
@@ -2820,20 +2903,31 @@ export function FieldRuntime({
           </div>
         ) : null}
 
-        {/* Layer-toggle button (top-left). MapLibre's NavigationControl
-            (zoom +/- + compass) plants itself at top-right via
-            map-canvas.tsx, so we keep this button on the opposite
-            side to avoid overlap. Compact icon-only and the panel
-            drops below when tapped. Stays up while a form is open, so
-            the basemap can be switched to place a point. */}
+        {/* Layer-toggle button, top of the thumb stack above Locate
+            and + (#772), next to the bottom sheet it opens. Mirrors
+            with the left-handed setting. Stays up while a form is
+            open, riding above the sheet, so the basemap can be
+            switched to place a point. */}
         <button
           type="button"
           onClick={() => setLayerPanelOpen((v) => !v)}
-          className="absolute left-3 top-3 z-10 inline-flex h-11 w-11 items-center justify-center rounded-md border border-border bg-surface-1 shadow-card hover:bg-surface-2"
+          className={`absolute ${handedness === 'left' ? 'left-4' : 'right-4'} z-10 inline-flex h-12 w-12 items-center justify-center rounded-full border border-border bg-surface-1 shadow-card hover:bg-surface-2`}
+          // Top of the thumb stack, 0.75rem above Locate (h-12). Same
+          // three cases as Locate's bottom, plus 3.75rem.
+          style={{
+            bottom:
+              formModal !== null
+                ? `calc(${sheetCoveredPx}px + 4.5rem)`
+                : activeTemplate !== null
+                ? '5rem'
+                : templates.length > 0
+                  ? 'calc(9.25rem + env(safe-area-inset-bottom, 0px))'
+                  : 'calc(11.75rem + env(safe-area-inset-bottom, 0px))',
+          }}
           aria-label={t('fieldRuntime.toggleLayersAria')}
           aria-pressed={layerPanelOpen}
         >
-          <Layers className="h-5 w-5 text-ink-1" />
+          <Layers className="h-6 w-6 text-accent" />
         </button>
 
         {/* #249.15: zoom + compass cluster at top-right. Replaces
@@ -2851,10 +2945,11 @@ export function FieldRuntime({
           onCompassTap={onCompassTap}
         />
 
-        {/* Locate-me FAB. Sits top-right under MapLibre's zoom +
-            compass cluster (#249.13: moved from bottom-left so the
-            map's right rail groups all viewport controls together,
-            matching the natural left-to-right top-to-bottom scan).
+        {/* Locate-me FAB. Sits in the thumb corner, directly above
+            the + collect button, so the two actions a collector uses
+            most are both reachable with the hand holding the phone
+            (#772). It used to sit top-right under the zoom cluster
+            (#249.13). The side follows the left-handed setting.
             Three-state interaction:
               - idle             -> tap requests permission + starts watch
               - watching, no follow -> tap centers on current fix
@@ -2867,6 +2962,21 @@ export function FieldRuntime({
           hasPosition={gps.position !== null}
           follow={gps.follow}
           accuracyM={gps.position?.accuracyM ?? null}
+          sideClassName={handedness === 'left' ? 'left-4' : 'right-4'}
+          // Above the + button when it shows (bottom 1.25rem, 3.5rem
+          // tall, 0.75rem gap). Above the "nothing to collect" notice
+          // when that shows instead. In the corner when a template is
+          // armed: the footer then sits below the canvas and already
+          // clears the home indicator.
+          bottom={
+            formModal !== null
+              ? `calc(${sheetCoveredPx}px + 0.75rem)`
+              : activeTemplate !== null
+              ? '1.25rem'
+              : templates.length > 0
+                ? 'calc(5.5rem + env(safe-area-inset-bottom, 0px))'
+                : 'calc(8rem + env(safe-area-inset-bottom, 0px))'
+          }
           onTap={() => {
             const map = mapRef.current;
             // Every tap, not just the first: iOS and current Chromium
@@ -2892,14 +3002,14 @@ export function FieldRuntime({
         />
 
         {/* Address search overlay (#223.3, collapsed by default in #249.11).
-            Sits to the right of the Layers FAB at top-left. Default state
+            Sits at top-left (Layers moved to the bottom, #772). Default state
             is a magnifier icon; tapping expands an input. Right edge is
             held at right-14 when expanded so the input never extends
             under MapLibre's NavigationControl (zoom +/- + compass) at
             top-right. Stays up while a form is open, to find the spot a
             point belongs. */}
         {searchExpanded ? (
-            <div className="absolute left-15 right-14 top-3 z-10">
+            <div className="absolute left-3 right-14 top-3 z-10">
               <div className="w-full max-w-xs">
                 <FieldAddressSearch
                   mapRef={mapRef}
@@ -2916,9 +3026,9 @@ export function FieldRuntime({
               type="button"
               onClick={() => setSearchExpanded(true)}
               aria-label={t('fieldRuntime.searchAddressAria')}
-              className="absolute left-15 top-3 z-10 inline-flex h-11 w-11 items-center justify-center rounded-md border border-border bg-surface-1 shadow-card hover:bg-surface-2"
+              className="absolute left-3 top-3 z-10 inline-flex h-11 w-11 items-center justify-center rounded-md border border-border bg-surface-1 shadow-card hover:bg-surface-2"
             >
-              <Search className="h-5 w-5 text-ink-1" />
+              <Search className="h-6 w-6 text-accent" />
             </button>
           )}
 
@@ -2958,15 +3068,18 @@ export function FieldRuntime({
               setPickerOpen(true);
             }}
             aria-label={t('fieldRuntime.addFeatureAria')}
+            // #772 / #768: the field theme's saturated teal (dark ink
+            // in dark mode) with a white ring, so it stands out on the
+            // green of most basemaps.
             // #249.11: previous version applied paddingBottom for safe
             // area, which distorted the circle on iPhone (icon shoved
             // off-center). Move the inset onto `bottom` so the button
             // stays a perfect circle and just rides above the home
             // indicator instead of stretching.
-            className="absolute right-3 z-10 inline-flex h-14 w-14 items-center justify-center rounded-full bg-accent text-accent-foreground shadow-overlay hover:opacity-90 disabled:opacity-50"
+            className={`absolute ${thumbSide} z-10 inline-flex h-14 w-14 items-center justify-center rounded-full bg-accent text-accent-foreground shadow-overlay ring-3 ring-white hover:opacity-90 disabled:opacity-50`}
             style={{ bottom: 'calc(1.25rem + env(safe-area-inset-bottom, 0px))' }}
           >
-            <Plus className="h-7 w-7" />
+            <Plus className="h-8 w-8" strokeWidth={2.5} />
           </button>
         ) : null}
 
@@ -2982,10 +3095,10 @@ export function FieldRuntime({
             className="absolute inset-x-3 z-10 rounded-md border border-border bg-surface-1/95 p-2.5 shadow-overlay"
             style={{ bottom: 'calc(1.25rem + env(safe-area-inset-bottom, 0px))' }}
           >
-            <p className="text-xs font-medium text-ink-0">
+            <p className="text-sm font-medium text-ink-0">
               {t('fieldRuntime.nothingToCollectTitle')}
             </p>
-            <p className="mt-0.5 text-2xs text-muted">
+            <p className="mt-0.5 text-xs text-muted">
               {!currentUserId
                 ? t('fieldRuntime.nothingToCollectSignIn')
                 : editableLayers.length > 0
@@ -3093,7 +3206,7 @@ export function FieldRuntime({
       {(editableLayers.length === 0 || activeTemplate !== null) ? (
       <footer className="flex shrink-0 items-center gap-2 border-t border-border bg-surface-1 p-2 pb-[max(0.5rem,env(safe-area-inset-bottom))]">
         {editableLayers.length === 0 ? (
-          <p className="flex-1 text-center text-xs text-muted">
+          <p className="flex-1 text-center text-sm text-muted">
             {t('fieldRuntime.noEditableLayersInMap')}
           </p>
         ) : activeTemplate ? (
@@ -3117,7 +3230,7 @@ export function FieldRuntime({
                     <p className="truncate text-sm font-medium text-ink-0">
                       {activeTemplate.label}
                     </p>
-                    <p className="truncate text-2xs text-muted">
+                    <p className="truncate text-xs text-muted">
                       {/* #273: in vertex-collection mode the
                           subtitle reports the in-progress vertex
                           count + the threshold so the worker knows
@@ -3141,10 +3254,10 @@ export function FieldRuntime({
                   <button
                     type="button"
                     onClick={() => setActiveTemplate(null)}
-                    className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded text-muted hover:bg-surface-2 hover:text-ink-1"
+                    className="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-md text-ink-1 hover:bg-surface-2"
                     aria-label={t('fieldRuntime.cancelCollectAria')}
                   >
-                    <X className="h-3.5 w-3.5" />
+                    <X className="h-5 w-5" />
                   </button>
                 </div>
                 {/* #273: line/polygon path adds Undo + Finish to
@@ -3742,7 +3855,7 @@ function TemplatePicker({
       <div className="flex min-h-0 flex-1 flex-col">
         <div className="shrink-0 border-b border-border px-3 py-2">
           <div className="flex items-center justify-between">
-            <h2 className="text-sm font-semibold text-ink-0">
+            <h2 className="text-xl font-bold text-ink-0">
               {t('fieldRuntime.addFeature')}
             </h2>
             <button
@@ -3764,7 +3877,7 @@ function TemplatePicker({
         </div>
         <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain">
           {groups.length === 0 ? (
-            <p className="p-4 text-center text-xs text-muted">
+            <p className="p-4 text-center text-sm text-muted">
               {templates.length === 0
                 ? t('fieldRuntime.noEditableLayers')
                 : t('fieldRuntime.noTemplatesMatch')}
@@ -3772,7 +3885,7 @@ function TemplatePicker({
           ) : (
             groups.map(([groupLabel, groupTemplates]) => (
               <div key={groupLabel} className="border-b border-border last:border-b-0">
-                <h3 className="bg-surface-0 px-3 py-1.5 text-2xs font-semibold uppercase tracking-wide text-muted">
+                <h3 className="bg-surface-0 px-3 py-1.5 text-xs font-semibold uppercase tracking-wide text-muted">
                   {groupLabel}
                 </h3>
                 <ul>
@@ -3930,7 +4043,7 @@ function LayerVisibilityPanel({
     // the entry point. Default height ~60dvh; the panel scrolls
     // internally if content overflows.
     // #256: header + row text bumped to text-base for outdoor
-    // visibility (was text-xs / text-sm). Touch targets (close
+    // visibility (was text-sm / text-sm). Touch targets (close
     // button, basemap chip, layer rows) all read at >= 44 px tall.
     <div
       role="dialog"
@@ -3939,14 +4052,14 @@ function LayerVisibilityPanel({
       className="fixed inset-x-0 bottom-0 z-30 flex max-h-[60dvh] flex-col overflow-hidden rounded-t-xl border-t border-border bg-surface-1 shadow-overlay pb-[env(safe-area-inset-bottom)]"
       onClick={(e) => e.stopPropagation()}
     >
-      <div className="flex shrink-0 items-center justify-between border-b border-border px-3 py-2.5">
-        <h3 className="text-base font-semibold text-ink-0">
+      <div className="flex shrink-0 items-center justify-between border-b border-border px-4 pb-3 pt-4">
+        <h3 className="text-2xl font-bold text-ink-0">
           {panelT('fieldRuntime.layersHeading')}
         </h3>
         <button
           type="button"
           onClick={onClose}
-          className="inline-flex h-10 w-10 items-center justify-center rounded text-ink-1 hover:bg-surface-2"
+          className="inline-flex h-9 w-9 items-center justify-center rounded-full bg-surface-2 text-muted hover:text-ink-0"
           aria-label={panelT('fieldRuntime.closeAria')}
         >
           <X className="h-5 w-5" />
@@ -4028,7 +4141,7 @@ function LayerVisibilityPanel({
               return (
                 <li
                   key={l.id}
-                  className="px-2 py-1.5 text-xs font-semibold uppercase tracking-wide text-muted"
+                  className="px-2 py-1.5 text-sm font-semibold uppercase tracking-wide text-muted"
                 >
                   {l.title}
                 </li>
@@ -4090,7 +4203,7 @@ function LayerVisibilityPanel({
                   panelT('fieldRuntime.basemapDefault'),
               })}
             </span>
-            <span className="shrink-0 text-xs uppercase tracking-wide text-muted">
+            <span className="shrink-0 text-sm uppercase tracking-wide text-muted">
               {basemapPickerOpen
                 ? panelT('fieldRuntime.basemapHide')
                 : panelT('fieldRuntime.basemapChange')}
@@ -4156,18 +4269,18 @@ function LayerVisibilityPanel({
             and the answer (delete the prepared area) is nothing a
             collector should be steered toward. */}
         {offlineBasemap.areas.some((a) => a.current) ? null : (<>
-        <p className="mb-1.5 text-2xs font-semibold uppercase tracking-wide text-muted">
+        <p className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-muted">
           {panelT('fieldOffline.mapDetailToCache')}
         </p>
         <div className="grid grid-cols-2 gap-2">
           <label className="flex flex-col gap-1">
-            <span className="text-2xs uppercase tracking-wide text-muted">
+            <span className="text-xs uppercase tracking-wide text-muted">
               {panelT('fieldOffline.leastDetail')}
             </span>
             <select
               value={tileZoomMin}
               onChange={(e) => onTileZoomMinChange(Number(e.target.value))}
-              className="h-9 rounded-md border border-border bg-surface-0 px-2 text-xs text-ink-0"
+              className="h-9 rounded-md border border-border bg-surface-0 px-2 text-sm text-ink-0"
             >
               {ZOOM_PICKER_OPTIONS.filter((z) => z <= tileZoomMax).map((z) => (
                 <option key={z} value={z}>
@@ -4177,13 +4290,13 @@ function LayerVisibilityPanel({
             </select>
           </label>
           <label className="flex flex-col gap-1">
-            <span className="text-2xs uppercase tracking-wide text-muted">
+            <span className="text-xs uppercase tracking-wide text-muted">
               {panelT('fieldOffline.mostDetail')}
             </span>
             <select
               value={tileZoomMax}
               onChange={(e) => onTileZoomMaxChange(Number(e.target.value))}
-              className="h-9 rounded-md border border-border bg-surface-0 px-2 text-xs text-ink-0"
+              className="h-9 rounded-md border border-border bg-surface-0 px-2 text-sm text-ink-0"
             >
               {ZOOM_PICKER_OPTIONS.filter((z) => z >= tileZoomMin).map((z) => (
                 <option key={z} value={z}>
@@ -4201,14 +4314,14 @@ function LayerVisibilityPanel({
             warning first told the user their basemap would not work
             offline moments before a download made it work offline. */}
         {offlineBasemap.areas.some((a) => a.current) ? (
-          <p className="mt-1.5 text-2xs text-muted">
+          <p className="mt-1.5 text-xs text-muted">
             {offlineBasemap.areas.filter((a) => a.current).length === 1
               ? panelT('offlineBasemap.preparedNoticeOne')
               : panelT('offlineBasemap.preparedNoticeMany')}
           </p>
         ) : blockedTileSources.length > 0 ? (
           <div className="mt-1.5 rounded-md border border-warn/30 bg-warn/10 p-2">
-            <p className="text-2xs font-medium text-warn">
+            <p className="text-xs font-medium text-warn">
               {panelT('fieldOffline.basemapUnavailableOffline')}
             </p>
             {/* One line per distinct provider, not per template: a
@@ -4216,17 +4329,17 @@ function LayerVisibilityPanel({
                 identical sentences reads like a bug. */}
             {[...new Map(blockedTileSources.map((s) => [s.host, s])).values()].map(
               (s) => (
-                <p key={s.host} className="mt-0.5 text-2xs text-muted">
+                <p key={s.host} className="mt-0.5 text-xs text-muted">
                   {s.reason}
                 </p>
               ),
             )}
-            <p className="mt-1 text-2xs text-muted">
+            <p className="mt-1 text-xs text-muted">
               {panelT('fieldOffline.basemapUnavailableTail')}
             </p>
           </div>
         ) : (
-          <p className="mt-1.5 text-2xs text-muted">
+          <p className="mt-1.5 text-xs text-muted">
             {panelT('fieldOffline.tilesEstimate', {
               count: fmt.number(estimatedTileCount),
               cap: fmt.number(200_000),
@@ -4250,11 +4363,11 @@ function LayerVisibilityPanel({
             ? panelT('fieldOffline.refreshOfflineCache')
             : panelT('fieldOffline.downloadForOffline')}
         </button>
-        <p className="mt-1.5 text-2xs text-ink-1">
+        <p className="mt-1.5 text-xs text-ink-1">
           {panelT('fieldOffline.deviceOnlyWarning')}
         </p>
         {cachedDeployment ? (
-          <p className="mt-1 text-2xs text-muted">
+          <p className="mt-1 text-xs text-muted">
             {panelT('fieldOffline.cachedSummary', {
               when: fmt.relativeTime(cachedDeployment.cachedAt),
               size: formatBytes(cachedDeployment.estimatedSize),
@@ -4266,7 +4379,7 @@ function LayerVisibilityPanel({
             reads before deciding to drive out of signal, and it used
             to report a cache with holes in it as simply "Cached". */}
         {cachedDeployment?.partial ? (
-          <p className="mt-1 flex items-start gap-1 text-2xs text-warn">
+          <p className="mt-1 flex items-start gap-1 text-xs text-warn">
             <AlertTriangle
               className="mt-px h-3 w-3 shrink-0"
               aria-hidden="true"
@@ -4293,24 +4406,24 @@ function LayerVisibilityPanel({
       {storage && storage.available ? (
         <div className="border-b border-border px-3 py-2">
           <div className="flex items-center justify-between gap-2">
-            <span className="text-2xs font-medium uppercase tracking-wide text-muted">
+            <span className="text-xs font-medium uppercase tracking-wide text-muted">
               {panelT('fieldRuntime.storage')}
             </span>
             {persistentState === 'best-effort' ? (
               <button
                 type="button"
                 onClick={onRequestPersist}
-                className="text-2xs text-accent hover:underline"
+                className="text-xs text-accent hover:underline"
               >
                 {panelT('fieldOffline.makePersistent')}
               </button>
             ) : persistentState === 'persistent' ? (
-              <span className="text-2xs text-success">
+              <span className="text-xs text-success">
                 {panelT('fieldRuntime.storagePersistent')}
               </span>
             ) : null}
           </div>
-          <div className="mt-1 flex items-center justify-between gap-2 text-2xs text-ink-1">
+          <div className="mt-1 flex items-center justify-between gap-2 text-xs text-ink-1">
             <span>{formatBytes(storage.usage)}</span>
             <span className="text-muted">
               {panelT('fieldOffline.storageOf', {
@@ -4339,7 +4452,7 @@ function LayerVisibilityPanel({
             />
           </div>
           {storage.usagePercent >= 0.95 ? (
-            <p className="mt-1 text-2xs text-danger">
+            <p className="mt-1 text-xs text-danger">
               {panelT('fieldOffline.storageNearlyFull')}
             </p>
           ) : null}
@@ -4350,7 +4463,7 @@ function LayerVisibilityPanel({
               features + queued edits stay put because they're
               load-bearing for offline work. */}
           {tileCache && tileCache.count > 0 ? (
-            <div className="mt-2 flex items-center justify-between gap-2 border-t border-border pt-2 text-2xs text-muted">
+            <div className="mt-2 flex items-center justify-between gap-2 border-t border-border pt-2 text-xs text-muted">
               <span>
                 {panelT('fieldOffline.mapTilesBreakdown', {
                   count: fmt.number(tileCache.count),
@@ -4360,7 +4473,7 @@ function LayerVisibilityPanel({
               <button
                 type="button"
                 onClick={onClearTiles}
-                className="text-2xs text-accent hover:underline"
+                className="text-xs text-accent hover:underline"
               >
                 {panelT('fieldOffline.clearTiles')}
               </button>
@@ -4870,10 +4983,10 @@ function FormModal({
       onCoveredHeightChange={onCoveredHeightChange}
     >
       <div className="flex min-h-0 flex-1 flex-col">
-        {/* #249: Field Maps-style three-section header. Cancel (or
-            Back, inside a related record) | title | Submit / Update.
-            The submit button associates with the active form through
-            the HTML form attribute, so the click runs that form's own
+        {/* #249: Field Maps-style header: Cancel (or Back, inside a
+            related record) and the title. Submit / Update is in the
+            footer and associates with the active form through the
+            HTML form attribute, so the click runs that form's own
             onSubmit and validation. */}
         <header className="flex shrink-0 items-center justify-between gap-2 border-b border-border bg-surface-1 px-2 py-2.5">
           <button
@@ -4892,17 +5005,23 @@ function FormModal({
           </button>
           <div className="min-w-0 flex-1 text-center">
             <h2 className="truncate text-base font-semibold text-ink-0">{title}</h2>
-            <p className="truncate text-2xs text-muted">{subtitle}</p>
+            <p className="truncate text-xs text-muted">{subtitle}</p>
           </div>
-          <button
-            type="submit"
-            form={activeFormId}
-            disabled={deleting || submitting}
-            aria-busy={submitting}
-            className="inline-flex h-11 shrink-0 items-center justify-center rounded-md px-3 text-base font-semibold text-accent hover:bg-surface-2 active:bg-surface-3 disabled:opacity-50"
+          {/* Submit is in the footer, within reach of a thumb (#773).
+              This mirrors Cancel so the title stays centred. */}
+          <span
+            aria-hidden="true"
+            className="invisible inline-flex h-11 shrink-0 items-center gap-1 px-3 text-base font-medium"
           >
-            {submitLabel}
-          </button>
+            {view.kind === 'related' ? (
+              <>
+                <ArrowLeft className="h-4 w-4" />
+                {t('fieldRuntime.backAria')}
+              </>
+            ) : (
+              t('fieldCollect.cancel')
+            )}
+          </span>
         </header>
 
         {/* The feature's form stays mounted under a related record so
@@ -4968,28 +5087,40 @@ function FormModal({
           />
         ) : null}
 
-        {active.mode === 'edit' ? (
-          <footer className="flex shrink-0 items-center justify-between gap-2 border-t border-border bg-surface-1 px-3 py-2">
-            <button
-              type="button"
-              onClick={() => void deleteActive()}
-              disabled={deleting}
-              className="inline-flex h-10 items-center gap-1.5 rounded-md px-3 text-sm font-medium text-danger hover:bg-danger/10 disabled:opacity-50"
-            >
-              {deleting ? (
-                <Loader2 className="h-4 w-4 animate-spin" />
-              ) : (
-                <Trash2 className="h-4 w-4" />
-              )}
-              {t('featureEdit.popupDelete')}
-            </button>
-            {deleteError ? (
-              <p role="alert" className="min-w-0 flex-1 truncate text-right text-xs text-danger">
-                {deleteError}
-              </p>
+        <footer className="shrink-0 space-y-1.5 border-t border-border bg-surface-1 px-3 pt-2 pb-[max(0.5rem,env(safe-area-inset-bottom))]">
+          {active.mode === 'edit' && deleteError ? (
+            <p role="alert" className="truncate text-xs text-danger">
+              {deleteError}
+            </p>
+          ) : null}
+          <div className="flex items-center gap-2">
+            {active.mode === 'edit' ? (
+              <button
+                type="button"
+                onClick={() => void deleteActive()}
+                disabled={deleting || submitting}
+                className="inline-flex h-12 shrink-0 items-center gap-1.5 rounded-md px-3 text-base font-medium text-danger hover:bg-danger/10 disabled:opacity-50"
+              >
+                {deleting ? (
+                  <Loader2 className="h-5 w-5 animate-spin" />
+                ) : (
+                  <Trash2 className="h-5 w-5" />
+                )}
+                {t('featureEdit.popupDelete')}
+              </button>
             ) : null}
-          </footer>
-        ) : null}
+            <button
+              type="submit"
+              form={activeFormId}
+              disabled={deleting || submitting}
+              aria-busy={submitting}
+              className="inline-flex h-12 flex-1 items-center justify-center gap-2 rounded-md bg-accent px-4 text-base font-semibold text-accent-foreground shadow-card hover:opacity-90 active:opacity-80 disabled:opacity-50"
+            >
+              {submitting ? <Loader2 className="h-5 w-5 animate-spin" aria-hidden="true" /> : null}
+              {submitLabel}
+            </button>
+          </div>
+        </footer>
       </div>
     </FieldSheet>
   );
@@ -5091,7 +5222,9 @@ function FeatureForm({
         },
       );
     }
-    return resolvePickListChoices(base, pickLists);
+    // The map supplies the geometry here, so the form's own location
+    // question would ask for it a second time (#769).
+    return resolvePickListChoices(withoutMapGeometryQuestion(base), pickLists);
   }, [modal.layer, boundForms, pickLists]);
 
   // Hydrate the initial response. Edit mode pre-fills from the tapped
@@ -5162,10 +5295,12 @@ function FeatureForm({
     // #268 / #269: this fix keeps the parentFK on the saved row so
     // the related-records list filter sees the correct value AND
     // re-opening the row doesn't show empty fields.
+    // The geometry is saved from the map, not as an attribute (#769).
+    const answers = withoutMapGeometryAnswer(form, response);
     const responseWithPresets: FormResponse =
       modal.mode === 'add'
-        ? { ...modal.presetAttributes, ...response }
-        : response;
+        ? { ...modal.presetAttributes, ...answers }
+        : answers;
     // Only when the point was put at the fix; see placedAtGpsFix.
     const gpsStamped: FormResponse =
       modal.mode === 'add' && placedAtGpsFix(activeGeometry, gpsPosition)
@@ -5425,7 +5560,7 @@ function FeatureForm({
         <div className="shrink-0 space-y-1.5 border-b border-border bg-surface-0 px-3 py-2">
           <div className="flex items-center gap-3">
             <div className="min-w-0 flex-1">
-              <p className="text-2xs font-medium uppercase tracking-wide text-muted">
+              <p className="text-xs font-medium uppercase tracking-wide text-muted">
                 {t('fieldRuntime.location')}
               </p>
               <p className="truncate font-mono text-sm tabular-nums text-ink-0">
@@ -5672,7 +5807,7 @@ function RelatedRecordsSection({
                             }
                           >
                             <span className="min-w-0 flex-1 truncate text-base text-ink-0">
-                              {pickRelatedRowTitle(row.properties) ?? row.id.slice(0, 8)}
+                              {pickRowTitle(row.properties) ?? row.id.slice(0, 8)}
                               {pending ? (
                                 <span className="ml-2 inline-flex items-center rounded bg-warn/25 px-1.5 py-0.5 text-xs font-medium text-warn">
                                   {t('fieldRuntime.relatedUnsynced')}
@@ -5713,12 +5848,18 @@ function FieldLocateButton({
   hasPosition,
   follow,
   accuracyM,
+  sideClassName,
+  bottom,
   onTap,
 }: {
   gpsStatus: import('./use-geolocation').GpsStatus;
   hasPosition: boolean;
   follow: boolean;
   accuracyM: number | null;
+  /** `right-4` or `left-4`, from the left-handed setting. */
+  sideClassName: string;
+  /** CSS `bottom`, so the button stacks above the + button. */
+  bottom: string;
   onTap: () => void;
 }) {
   const t = useT();
@@ -5729,7 +5870,7 @@ function FieldLocateButton({
         ? 'bg-accent border-accent text-accent-foreground'
         : hasPosition
           ? 'bg-surface-1 border-border text-accent'
-          : 'bg-surface-1 border-border text-ink-1';
+          : 'bg-surface-1 border-border text-accent';
   const label =
     gpsStatus === 'idle'
       ? t('fieldGps.showMyLocation')
@@ -5763,21 +5904,12 @@ function FieldLocateButton({
         gpsStatus === 'denied' ||
         gpsStatus === 'unavailable'
       }
-      // #249.13: locate button moved from bottom-left to top-right,
-      // anchored just below the zoom + compass cluster. Per Matt:
-      // most users scan a map left-to-right across the top then down
-      // the right rail, so grouping the GPS affordance with the zoom
-      // controls matches that flow.
-      // #249.14: sized to h-11 w-11 to match the Layers + Search
-      // buttons at top-left -- consistent thumb target across all
-      // map controls. The locate button keeps the rounded-full
-      // shape (not square like the other two) because its filled
-      // accent state needs to read as "live tracking" -- a circle
-      // is the conventional shape for that.
-      // #249.15: top-44 = 11rem clears the three-button zoom cluster
-      // (top-3 + 3 * h-11 + a few pixels of internal border) with
-      // the same 8-12px breathing room the rest of the layout uses.
-      className={`absolute right-3 top-44 z-10 inline-flex h-11 w-11 items-center justify-center rounded-full border shadow-card transition-colors disabled:opacity-50 ${tone}`}
+      // #772: bottom corner, above the + button, side from the
+      // left-handed setting. Kept a circle because the filled accent
+      // state reads as "live tracking". h-12 at right-4 / left-4
+      // centers it over the h-14 + button at right-3 / left-3.
+      style={{ bottom }}
+      className={`absolute ${sideClassName} z-10 inline-flex h-12 w-12 items-center justify-center rounded-full border shadow-card transition-colors disabled:opacity-50 ${tone}`}
     >
       {gpsStatus === 'requesting' ? (
         <Loader2 className="h-5 w-5 animate-spin" />
@@ -5943,10 +6075,10 @@ function FieldFeaturePopupSheet({
             ) : (
               <>
                 <h2 className="truncate text-base font-semibold text-ink-0">
-                  {pickRelatedRowTitle(concrete.hit.properties) ??
+                  {pickRowTitle(concrete.hit.properties) ??
                     concrete.hit.layerLabel}
                 </h2>
-                <p className="truncate text-2xs text-muted">
+                <p className="truncate text-xs text-muted">
                   {concrete.hit.layerLabel}
                 </p>
               </>
@@ -6058,11 +6190,11 @@ function FieldFeaturePopupSheet({
                     className="flex w-full items-start gap-3 px-3 py-3 text-left hover:bg-surface-2"
                   >
                     <div className="min-w-0 flex-1">
-                      <p className="truncate text-2xs font-semibold uppercase tracking-wide text-muted">
+                      <p className="truncate text-xs font-semibold uppercase tracking-wide text-muted">
                         {hit.layerLabel}
                       </p>
                       <p className="truncate text-base font-medium text-ink-0">
-                        {pickRelatedRowTitle(hit.properties) ??
+                        {pickRowTitle(hit.properties) ??
                           hit.globalId?.slice(0, 8) ??
                           t('fieldRuntime.sheetUnnamed')}
                       </p>
@@ -6080,7 +6212,7 @@ function FieldFeaturePopupSheet({
               <dl className="divide-y divide-border">
                 {Object.entries(concrete.hit.properties).map(([k, v]) => (
                   <div key={k} className="px-3 py-2">
-                    <dt className="text-2xs uppercase tracking-wide text-muted">
+                    <dt className="text-xs uppercase tracking-wide text-muted">
                       {k}
                     </dt>
                     <dd className="mt-0.5 wrap-break-word text-sm text-ink-0">
@@ -6154,11 +6286,11 @@ function FieldFeaturePopupSheet({
                         className="border-t border-border first:border-t-0 px-3 py-3"
                       >
                         <div className="mb-2 flex items-baseline justify-between gap-2">
-                          <h3 className="text-2xs font-semibold uppercase tracking-wide text-muted">
+                          <h3 className="text-xs font-semibold uppercase tracking-wide text-muted">
                             {c.layerLabel}
                           </h3>
                           {rowsState && !rowsState.loading ? (
-                            <span className="text-2xs text-muted">
+                            <span className="text-xs text-muted">
                               {t('fieldRuntime.relatedRowCount', {
                                 count: rowsState.rows.length,
                               })}
@@ -6201,10 +6333,10 @@ function FieldFeaturePopupSheet({
                                 >
                                   <div className="min-w-0 flex-1">
                                     <p className="truncate text-base text-ink-0">
-                                      {pickRelatedRowTitle(row.properties) ??
+                                      {pickRowTitle(row.properties) ??
                                         row.id.slice(0, 8)}
                                       {pending ? (
-                                        <span className="ml-2 inline-flex items-center rounded bg-warn/25 px-1.5 py-0.5 text-xs font-medium text-warn">
+                                        <span className="ml-2 inline-flex items-center rounded bg-warn/25 px-1.5 py-0.5 text-sm font-medium text-warn">
                                           {t('fieldRuntime.relatedUnsynced')}
                                         </span>
                                       ) : null}
@@ -6268,11 +6400,27 @@ function FieldFeaturePopupSheet({
 function FieldGpsStrip({
   gpsStatus,
   accuracyM,
+  gnss,
+  receiverStatus,
 }: {
   gpsStatus: import('./use-geolocation').GpsStatus;
   accuracyM: number | null;
+  /** Receiver details when the fix came from an external receiver. */
+  gnss: import('./use-geolocation').GnssDetails | null;
+  receiverStatus: import('./use-geolocation').ExternalGnssStatus;
 }) {
   const t = useT();
+  if (receiverStatus === 'waiting' && !gnss) {
+    return (
+      <div
+        aria-live="polite"
+        className="flex shrink-0 items-center justify-center gap-1.5 border-b border-border bg-surface-1 px-3 py-2 text-sm font-semibold text-warn"
+      >
+        <LocateFixed className="h-4 w-4" aria-hidden="true" />
+        {t('fieldGps.receiverWaiting')}
+      </div>
+    );
+  }
   // A refused or missing fix has to be VISIBLE. It used to live only
   // in the locate button's `title` and `aria-label`, neither of which
   // a thumb can reach: the button greyed out, tapping it did nothing,
@@ -6283,9 +6431,9 @@ function FieldGpsStrip({
     return (
       <div
         aria-live="polite"
-        className="flex shrink-0 items-center justify-center gap-1.5 border-b border-warn/30 bg-warn/10 px-3 py-1 text-xs font-medium text-warn"
+        className="flex shrink-0 items-center justify-center gap-1.5 border-b border-warn/30 bg-warn/10 px-3 py-1.5 text-sm font-semibold text-warn"
       >
-        <CircleSlash className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+        <CircleSlash className="h-4 w-4 shrink-0" aria-hidden="true" />
         <span className="min-w-0 truncate">
           {gpsStatus === 'denied'
             ? t('fieldGps.denied')
@@ -6298,21 +6446,34 @@ function FieldGpsStrip({
   const band = gpsAccuracyBand(accuracyM);
   const tone =
     band === 'excellent' || band === 'good'
-      ? 'bg-success/10 text-success border-success/30'
+      ? 'text-success'
       : band === 'fair'
-        ? 'bg-warn/10 text-warn border-warn/30'
-        : 'bg-danger/10 text-danger border-danger/30';
+        ? 'text-warn'
+        : 'text-danger';
   return (
     <div
       aria-live="polite"
-      className={`flex shrink-0 items-center justify-center gap-1.5 border-b px-3 py-1 text-xs font-medium ${tone}`}
+      className={`flex shrink-0 items-center justify-center gap-1.5 border-b border-border bg-surface-1 px-3 py-2 text-sm font-semibold ${tone}`}
     >
-      <LocateFixed className="h-3.5 w-3.5" aria-hidden="true" />
-      {t('fieldGps.accuracy', {
-        meters: accuracyM < 1 ? '<1' : String(Math.round(accuracyM)),
-      })}
+      <LocateFixed className="h-4 w-4" aria-hidden="true" />
+      {gnss
+        ? t(gnss.accuracyFromReceiver ? 'fieldGps.receiverAccuracy' : 'fieldGps.receiverAccuracyEstimated', {
+            fixType: gnss.fixTypeLabel,
+            sats: gnss.satellites === null ? '?' : String(gnss.satellites),
+            meters: formatReceiverMeters(accuracyM),
+          })
+        : t('fieldGps.accuracy', {
+            meters: accuracyM < 1 ? '<1' : String(Math.round(accuracyM)),
+          })}
     </div>
   );
+}
+
+/** Receiver accuracy: centimeters matter, so keep two decimals under 1 m. */
+function formatReceiverMeters(m: number): string {
+  if (m < 1) return m.toFixed(2);
+  if (m < 10) return m.toFixed(1);
+  return String(Math.round(m));
 }
 
 /**
@@ -6374,7 +6535,7 @@ function FieldNavCluster({
         aria-label={t('fieldRuntime.zoomInAria')}
         className="inline-flex h-11 w-11 items-center justify-center hover:bg-surface-2"
       >
-        <Plus className="h-5 w-5 text-ink-1" />
+        <Plus className="h-6 w-6 text-accent" />
       </button>
       <button
         type="button"
@@ -6382,7 +6543,7 @@ function FieldNavCluster({
         aria-label={t('fieldRuntime.zoomOutAria')}
         className="inline-flex h-11 w-11 items-center justify-center border-t border-border hover:bg-surface-2"
       >
-        <Minus className="h-5 w-5 text-ink-1" />
+        <Minus className="h-6 w-6 text-accent" />
       </button>
       <button
         type="button"
@@ -6402,7 +6563,7 @@ function FieldNavCluster({
             compassMode
               ? 'text-accent-foreground'
               : offNorth
-                ? 'text-ink-0'
+                ? 'text-accent'
                 : 'text-muted'
           }`}
           // The arrow rotates with the map bearing so the user sees
@@ -6440,9 +6601,14 @@ function FieldMoreMenu({
   parkedForOthers,
   gpsStatus,
   gpsAccuracyM,
+  receiver,
+  onConnectReceiver,
+  onDisconnectReceiver,
   onDownload,
   onRemoveCache,
   onSaveCopy,
+  handedness,
+  onHandednessChange,
 }: {
   mapTitle: string;
   isOnline: boolean;
@@ -6459,9 +6625,14 @@ function FieldMoreMenu({
   parkedForOthers: number;
   gpsStatus: import('./use-geolocation').GpsStatus;
   gpsAccuracyM: number | null;
+  receiver: import('./use-geolocation').ExternalGnssState;
+  onConnectReceiver: () => void;
+  onDisconnectReceiver: () => void;
   onDownload: () => void;
   onRemoveCache: () => void;
   onSaveCopy: () => void;
+  handedness: Handedness;
+  onHandednessChange: (next: Handedness) => void;
 }) {
   const t = useT();
   const [open, setOpen] = useState(false);
@@ -6523,9 +6694,9 @@ function FieldMoreMenu({
         onClick={() => setOpen((v) => !v)}
         aria-label={t('fieldRuntime.moreOptionsAria')}
         aria-expanded={open}
-        className="inline-flex h-9 w-9 items-center justify-center rounded-md text-ink-1 hover:bg-surface-2"
+        className="inline-flex h-11 w-11 items-center justify-center rounded-full text-accent hover:bg-surface-2"
       >
-        <MoreVertical className="h-4 w-4" />
+        <MoreVertical className="h-6 w-6" strokeWidth={2.25} />
       </button>
       {open ? (
         <div
@@ -6533,13 +6704,13 @@ function FieldMoreMenu({
           className="absolute right-0 top-full z-30 mt-1 w-64 overflow-hidden rounded-md border border-border bg-surface-1 shadow-overlay"
         >
           <div className="border-b border-border px-3 py-2">
-            <p className="text-2xs font-medium uppercase tracking-wide text-muted">
+            <p className="text-xs font-medium uppercase tracking-wide text-muted">
               {t('fieldRuntime.mapHeading')}
             </p>
             <p className="mt-0.5 truncate text-sm text-ink-0">{mapTitle}</p>
           </div>
           <ul className="px-1 py-1 text-sm">
-            <li className="flex items-center justify-between gap-2 px-2 py-1.5 text-xs">
+            <li className="flex items-center justify-between gap-2 px-2 py-1.5 text-sm">
               <span className="text-muted">
                 {t('fieldRuntime.connection')}
               </span>
@@ -6548,7 +6719,7 @@ function FieldMoreMenu({
               </span>
             </li>
             {cachedAt ? (
-              <li className="flex items-center justify-between gap-2 px-2 py-1.5 text-xs">
+              <li className="flex items-center justify-between gap-2 px-2 py-1.5 text-sm">
                 <span className="text-muted">
                   {t('fieldRuntime.lastCached')}
                 </span>
@@ -6558,7 +6729,7 @@ function FieldMoreMenu({
               </li>
             ) : null}
             {persistentState !== 'unknown' ? (
-              <li className="flex items-center justify-between gap-2 px-2 py-1.5 text-xs">
+              <li className="flex items-center justify-between gap-2 px-2 py-1.5 text-sm">
                 <span className="text-muted">{t('fieldRuntime.storage')}</span>
                 <span
                   className={
@@ -6580,7 +6751,7 @@ function FieldMoreMenu({
                 active; idle = the user hasn't asked for location yet
                 and we shouldn't pretend to know anything. */}
             {gpsStatus !== 'idle' ? (
-              <li className="flex items-center justify-between gap-2 px-2 py-1.5 text-xs">
+              <li className="flex items-center justify-between gap-2 px-2 py-1.5 text-sm">
                 <span className="text-muted">{t('fieldGps.label')}</span>
                 <span
                   className={
@@ -6628,7 +6799,7 @@ function FieldMoreMenu({
                 them the option to sync first. With an empty queue,
                 refresh runs straight through. */}
             {confirmingRefresh && hasCache && queueCount > 0 ? (
-              <p className="px-2 pt-1 text-2xs text-warn">
+              <p className="px-2 pt-1 text-xs text-warn">
                 {t('fieldOffline.refreshUnsyncedWarn', { count: queueCount })}
               </p>
             ) : null}
@@ -6674,9 +6845,86 @@ function FieldMoreMenu({
                     : t('fieldOffline.downloadForOffline')}
               </span>
             </button>
-            <p className="px-2 pt-1 text-2xs text-ink-1">
+            <p className="px-2 pt-1 text-xs text-ink-1">
               {t('fieldOffline.deviceOnlyWarning')}
             </p>
+            {/* External GNSS receiver over Web Serial. */}
+            <div className="px-2 pt-2 text-xs font-semibold uppercase tracking-wide text-muted">
+              {t('fieldGps.receiverTitle')}
+            </div>
+            {!receiver.supported ? (
+              <p className="px-2 py-1 text-xs text-ink-1">{t('fieldGps.receiverUnsupported')}</p>
+            ) : receiver.status === 'off' || receiver.status === 'error' || receiver.status === 'connecting' ? (
+              <button
+                type="button"
+                disabled={receiver.status === 'connecting'}
+                onClick={onConnectReceiver}
+                className="flex w-full items-start gap-2 rounded px-2 py-2 text-left text-sm text-ink-0 hover:bg-surface-2 disabled:opacity-50"
+              >
+                <LocateFixed className="mt-0.5 h-4 w-4 shrink-0 text-muted" aria-hidden="true" />
+                <span className="min-w-0 flex-1">
+                  <span className="block">
+                    {receiver.status === 'connecting'
+                      ? t('fieldGps.receiverConnecting')
+                      : t('fieldGps.receiverConnect')}
+                  </span>
+                  <span className="block text-xs text-ink-1">{t('fieldGps.receiverConnectHint')}</span>
+                  {receiver.status === 'error' && receiver.errorMessage ? (
+                    <span className="block text-xs text-danger">
+                      {t('fieldGps.receiverError', { message: receiver.errorMessage })}
+                    </span>
+                  ) : null}
+                </span>
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={onDisconnectReceiver}
+                className="flex w-full items-start gap-2 rounded px-2 py-2 text-left text-sm text-ink-0 hover:bg-surface-2"
+              >
+                <LocateFixed className="mt-0.5 h-4 w-4 shrink-0 text-success" aria-hidden="true" />
+                <span className="min-w-0 flex-1">
+                  <span className="block">{t('fieldGps.receiverDisconnect')}</span>
+                  <span className="block text-xs text-ink-1">
+                    {receiver.status === 'waiting'
+                      ? t('fieldGps.receiverWaiting')
+                      : t('fieldGps.receiverInUse', { receiver: receiver.receiver ?? '' })}
+                  </span>
+                </span>
+              </button>
+            )}
+            {/* #772: thumb controls on the left. Leaves the menu open
+                so the collector sees the buttons move behind it. */}
+            <button
+              type="button"
+              role="switch"
+              aria-checked={handedness === 'left'}
+              onClick={() =>
+                onHandednessChange(handedness === 'left' ? 'right' : 'left')
+              }
+              className="flex w-full items-start gap-3 rounded px-2 py-2 text-left text-sm text-ink-0 hover:bg-surface-2"
+            >
+              <span className="min-w-0 flex-1">
+                <span className="block">{t('fieldRuntime.leftHandedControls')}</span>
+                <span className="block text-xs text-ink-1">
+                  {t('fieldRuntime.leftHandedControlsHint')}
+                </span>
+              </span>
+              <span
+                aria-hidden="true"
+                className={`relative mt-0.5 inline-flex h-[31px] w-[51px] shrink-0 rounded-full border transition-colors ${
+                  handedness === 'left'
+                    ? 'border-accent bg-accent'
+                    : 'border-border bg-surface-2'
+                }`}
+              >
+                <span
+                  className={`absolute top-[1px] h-[27px] w-[27px] rounded-full bg-white shadow-card transition-transform ${
+                    handedness === 'left' ? 'translate-x-[21px]' : 'translate-x-[1px]'
+                  }`}
+                />
+              </span>
+            </button>
             <button
               type="button"
               onClick={() => {
@@ -6699,7 +6947,7 @@ function FieldMoreMenu({
             {hasCache ? (
               <>
                 {confirmingRemove && queueCount + parkedForOthers > 0 ? (
-                  <p className="px-2 pt-1 text-2xs text-danger">
+                  <p className="px-2 pt-1 text-xs text-danger">
                     {t('fieldOffline.removeWillLose', {
                       count: queueCount + parkedForOthers,
                     })}
@@ -6780,10 +7028,10 @@ function QueueBadge({
   if (!isOnline) {
     return (
       <span
-        className="inline-flex shrink-0 items-center gap-1 rounded-full border border-border bg-surface-2 px-2 py-0.5 text-2xs font-medium text-muted"
+        className="inline-flex h-9 shrink-0 items-center gap-1.5 rounded-full border border-border bg-surface-2 px-3 text-sm font-semibold text-ink-1"
         title={t('fieldOffline.waitingOfflineTitle', { count })}
       >
-        <CloudOff className="h-3 w-3" />
+        <CloudOff className="h-4 w-4" />
         {t('fieldOffline.queuedCount', { count })}
       </span>
     );
@@ -6793,13 +7041,13 @@ function QueueBadge({
       type="button"
       disabled={syncing}
       onClick={onSync}
-      className="inline-flex shrink-0 items-center gap-1 rounded-full border border-warn/30 bg-warn/10 px-2 py-0.5 text-2xs font-medium text-warn hover:bg-warn/20 disabled:opacity-60"
+      className="inline-flex h-9 shrink-0 items-center gap-1.5 rounded-full border border-warn/40 bg-warn/15 px-3 text-sm font-semibold text-warn hover:bg-warn/20 disabled:opacity-60"
       title={t('fieldOffline.waitingOnlineTitle', { count })}
     >
       {syncing ? (
-        <Loader2 className="h-3 w-3 animate-spin" />
+        <Loader2 className="h-4 w-4 animate-spin" />
       ) : (
-        <CloudDownload className="h-3 w-3 rotate-180" />
+        <CloudDownload className="h-4 w-4 rotate-180" />
       )}
       {syncing
         ? t('fieldOffline.syncing')
@@ -6852,14 +7100,14 @@ function DownloadProgressModal({
                 : t('fieldOffline.downloadingForOfflineTitle')}
           </DialogTitle>
         </div>
-        <DialogDescription className="mt-2 text-xs text-muted">
+        <DialogDescription className="mt-2 text-sm text-muted">
           {formatOfflineMessage(t, progress.message)}
         </DialogDescription>
         {/* Layers leads the breakdown so the user sees a non-zero
             number even on a fresh deployment with no features yet.
             Features, Forms, and Pick lists below are secondary
             detail. */}
-        <dl className="mt-3 grid grid-cols-4 gap-2 text-2xs">
+        <dl className="mt-3 grid grid-cols-4 gap-2 text-xs">
           <div className="rounded border border-border bg-surface-0 p-2 text-center">
             <dt className="text-muted">
               {t('fieldRuntime.downloadLayers')}
@@ -6894,14 +7142,14 @@ function DownloadProgressModal({
           </div>
         </dl>
         {progress.estimatedSize > 0 ? (
-          <p className="mt-2 text-2xs text-muted">
+          <p className="mt-2 text-xs text-muted">
             {t('fieldOffline.cachedSizeApprox', {
               size: formatBytes(progress.estimatedSize),
             })}
           </p>
         ) : null}
         {progress.error ? (
-          <p className="mt-2 rounded-md border border-danger/30 bg-danger/10 px-3 py-2 text-xs text-danger">
+          <p className="mt-2 rounded-md border border-danger/30 bg-danger/10 px-3 py-2 text-sm text-danger">
             {progress.error}
           </p>
         ) : null}
@@ -6914,7 +7162,7 @@ function DownloadProgressModal({
           <button
             type="button"
             onClick={finished ? onClose : onCancel}
-            className="h-9 rounded-md border border-border bg-surface-1 px-3 text-xs font-medium text-ink-1 hover:bg-surface-2"
+            className="h-9 rounded-md border border-border bg-surface-1 px-3 text-sm font-medium text-ink-1 hover:bg-surface-2"
           >
             {finished
               ? t('fieldRuntime.closeAria')
@@ -7253,7 +7501,7 @@ function FieldAddressSearch({
           {anyLayerSearchable && featureResults.length > 0
             ? groupFeatureResultsByLayer(featureResults).map((group) => (
                 <li key={`layer-${group.layerId}`}>
-                  <div className="border-b border-border bg-surface-2 px-3 py-1 text-2xs font-semibold uppercase tracking-wide text-muted">
+                  <div className="border-b border-border bg-surface-2 px-3 py-1 text-xs font-semibold uppercase tracking-wide text-muted">
                     {group.layerTitle}
                   </div>
                   {group.results.map((r, i) => (
@@ -7265,11 +7513,11 @@ function FieldAddressSearch({
                     >
                       <Tag className="mt-0.5 h-3.5 w-3.5 shrink-0 text-muted" />
                       <div className="min-w-0 flex-1">
-                        <div className="truncate text-xs text-ink-0">
+                        <div className="truncate text-sm text-ink-0">
                           {r.kind === 'feature' ? r.label : ''}
                         </div>
                         {r.kind === 'feature' && r.subtitle ? (
-                          <div className="truncate text-2xs text-muted">
+                          <div className="truncate text-xs text-muted">
                             {r.subtitle}
                           </div>
                         ) : null}
@@ -7287,7 +7535,7 @@ function FieldAddressSearch({
           anyLayerSearchable &&
           featureResults.length > 0 ? (
             <li>
-              <div className="border-b border-border bg-surface-2 px-3 py-1 text-2xs font-semibold uppercase tracking-wide text-muted">
+              <div className="border-b border-border bg-surface-2 px-3 py-1 text-xs font-semibold uppercase tracking-wide text-muted">
                 {t('fieldRuntime.searchPlaces')}
               </div>
             </li>
@@ -7300,14 +7548,14 @@ function FieldAddressSearch({
                 className="flex w-full items-start gap-2 px-3 py-2 text-left hover:bg-surface-2"
               >
                 <MapPin className="mt-0.5 h-3.5 w-3.5 shrink-0 text-muted" />
-                <span className="min-w-0 flex-1 truncate text-xs text-ink-0">
+                <span className="min-w-0 flex-1 truncate text-sm text-ink-0">
                   {r.label}
                 </span>
               </button>
             </li>
           ))}
           {loading && placeResults.length === 0 ? (
-            <li className="px-3 py-2 text-xs text-muted">
+            <li className="px-3 py-2 text-sm text-muted">
               {t('fieldRuntime.searching')}
             </li>
           ) : null}
@@ -7315,33 +7563,6 @@ function FieldAddressSearch({
       ) : null}
     </div>
   );
-}
-
-/**
- * #247: pick a short human-friendly label for an existing related
- * row in the FormModal's child-list. Skips underscore-prefixed keys
- * (system metadata: _created_by, _edited_at, etc.), the parent FK
- * column itself (would always read as the parent's UUID), and falls
- * back to the first non-empty user-field value. Returns null when
- * nothing fits, so the caller can show the row's globalId prefix
- * instead.
- */
-function pickRelatedRowTitle(
-  properties: Record<string, unknown>,
-): string | null {
-  for (const [k, v] of Object.entries(properties)) {
-    if (k.startsWith('_')) continue;
-    if (v === null || v === undefined) continue;
-    const s = typeof v === 'string' ? v.trim() : String(v);
-    if (!s) continue;
-    // Don't echo the parent FK back as the row's title -- it's the
-    // same UUID for every row and reads as noise. Identifiable by
-    // the value being a 36-char hyphenated string (UUID v4 shape).
-    if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(s))
-      continue;
-    return s.length > 60 ? `${s.slice(0, 57)}...` : s;
-  }
-  return null;
 }
 
 /**
