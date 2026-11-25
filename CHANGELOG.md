@@ -108,6 +108,23 @@ versioning policy is in [docs/VERSIONING.md](./docs/VERSIONING.md).
   in settings. Any inline container can switch with **Arrange**. On
   a phone rows stack and grids drop to two columns. The KPI Dashboard
   template now puts its indicators and its charts in Rows.
+- ArcGIS Pro can sign in to GratisGIS and edit data layers: add, move,
+  reshape and delete features and change attributes, saved through the
+  same permission and validation checks as the portal, in one
+  transaction across the layers of a save. Sign in with your username
+  and a personal API key as the password; a read-only key can only
+  view. QGIS can edit too, with the key sent as an API header.
+- ArcGIS Pro and QGIS can add a data layer as a feature layer. Each
+  data layer item is an Esri FeatureServer at
+  `/api/arcgis/rest/services/<name>/FeatureServer`, with search,
+  filters, paging, statistics and reprojection. Public layers open with
+  no sign-in. Migration `featureserver_layer` keeps each
+  sublayer's layer number fixed.
+- Groundwork for editing in ArcGIS Pro: every data layer feature now gets
+  a permanent whole-number ObjectID, which Pro needs to name a feature.
+  Migration `feature_oid` adds two tables and a trigger. Features from
+  before it are numbered in the background, ten minutes at a time, so
+  the upgrade itself stays fast.
 - The one-command installer checks the server first and says in plain
   words what to fix (memory, disk, web ports, internet access, Docker),
   stopping before it changes anything. It offers to install Docker and
@@ -115,14 +132,117 @@ versioning policy is in [docs/VERSIONING.md](./docs/VERSIONING.md).
   records to add and can wait for them, and the install ends by waiting
   for the portal to answer over HTTPS, with the doctor's findings if it
   does not. `install.sh --check` only checks.
-- `GET /api/portal-info` reports `tenancy` (`single` unless `GRATIS_TENANCY=multi`).
+- `GET /api/portal-info` reports a `tenancy` field (`single` on a standard install).
+- The public catalog feeds (OGC API Records, Features collections and
+  Styles, STAC, CSW) take `?org=<slug>` like `catalog.json` does: the
+  answer lists that organization's public items only, and the links in
+  it keep the parameter. Without it the feeds answer as before.
+- Save as for maps: make your own copy of any map you can open, from
+  the map builder or the map's page, with unsaved changes and,
+  optionally, its markup. The copy starts private. `POST
+  /api/items/:id/copy` does the same over the API (#797).
+- Aggregates can measure shapes: `?agg=area` and `?agg=length` give
+  ground area in square meters and length in meters. With `?area=<id>` from the new
+  `POST /api/areas-of-interest`, only features touching that area
+  count and the measures cover just the part inside it. This is the
+  server half of What's Here (#796).
+- What's Here in the map viewer: pick an area by drawing, tapping a
+  point, searching an address or picking shapes such as parcels, add a
+  distance, and see what every visible layer has inside it: counts,
+  acres or length inside the area, share of the area, and a breakdown
+  by any category. Units follow the profile's metric or imperial
+  setting and each user's last choice. Exports a spreadsheet. Also an
+  app widget, where authors can set the starting units (#796).
+- What's Here makes a PDF report: the facts, a map of the area, a summary
+  table, any breakdowns, and the shapes picked. Layers with nothing in
+  the area go on one line. The server reads every layer again under the
+  viewer's own access, so the report never shows more than they can
+  see. `POST /api/whats-here/report` (#796).
+- What's Here share links: Link copies an address that opens the same map
+  with the same area, distance and breakdowns, in the map viewer or an
+  app. The area travels in the link itself, so it never expires (#796).
+- What's Here can check an uploaded shape: GeoJSON, KML, KMZ, a zipped
+  shapefile or a GeoPackage, up to 2,000 shapes (#796).
+- What's Here downloads the area it checked as GeoJSON, distance included,
+  to keep, open in desktop GIS or upload again later (#796).
+- What's Here saves the checked area to the map's markup, with its size
+  shown in the middle (#796).
+- What's Here adds up number fields: tick any number fields on a layer to
+  see their totals for the features in the area, in the panel, the
+  spreadsheet, the PDF and share links (#796).
+- Migration `area_of_interest`: a new, empty table. Nothing to do on
+  upgrade.
 
 ### Security
 
-- Installs with more than one organization: a layer's boundary clip on
+- A layer's boundary clip on
   the item GeoJSON read now follows the same rule as the feature
   routes, and a map's or editor's stored extent only draws on layers
   from its own organization or public ones.
+- An id that belongs to another organization now answers 404, the same
+  as an id that does not exist, on analysis and import jobs, form
+  submissions, map presence, the anonymous markup setting, admin user
+  changes and PostGIS Live service reads. Inside one organization a
+  missing permission still answers 403. A private attachment or file
+  link answers 404 to a caller who cannot read it.
+- Saving any item refuses a newly added reference to an item the author
+  cannot read: map layers, basemaps, boundaries, geocoders and terrain,
+  app and widget maps, folder contents, data collection maps and forms,
+  report template layers, elevation preferences, geocoder source
+  layers, derived layer inputs, tool targets and print template maps.
+  A missing id gets the same answer. References already stored keep
+  saving after their item is unshared, and reads through them are still
+  checked for each reader. A web map import leaves such layers out with
+  a warning.
+- Map Save as no longer fails when the map refers to items the person
+  saving cannot open: the copy leaves those references out and the
+  answer lists their ids (`omittedItemIds`, `warnings`).
+- A map layer's elevation hint (`source.preferredElevationItemId`,
+  copied from its tile or point cloud item) never blocks a save: a new
+  hint the author cannot read is left out of the saved layer.
+- Creating an app from a saved app template no longer fails when the
+  template names items the person cannot open: the app is made without
+  them and the answer lists their ids. The new-item wizard sends the
+  template id (`fromTemplateId` on `POST /api/items`) and shows the list.
+- A derived layer whose source was unshared from its author can still
+  be edited and saved; the save answers without the extent or cached
+  values taken from that source, and reads stay empty for the author.
+- The housekeeping extent recompute uses the same rule as the
+  background refresh: a map's extent draws on layers from its own
+  organization or public ones.
+- A script run, an offline package file and an admin user lookup now
+  answer an id the caller cannot see exactly like an id that does not
+  exist. An offline package file checks the map before the package.
+- Each server-side print renders in a browser context of its own, so
+  two prints never share cookies, storage or cached responses.
+- Outbound fetches also refuse 192.0.0.0/24, site-local fec0::/10, and
+  IPv6 addresses that carry a private IPv4 address (NAT64 64:ff9b::/96
+  and the old ::a.b.c.d form).
+- Print templates are checked when they are saved: an unknown paper
+  size or orientation, or a margin that is not a number of inches zero
+  or more, is refused with a 400 that says what is allowed. Printing
+  from an older template with an unknown paper size answers the same
+  400, and an unknown orientation still prints portrait. The
+  designer's margin field keeps to zero to a quarter of the sheet's
+  shorter side.
+
+### Fixed
+
+- Printing recovers on its own after prints that could not start,
+  instead of answering "busy" until the API restarts.
+- A search index build whose end could not be recorded no longer
+  stays "running" until the worker restarts: after six hours it is
+  marked failed and a new build can be queued.
+- The What's Here PDF covered only the first 30 layers of a map and left
+  the rest out without saying so. It now covers up to 200 (#796).
+- An app built on a map now draws exactly the map's layers. A layer removed
+  from the map no longer stays on the app's map. The app's Layers list
+  still feeds charts and tables, and marks any layer that is not on the
+  map (#797).
+- Saving a notification preference, or an organization's default for
+  a notification, no longer fails with a server error. A migration
+  changes `notification_type_default.type` and `.channel` to the enum
+  types the API reads them as.
 
 ### Changed
 

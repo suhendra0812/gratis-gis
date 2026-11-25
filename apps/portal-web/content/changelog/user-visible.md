@@ -24,6 +24,12 @@ new release banner when cutting a version tag.
 ## 2026-11-24 - Place points with a centre pin, and snap
 In the field app a pin sits in the middle of the map while you fill in a point's form. A new point is Not set until you tap Add point, which puts it under the pin; the button then becomes Update point. Tap Locate and the pin follows your GPS. Lines and polygons work the same way: Add vertex puts each vertex under the pin, Update vertex moves the last one, and the form shows the line's length or the polygon's area as you go. New points and vertices snap onto the features already on the map, and you can turn snapping off in the ⋮ menu.
 
+## 2026-11-24 - Apps from templates with items you cannot open
+Making an app from a saved template no longer fails when the template uses items you cannot open. The app is made without them and lists what was left out.
+
+## 2026-11-24 - Save as works on maps with items you cannot open
+Saving a copy of a map no longer fails when the map uses items you cannot open. The copy is made without them, and the dialog lists what was left out before you open it.
+
 ## 2026-11-20 - Join layers by attribute
 Derived layers can now join another layer by a shared field, such as an ID or a code, not only by location. Find it under "Compare with another layer": bring over the matching row's fields or a count of matches, and keep every row or only the ones that matched. Both this and the spatial join now let you pick which fields to keep from each layer and give the results friendlier names.
 
