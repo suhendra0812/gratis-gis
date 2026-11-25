@@ -71,6 +71,7 @@ import { geometryCenter } from '../map/feature-editing';
 import { fetchFeatureFromServer } from '../map/fetch-feature';
 import { DRAW_COORD_PRECISION } from '../map/use-terra-draw';
 import { changedValues } from '@/lib/feature-attribute-diff';
+import { formatArea, formatLength, lineLengthMeters, ringAreaSquareMeters } from '@/lib/measure';
 import { MapFeatureSnapper, SNAP_MARKER_COLOR, type SnapMap } from '@/lib/map-snap';
 import { toast } from '@/lib/toast';
 import {
@@ -617,6 +618,11 @@ interface FieldTemplate {
   sublabel: string;
   /** Color swatch matching how this class renders on the map. */
   color: string;
+  /** The map layer it adds to: the picker draws the same swatch as the
+   *  Layers list. */
+  mapLayer: MapLayer;
+  /** One class of a unique-values layer: its swatch takes `color`. */
+  isClass: boolean;
   /**
    * Attribute name -> value to pre-fill on add. Empty when the layer
    * uses a simple renderer; for unique-values, the renderer's `field`
@@ -2249,10 +2255,10 @@ export function FieldRuntime({
 
   /**
    * Start collecting with a template. The form opens straight away for
-   * every geometry, as in ArcGIS Field Maps: the centre pin gives a
-   * point its first position and a line or polygon its first vertex,
-   * and the form's location bar moves the point or adds the next
-   * vertex. (A line or polygon used to arm a footer first and open the
+   * every geometry, as in ArcGIS Field Maps. A new point is "Not set"
+   * and a new line or polygon has no vertex until the form's Add point
+   * / Add vertex puts one at the centre pin; Update point / Update
+   * vertex then moves it. (A line or polygon used to arm a footer first and open the
    * form only after Finish.)
    */
   const startCollect = useCallback(
@@ -2362,8 +2368,6 @@ export function FieldRuntime({
     focusOnRef.current = gpsFollowRef.current ? null : at;
     placePoint(at[0], at[1]);
   }, [pinCoordinate, placePoint]);
-  const capturePointRef = useRef(capturePoint);
-  capturePointRef.current = capturePoint;
 
   /** Add vertex: the next vertex goes where the centre pin is. */
   const addVertex = useCallback(() => {
@@ -2373,8 +2377,14 @@ export function FieldRuntime({
     setPendingVertices((prev) => [...prev, at]);
     setVerticesTouched(true);
   }, [pinCoordinate]);
-  const addVertexRef = useRef(addVertex);
-  addVertexRef.current = addVertex;
+  /** Update vertex: the last vertex moves to where the centre pin is. */
+  const updateVertex = useCallback(() => {
+    const at = pinCoordinate();
+    if (!at) return;
+    focusOnRef.current = gpsFollowRef.current ? null : at;
+    setPendingVertices((prev) => (prev.length === 0 ? prev : [...prev.slice(0, -1), at]));
+    setVerticesTouched(true);
+  }, [pinCoordinate]);
   const undoVertex = useCallback(() => {
     setPendingVertices((prev) => (prev.length === 0 ? prev : prev.slice(0, -1)));
     setVerticesTouched(true);
@@ -2401,16 +2411,14 @@ export function FieldRuntime({
         if (verts) setPendingVertices(verts);
         return;
       }
-      // A new line or polygon: the first vertex where the pin is.
+      // A new line or polygon starts with no vertex: Add vertex puts
+      // the first one at the pin.
       setVertexEditable(true);
-      addVertexRef.current();
       return;
     }
     if (!fm || !map || fm.layer.geometryType !== 'point') return;
-    if (fm.geometry?.type !== 'Point') {
-      if (fm.mode === 'add') capturePointRef.current();
-      return;
-    }
+    // A new point is not set until Add point puts it at the pin.
+    if (fm.geometry?.type !== 'Point') return;
     const [lng, lat] = fm.geometry.coordinates as [number, number];
     focusOnRef.current = [lng, lat];
     map.easeTo({ center: [lng, lat], duration: 350 });
@@ -3380,7 +3388,12 @@ export function FieldRuntime({
                   locked: !vertexEditable,
                   count: pendingVertices.length,
                   min: formModal.layer.geometryType === 'polygon' ? 3 : 2,
+                  measure: shapeMeasure(
+                    pendingVertices,
+                    formModal.layer.geometryType === 'polygon',
+                  ),
                   onAdd: addVertex,
+                  onUpdate: updateVertex,
                   onUndo: undoVertex,
                 }
               : undefined
@@ -3544,6 +3557,8 @@ function buildTemplates(
         label: layer.layerLabel,
         sublabel: layer.dataLayerTitle,
         color: fallbackColor,
+        mapLayer: ml,
+        isClass: false,
         presetAttributes: {},
       });
       continue;
@@ -3560,6 +3575,8 @@ function buildTemplates(
           label: cat.value,
           sublabel: layer.layerLabel,
           color: cat.color,
+          mapLayer: ml,
+          isClass: true,
           presetAttributes: { [renderer.field]: cat.value },
         });
       }
@@ -3577,6 +3594,8 @@ function buildTemplates(
         label: layer.layerLabel,
         sublabel: layer.dataLayerTitle,
         color: fallbackColor,
+        mapLayer: ml,
+        isClass: false,
         presetAttributes: {},
       });
     }
@@ -3764,10 +3783,11 @@ function TemplatePicker({
                         onClick={() => onPick(t)}
                         className="flex min-h-11 w-full items-center gap-3 px-3 py-2.5 text-left transition-colors hover:bg-surface-2 active:bg-surface-3"
                       >
-                        <span
-                          aria-hidden="true"
-                          className="h-5 w-5 shrink-0 rounded-sm border border-border"
-                          style={{ backgroundColor: t.color }}
+                        <LayerSwatch
+                          layer={t.mapLayer}
+                          dimmed={false}
+                          geometryType={t.layer.geometryType ?? 'polygon'}
+                          colorOverride={t.isClass ? t.color : undefined}
                         />
                         <span className="min-w-0 flex-1 truncate text-sm text-ink-0">
                           {t.label}
@@ -4374,6 +4394,7 @@ function LayerSwatch({
   layer,
   dimmed,
   geometryType,
+  colorOverride,
 }: {
   layer: MapLayer;
   dimmed: boolean;
@@ -4382,6 +4403,9 @@ function LayerSwatch({
    *  polygon) so the legend matches what the worker sees on the
    *  map. Falls back to polygon when null/undefined. */
   geometryType?: LayerGeometryType;
+  /** One class of a unique-values layer (an Add feature template):
+   *  the swatch is drawn as a simple one in this colour. */
+  colorOverride?: string | undefined;
 }) {
   const geom = geometryType ?? 'polygon';
   // Pick a primary color for the simple-renderer fallback. Match the
@@ -4397,6 +4421,7 @@ function LayerSwatch({
         ? layer.style?.line?.color
         : layer.style?.polygon?.fillColor;
   const fallback =
+    colorOverride ||
     primary ||
     layer.style?.polygon?.fillColor ||
     layer.style?.point?.color ||
@@ -4434,13 +4459,13 @@ function LayerSwatch({
   const polygonHollowProps = polygonHollow
     ? {
         backgroundColor: 'transparent',
-        borderColor: stroke,
+        borderColor: colorOverride ?? stroke,
         borderWidth: 2,
         opacity,
       }
     : null;
 
-  if (layer.renderer?.kind === 'unique-values') {
+  if (!colorOverride && layer.renderer?.kind === 'unique-values') {
     const cats = layer.renderer.categories ?? [];
     const sample = cats.slice(0, 3);
     if (sample.length === 0) {
@@ -4475,7 +4500,7 @@ function LayerSwatch({
     );
   }
 
-  if (layer.renderer?.kind === 'class-breaks') {
+  if (!colorOverride && layer.renderer?.kind === 'class-breaks') {
     const colors = layer.renderer.colors ?? [];
     if (colors.length === 0) {
       return (
@@ -4536,8 +4561,20 @@ interface VertexControl {
   count: number;
   /** Vertices it needs: 2 for a line, 3 for a polygon. */
   min: number;
+  /** The line's length or the polygon's area, once it has enough
+   *  vertices to have one. */
+  measure: string | null;
   onAdd: () => void;
+  /** Move the last vertex to the pin. */
+  onUpdate: () => void;
   onUndo: () => void;
+}
+
+/** "120.5 m" for a line with 2+ vertices, "1.25 ha" for a polygon
+ *  with 3+, else null. */
+function shapeMeasure(verts: Array<[number, number]>, isPolygon: boolean): string | null {
+  if (isPolygon) return verts.length >= 3 ? formatArea(ringAreaSquareMeters(verts)) : null;
+  return verts.length >= 2 ? formatLength(lineLengthMeters(verts)) : null;
 }
 
 /** A line or polygon from its vertices, or null with too few. A
@@ -5559,19 +5596,23 @@ function FeatureForm({
           <button
             type="button"
             onClick={onUpdatePoint}
-            title={t('fieldRuntime.updatePointTitle')}
+            title={
+              pointPlaced
+                ? t('fieldRuntime.updatePointTitle')
+                : t('fieldRuntime.addPointTitle')
+            }
             className="inline-flex h-10 shrink-0 items-center gap-1.5 rounded-md bg-accent px-3 text-sm font-semibold text-accent-foreground shadow-card hover:opacity-90 disabled:opacity-50"
           >
             <Crosshair className="h-4 w-4" />
-            {t('fieldRuntime.updatePoint')}
+            {pointPlaced ? t('fieldRuntime.updatePoint') : t('fieldRuntime.addPoint')}
           </button>
         </div>
       ) : null}
       {/* The same bar for a line or polygon: its vertex count, Undo and
           Add vertex, which puts the next vertex at the centre pin. */}
       {vertexControl ? (
-        <div className="flex shrink-0 items-center gap-2 border-b border-border bg-surface-0 px-3 py-2">
-          <div className="min-w-0 flex-1">
+        <div className="flex shrink-0 flex-col gap-2 border-b border-border bg-surface-0 px-3 py-2">
+          <div className="min-w-0">
             <p className="text-xs font-medium uppercase tracking-wide text-muted">
               {t('featureEdit.shapeHeading')}
             </p>
@@ -5585,20 +5626,36 @@ function FeatureForm({
                         })
                       : ''
                   }`}
+              {!vertexControl.locked && vertexControl.measure ? (
+                <>
+                  <span className="text-muted"> · </span>
+                  <span className="font-mono tabular-nums">{vertexControl.measure}</span>
+                </>
+              ) : null}
             </p>
           </div>
           {!vertexControl.locked ? (
-            <>
+            <div className="flex items-center justify-end gap-2">
               <button
                 type="button"
                 onClick={vertexControl.onUndo}
                 disabled={vertexControl.count === 0}
                 title={t('fieldRuntime.undoVertexTitle')}
-                className="inline-flex h-10 shrink-0 items-center gap-1 rounded-md border border-border bg-surface-1 px-2.5 text-sm font-medium text-ink-1 hover:bg-surface-2 disabled:opacity-50"
+                aria-label={t('fieldRuntime.undoVertex')}
+                className="inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-md border border-border bg-surface-1 text-ink-1 hover:bg-surface-2 disabled:opacity-50"
               >
                 <Undo2 className="h-4 w-4" />
-                {t('fieldRuntime.undoVertex')}
               </button>
+              {vertexControl.count > 0 ? (
+                <button
+                  type="button"
+                  onClick={vertexControl.onUpdate}
+                  title={t('fieldRuntime.updateVertexTitle')}
+                  className="inline-flex h-10 shrink-0 items-center rounded-md border border-accent bg-surface-1 px-2.5 text-sm font-semibold text-accent hover:bg-surface-2"
+                >
+                  {t('fieldRuntime.updateVertex')}
+                </button>
+              ) : null}
               <button
                 type="button"
                 onClick={vertexControl.onAdd}
@@ -5608,7 +5665,7 @@ function FeatureForm({
                 <Crosshair className="h-4 w-4" />
                 {t('fieldRuntime.addVertex')}
               </button>
-            </>
+            </div>
           ) : null}
         </div>
       ) : null}

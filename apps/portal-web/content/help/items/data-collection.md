@@ -78,8 +78,8 @@ and can be dragged up for a long form.
 
 - **Add**. Tap **+** (pick a feature type first when the deployment
   has more than one). The form opens straight away for a point, a
-  line or a polygon, with the pin in the middle of the map giving the
-  point its position, or the line or polygon its first vertex.
+  line or a polygon. Nothing is placed yet: **Add point** or **Add
+  vertex** puts it where the pin in the middle of the map is.
 - **Tap a feature** to open its details: **Zoom to**, **Edit**,
   **Copy** and **Delete**. Delete asks first.
 - **Edit** opens the feature's form with the row as the portal holds
@@ -87,18 +87,20 @@ and can be dragged up for a long form.
   and the shape, if you moved it, in one save. **Delete** is at the
   foot of the form.
 - **Line and polygon vertices** (add and edit). The form's **Shape**
-  bar shows how many vertices there are. **Add vertex** puts the next
-  one where the pin is, the same way **Update point** works for a
-  point (so it follows GPS after **Locate**), and **Undo** removes
-  the last one. The shape is drawn on the map as it grows; a line
+  bar shows how many vertices there are, with the line's length or
+  the polygon's area beside it. **Add vertex** puts the next one where
+  the pin is, the same way **Update point** works for a point (so it
+  follows GPS after **Locate**), **Update vertex** moves the last one
+  to the pin, and **Undo** (the arrow) removes the last one. The shape is drawn on the map as it grows; a line
   needs 2 vertices and a polygon 3, which closes itself. An edit
   starts from the feature's own vertices and adds to the end. A shape
   with several parts, or a polygon with holes, is kept as it is; change
   it in the map builder.
 - **Point position** (point layers, add and edit). A pin stays in
   the middle of the map while the form is open, and the form's
-  **Location** shows the point's coordinates. A new point starts
-  where the pin is. **Update point** moves the point to the pin, and
+  **Location** shows the point's coordinates, or **Not set** for a
+  new point. **Add point** puts it where the pin is; the button then
+  reads **Update point** and moves the point to the pin again, and
   the placed point is marked on the map; the point never moves by
   itself. The pin goes where the map goes:
   - tap **Locate** on the map and the map, with the pin, follows your
