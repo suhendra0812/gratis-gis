@@ -42,19 +42,21 @@ versioning policy is in [docs/VERSIONING.md](./docs/VERSIONING.md).
   unsynced edits always goes through the queue, and one captured and
   deleted before it synced never reaches the server.
 - Field app: a point is placed with a pin in the middle of the map,
-  as in ArcGIS Field Maps. A new point starts where the pin is, and
-  the form's location bar (as upstream's: coordinates and **Update
-  point**) moves it to the pin, which follows GPS after the map's
+  as in ArcGIS Field Maps. A new point is **Not set** until the form's
+  location bar (as upstream's: coordinates and **Add point**, which
+  becomes **Update point** once placed) puts it at the pin, which follows GPS after the map's
   **Locate** button and stays where the map is moved by hand. The
-  placed point is marked on the map and only Update point moves it.
+  placed point is marked on the map and only the button moves it.
   With a form open, Locate is the only button on the map, and the
   form opens over half of the map below the header. The GPS dot
   shows a heading cone from the device compass, and the compass
   button switches the map to heading-up.
 - Field app: lines and polygons follow the point's flow. Their form
-  opens straight away with the first vertex at the centre pin, and the
-  form's **Shape** bar has **Add vertex** (at the pin, or the GPS fix
-  while following) and **Undo**. An edit starts from the feature's own
+  opens straight away with no vertex, and the form's **Shape** bar has
+  **Add vertex** (at the pin, or the GPS fix while following),
+  **Update vertex** (moves the last vertex to the pin) and **Undo**,
+  and shows the line's length or the polygon's area beside the vertex
+  count. An edit starts from the feature's own
   vertices the same way; vertices are no longer dragged on the map,
   and a shape with several parts is kept as it is. The **Finish**
   footer is gone.
