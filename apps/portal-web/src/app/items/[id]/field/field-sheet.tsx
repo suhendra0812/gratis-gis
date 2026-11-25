@@ -162,6 +162,12 @@ export interface FieldSheetProps {
    * ascending. Dragging below the smallest dismisses.
    */
   snapPoints?: SnapPoint[];
+  /**
+   * Pixels at the top of the viewport the sheet never counts, such as
+   * the runtime's header above the map: with it, `snapPoints` are
+   * fractions of the area below (the map), not of the whole viewport.
+   */
+  reserveTopPx?: number;
   /** Index into `snapPoints` to open at. */
   initialSnap?: number;
   /** Told when the user drags to a different snap point, so a caller
@@ -195,6 +201,7 @@ export function FieldSheet({
   onClose,
   ariaLabel,
   snapPoints = [0.55, 0.92],
+  reserveTopPx = 0,
   initialSnap = 0,
   onSnapChange,
   dismissOnDrag = true,
@@ -202,7 +209,11 @@ export function FieldSheet({
   onCoveredHeightChange,
   children,
 }: FieldSheetProps) {
-  const { height: viewportHeight, keyboardInset } = useViewportInsets();
+  const { height: fullViewportHeight, keyboardInset } = useViewportInsets();
+  // The height the snap points are fractions of.
+  const viewportHeight = fullViewportHeight
+    ? Math.max(0, fullViewportHeight - reserveTopPx)
+    : fullViewportHeight;
   const [snapIndex, setSnapIndex] = useState(initialSnap);
   // Live drag offset in px, 0 when not dragging. Kept in state because
   // it drives the transform; the sheet is one element so this is cheap.

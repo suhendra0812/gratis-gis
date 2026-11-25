@@ -24,7 +24,6 @@ import {
   Crosshair,
   Eye,
   EyeOff,
-  Hand,
   Layers,
   Loader2,
   LocateFixed,
@@ -39,6 +38,7 @@ import {
   Trash2,
   X,
   ZoomIn,
+  Undo2,
 } from 'lucide-react';
 import * as maplibregl from 'maplibre-gl';
 import type {
@@ -67,16 +67,11 @@ import {
   zoomToGeometry,
   type MapCanvasHandle,
 } from '../map/map-canvas';
-import { ShapeStatus } from '../map/feature-edit-panel';
 import { geometryCenter } from '../map/feature-editing';
 import { fetchFeatureFromServer } from '../map/fetch-feature';
-import {
-  roundCoordsToPrecision,
-  useGeometryEdit,
-  useTerraDraw,
-  type GeometryEditRequest,
-} from '../map/use-terra-draw';
+import { DRAW_COORD_PRECISION } from '../map/use-terra-draw';
 import { changedValues } from '@/lib/feature-attribute-diff';
+import { MapFeatureSnapper, SNAP_MARKER_COLOR, type SnapMap } from '@/lib/map-snap';
 import { toast } from '@/lib/toast';
 import {
   searchLayers,
@@ -717,16 +712,7 @@ export function FieldRuntime({
     setBackHref(`/items/${dataCollectionId}`);
   }, [dataCollectionId, fromParam]);
 
-  // The active template: which (layer, symbology class) pair is armed
-  // for add-mode. null = no armed template (the user hasn't picked
-  // anything from the picker yet, or just cancelled).
-  const [activeTemplate, setActiveTemplate] = useState<FieldTemplate | null>(
-    null,
-  );
-
-  // Whether the template-picker bottom sheet is open. Separate state
-  // from `activeTemplate` so the user can re-open the sheet to swap
-  // their armed selection without having to "cancel" first.
+  // Whether the template-picker bottom sheet is open.
   const [pickerOpen, setPickerOpen] = useState(false);
 
   // Layer-toggle panel state. Visibility overrides keyed by MapLayer.id
@@ -802,13 +788,36 @@ export function FieldRuntime({
   // or is replaced (terra-draw binds to one map instance). mapRef stays
   // for the imperative paths that only need the current map.
   const [liveMap, setLiveMap] = useState<maplibregl.Map | null>(null);
-  // How the open form's point is placed: by hand (tap the map, drag
-  // the point) or following the GPS fix. Reset to manual per form.
-  const [pointMode, setPointMode] = useState<PointMode>('manual');
-  // Moves the open form's point; assigned once the terra-draw session
-  // exists (see placePoint). A ref so the map listeners registered
+  // Snap new and moved geometry onto the features already on the map,
+  // as the map builder does. On by default; the choice is kept on this
+  // device.
+  const [snapping, setSnapping] = useState<boolean>(() => {
+    try {
+      return window.localStorage.getItem(SNAPPING_STORAGE_KEY) !== 'off';
+    } catch {
+      return true;
+    }
+  });
+  const toggleSnapping = useCallback(() => {
+    setSnapping((on) => {
+      try {
+        window.localStorage.setItem(SNAPPING_STORAGE_KEY, on ? 'off' : 'on');
+      } catch {
+        /* private mode: the choice lasts for this visit */
+      }
+      return !on;
+    });
+  }, []);
+  // Moves the open form's point to where the centre pin settled (see
+  // the centre pin section). A ref so the map listeners registered
   // earlier always reach the current one.
   const placePointRef = useRef<(lng: number, lat: number) => void>(() => {});
+  const gpsFollowRef = useRef(gps.follow);
+  gpsFollowRef.current = gps.follow;
+  const gpsPositionRef = useRef(gps.position);
+  gpsPositionRef.current = gps.position;
+  const formModalRef = useRef(formModal);
+  formModalRef.current = formModal;
 
   const clearPendingMarker = useCallback(() => {
     if (pendingMarkerRef.current) {
@@ -817,31 +826,9 @@ export function FieldRuntime({
     }
   }, []);
 
-  /** The point being added, draggable: dragging it is the manual way
-   *  to place it, like tapping the map. */
-  const attachPendingMarker = useCallback(
-    (map: maplibregl.Map, lng: number, lat: number, color?: string) => {
-      const marker = new maplibregl.Marker({
-        ...(color ? { color } : {}),
-        draggable: true,
-      })
-        .setLngLat([lng, lat])
-        .addTo(map);
-      marker.on('dragstart', () => setPointMode('manual'));
-      marker.on('dragend', () => {
-        const ll = marker.getLngLat();
-        placePointRef.current(ll.lng, ll.lat);
-      });
-      return marker;
-    },
-    [],
-  );
-
-  // #273: line/polygon vertex collection state. While the user is
-  // drawing a multi-vertex feature, vertices accumulate here and a
-  // live preview line / ring renders on the map. Empty array means
-  // we're not in vertex-collection mode (the active template is a
-  // point template, OR no template is armed).
+  // #273: the vertices of the line or polygon whose form is open. The
+  // centre pin adds them (Add vertex), and a live preview line / ring
+  // renders on the map. Empty when no line or polygon form is open.
   const [pendingVertices, setPendingVertices] = useState<
     Array<[number, number]>
   >([]);
@@ -1179,6 +1166,26 @@ export function FieldRuntime({
     offlineSources,
     deviceTimeZone,
   ]);
+
+  // What the canvas draws: no table sublayers (a related table such as
+  // inspections). They have no geometry and no tiles, and handing them
+  // to the canvas only made it ask for their TileJSON and get a 404.
+  const canvasMapData = useMemo<MapData>(() => {
+    const tables = new Set(
+      effectiveMapData.layers
+        .filter((l) => {
+          if (l.source?.kind !== 'data-layer' || !l.source.layerKey) return false;
+          const e = resolveEditableLayer(editableLayers, l.source);
+          return e !== undefined && e.geometryType === null;
+        })
+        .map((l) => l.id),
+    );
+    if (tables.size === 0) return effectiveMapData;
+    return {
+      ...effectiveMapData,
+      layers: effectiveMapData.layers.filter((l) => !tables.has(l.id)),
+    };
+  }, [effectiveMapData, editableLayers]);
 
   // Effective pickLists. When offline, pick from IndexedDB instead of
   // the prop so newly-added pick lists from the download cache work.
@@ -1909,24 +1916,13 @@ export function FieldRuntime({
   // dead combinations as 'inert' on purpose.
   const interactionMode: MapInteractionMode = useMemo(() => {
     if (formModal !== null) {
-      // A form is open. The only tap that still means something is
-      // moving its point (add or edit, see placePoint); a line or
-      // polygon is committed by the time an add form opens, and is
-      // reshaped by its vertices in an edit form.
-      return formModal.layer.geometryType === 'point'
-        ? 'collect-point'
-        : 'inert';
-    }
-    if (activeTemplate !== null) {
-      // A point template arms and commits in the same gesture (the
-      // picker calls commitTemplateAt), so there is no window where a
-      // point template is armed and waiting for a tap.
-      return activeTemplate.layer.geometryType === 'point'
-        ? 'inert'
-        : 'collect-vertex';
+      // A form is open: a tap brings the spot under the centre pin,
+      // which places the point or the next vertex. A table row has
+      // no place on the map.
+      return formModal.layer.geometryType ? 'collect-point' : 'inert';
     }
     return 'inspect';
-  }, [formModal, activeTemplate]);
+  }, [formModal]);
 
   // Which of the three competing bottom sheets is showing. See
   // BottomSheet: the picker had no exclusion at all, so opening it
@@ -1947,10 +1943,9 @@ export function FieldRuntime({
   // is six chances to forget one and no name for what the condition
   // means.
   //
-  // Since the field edit work, only the Add FAB (and its empty-state
-  // note) gives way to an open form: the header, GPS strip, layers and
-  // basemap, search, zoom and locate stay up, because moving a point
-  // means panning, zooming and finding where you are.
+  // As in ArcGIS Field Maps, only Locate stays on the map while a
+  // form is open: it is how the point follows GPS. The header and its
+  // GPS strip stay above the map.
   const showRuntimeChrome = formModal === null;
 
   // How much of the map an open sheet is covering. Fed to MapLibre as
@@ -1958,6 +1953,26 @@ export function FieldRuntime({
   // centred: tapping a feature in the lower half used to open a sheet
   // directly over the feature you had just tapped.
   const [sheetCoveredPx, setSheetCoveredPx] = useState(0);
+  // Where the map starts: the bottom of the runtime's header. The form
+  // sheet sizes itself against the map below it, not the whole screen.
+  const headerRef = useRef<HTMLElement | null>(null);
+  const [mapTopPx, setMapTopPx] = useState(0);
+  useEffect(() => {
+    const el = headerRef.current;
+    if (!el) return;
+    const measure = () => setMapTopPx(Math.round(el.getBoundingClientRect().bottom));
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    window.addEventListener('resize', measure);
+    return () => {
+      ro.disconnect();
+      window.removeEventListener('resize', measure);
+    };
+  }, []);
+  // The bottom padding actually applied (clamped, see below): the centre
+  // pin sits in the middle of the rest.
+  const [mapPadBottom, setMapPadBottom] = useState(0);
   // Where the camera should stay centred while a sheet covers part of
   // the map: the feature being edited. Read by the padding effect below.
   const focusOnRef = useRef<[number, number] | null>(null);
@@ -1969,6 +1984,7 @@ export function FieldRuntime({
     // do.
     const container = map.getContainer().clientHeight;
     const bottom = Math.max(0, Math.min(sheetCoveredPx, container * 0.6));
+    setMapPadBottom(bottom);
     // A feature the edit form asked to keep in view rides along: a
     // second easeTo would cancel this one, or this one the other.
     const focus = focusOnRef.current;
@@ -1983,27 +1999,66 @@ export function FieldRuntime({
     }
   }, [sheetCoveredPx]);
 
+  // ---- Snapping --------------------------------------------------------
+  //
+  // The same engine as the map builder (MapFeatureSnapper): the nearest
+  // vertex, or failing that the nearest edge, of any feature drawn on the
+  // map within a few pixels. Here it snaps the centre pin and tapped
+  // vertices; terra-draw uses its own instance for reshaping.
+  const snappingRef = useRef(snapping);
+  snappingRef.current = snapping;
+  const centerSnapperRef = useRef<MapFeatureSnapper | null>(null);
+  useEffect(() => {
+    if (!liveMap) return;
+    const snapper = new MapFeatureSnapper(
+      liveMap as unknown as SnapMap,
+      DRAW_COORD_PRECISION,
+    );
+    centerSnapperRef.current = snapper;
+    return () => {
+      snapper.dispose();
+      centerSnapperRef.current = null;
+    };
+  }, [liveMap]);
+  /** Where a screen point snaps, or null when snapping is off or nothing
+   *  is near. Draws the snap marker, or clears it. `skipId` leaves out
+   *  the feature being moved, which its layer still draws. */
+  const snapAt = useCallback(
+    (x: number, y: number, skipId?: string): [number, number] | null => {
+      const snapper = centerSnapperRef.current;
+      if (!snapper) return null;
+      if (!snappingRef.current) {
+        snapper.clearLive();
+        return null;
+      }
+      return snapper.snap({ containerX: x, containerY: y }, { currentId: skipId }) ?? null;
+    },
+    [],
+  );
+
+  // Layers sits at the top of the thumb stack (hidden with a form open).
+  const layersBottom =
+    templates.length > 0
+      ? 'calc(9.25rem + env(safe-area-inset-bottom, 0px))'
+      : 'calc(11.75rem + env(safe-area-inset-bottom, 0px))';
+
   const isPointAddCollect = interactionMode === 'collect-point';
   useEffect(() => {
     if (!isPointAddCollect) return;
     const map = mapRef.current;
     if (!map) return;
     function onMapClick(e: maplibregl.MapMouseEvent) {
-      const { lng, lat } = e.lngLat;
-      // A tap places the point by hand, so GPS stops steering it.
-      setPointMode('manual');
-      placePointRef.current(lng, lat);
+      // A tap brings the tapped spot under the centre pin. It is a
+      // manual move, like a drag, so GPS stops leading the pin.
+      if (gpsFollowRef.current) toggleFollowRef.current();
+      focusOnRef.current = null;
+      map!.easeTo({ center: e.lngLat, duration: 300 });
     }
     map.on('click', onMapClick);
     return () => {
       map.off('click', onMapClick);
     };
   }, [isPointAddCollect]);
-
-  // #273: tap-to-add-vertex during line/polygon collection. The
-  // effect itself lives below commitTemplateAt's declaration so the
-  // closure captures it without a hoist error.
-  const isLineOrPolyArming = interactionMode === 'collect-vertex';
 
   // #249.16 / #253: Field-Maps-style tap-to-popup. When the user
   // taps a feature on the canvas (and we're not in template-arming
@@ -2016,16 +2071,6 @@ export function FieldRuntime({
   // Runs only in 'inspect' mode, so the collect and template-arming
   // paths cannot also be listening.
   const featureSheetGate = interactionMode === 'inspect';
-  // #273: when the user cancels a line/polygon template (X on the
-  // chip in the footer), drop any vertices they'd accumulated.
-  // Done as an effect so the cleanup runs even if the cancel comes
-  // from a non-X path (Escape key in a future slice, route
-  // navigation, etc).
-  useEffect(() => {
-    if (activeTemplate === null && pendingVertices.length > 0) {
-      clearVertices();
-    }
-  }, [activeTemplate, pendingVertices.length, clearVertices]);
   useEffect(() => {
     if (!featureSheetGate) return;
     const map = mapRef.current;
@@ -2202,358 +2247,291 @@ export function FieldRuntime({
   // calls, kept alive by a `void` reference to silence the linter, is
   // a trap for whoever calls it next.
 
-  // Commit the active template: drop a feature at the current map
-  // center and open the form pre-filled with presetAttributes. Used
-  // by the "Add at center" button. Field Maps' equivalent: pan to
-  // position, tap "Add Point", form opens.
-  // #249: shared commit path. Takes a template + a coord pair and
-  // opens the form modal with the matching geometry, plants the
-  // preview marker, and eases the camera so the marker isn't hidden
-  // behind the bottom-sheet form. Both the explicit "Add at center"
-  // and "Add at GPS" buttons funnel through here, AND the
-  // template-picker's onPick uses it directly when GPS is available
-  // so a single tap (FAB → pick template) collapses to one tap when
-  // there's only one template (the picker self-dismisses).
-  const commitTemplateAt = useCallback(
-    (tpl: FieldTemplate, lon: number, lat: number) => {
-      const map = mapRef.current;
-      if (!map) return;
-      if (isPointGeometry(tpl.layer.geometryType)) {
-        // Point: drop immediately, open the form. This is the
-        // original Field-Maps-style one-tap commit path.
-        setFormModal({
-          layer: tpl.layer,
-          mode: 'add',
-          featureId: newGlobalId(),
-          geometry: { type: 'Point', coordinates: [lon, lat] },
-          presetAttributes: tpl.presetAttributes,
-        });
-        setActiveTemplate(null);
-        clearPendingMarker();
-        pendingMarkerRef.current = attachPendingMarker(map, lon, lat, tpl.color);
-        // Form takes the bottom ~60%; offset the camera so the
-        // dropped marker stays visible above the sheet. Negative y
-        // shifts the geographic center upward on screen.
-        const h = map.getContainer().clientHeight;
-        map.easeTo({
-          center: [lon, lat],
-          offset: [0, -h * 0.3],
-          duration: 350,
-        });
-        return;
-      }
-      // #273: line / polygon path. Each call from here PUSHES a
-      // vertex onto pendingVertices and refreshes the preview, but
-      // does NOT commit -- the user has to tap Finish on the footer
-      // when they have enough vertices.
-      // The updater stays pure. Redrawing the MapLibre preview from
-      // inside it meant a style mutation during render, which React
-      // StrictMode runs twice.  The preview is refreshed by an effect
-      // on pendingVertices instead, one frame later and once.
-      setPendingVertices((prev) => [...prev, [lon, lat]]);
-      // Vertex marker (dot at the tapped location). Smaller than the
-      // point-template marker so the polyline reads as the primary
-      // visual.
-      const marker = new maplibregl.Marker({
-        color: tpl.color,
-        scale: 0.6,
-      })
-        .setLngLat([lon, lat])
-        .addTo(map);
-      vertexMarkersRef.current.push(marker);
-    },
-    [clearPendingMarker, attachPendingMarker, refreshPreviewGeom],
-  );
-
   /**
-   * #273: remove the last vertex pushed. Field-mapping convention
-   * is "single tap removes one." If the user undoes the last
-   * remaining vertex, vertex-collection mode stays armed (template
-   * is still active) -- they can keep tapping to start over.
-   */
-  const undoLastVertex = useCallback(() => {
-    const tpl = activeTemplate;
-    if (!tpl) return;
-    if (pendingVertices.length === 0) return;
-    // Popping the marker used to happen INSIDE the state updater, so
-    // StrictMode's double invocation removed two markers for one
-    // undo: the dots on the map and the vertex count disagreed from
-    // the first undo onward. Marker teardown is an effect on the
-    // world, so it belongs out here with the rest of them.
-    const removed = vertexMarkersRef.current.pop();
-    if (removed) {
-      try {
-        removed.remove();
-      } catch {
-        /* maplibre is forgiving here; ignore */
-      }
-    }
-    setPendingVertices((prev) => (prev.length === 0 ? prev : prev.slice(0, -1)));
-  }, [activeTemplate, pendingVertices.length]);
-
-  // Keep the preview line / ring in step with the vertices. Driven
-  // off state rather than written at each mutation site, so the two
-  // cannot disagree and neither push nor undo has to remember to
-  // redraw. Clearing is still explicit (clearVertices removes the
-  // source), so this only ever draws.
-  useEffect(() => {
-    const tpl = activeTemplate;
-    if (!tpl || pendingVertices.length === 0) return;
-    refreshPreviewGeom(
-      pendingVertices,
-      tpl.color,
-      tpl.layer.geometryType === 'polygon',
-    );
-  }, [pendingVertices, activeTemplate, refreshPreviewGeom]);
-
-  /**
-   * #273: finalize the in-progress geometry and open the form
-   * modal. Validates min vertex count (2 for line, 3 for polygon)
-   * before committing. Polygon rings are closed automatically -- we
-   * append the first vertex to the end so PostGIS / GeoJSON sees a
-   * valid linear ring without making the user tap the start vertex
-   * again.
-   */
-  const finishVertices = useCallback(() => {
-    const tpl = activeTemplate;
-    if (!tpl) return;
-    const isPolygon = tpl.layer.geometryType === 'polygon';
-    const minVerts = isPolygon ? 3 : 2;
-    if (pendingVertices.length < minVerts) return;
-    const geometry: GeoJSON.Geometry = isPolygon
-      ? {
-          type: 'Polygon',
-          coordinates: [[...pendingVertices, pendingVertices[0]!]],
-        }
-      : {
-          type: 'LineString',
-          coordinates: pendingVertices,
-        };
-    setFormModal({
-      layer: tpl.layer,
-      mode: 'add',
-      featureId: newGlobalId(),
-      geometry,
-      presetAttributes: tpl.presetAttributes,
-    });
-    setActiveTemplate(null);
-    clearVertices();
-  }, [activeTemplate, pendingVertices, clearVertices]);
-
-  const commitAtCenter = useCallback(() => {
-    const tpl = activeTemplate;
-    const map = mapRef.current;
-    if (!tpl || !map) return;
-    const c = map.getCenter();
-    commitTemplateAt(tpl, c.lng, c.lat);
-  }, [activeTemplate, commitTemplateAt]);
-
-  // Phase A3 / #249: drop a point at the current GPS fix. Funnels
-  // through commitTemplateAt so the marker + camera-pan logic stays
-  // in one place.
-  const commitAtGps = useCallback(() => {
-    const tpl = activeTemplate;
-    const pos = gps.position;
-    if (!tpl || !pos) return;
-    commitTemplateAt(tpl, pos.lon, pos.lat);
-  }, [activeTemplate, gps.position, commitTemplateAt]);
-
-  /**
-   * Start collecting with a template. A point opens its form straight
-   * away, at the GPS fix when there is one and at the map centre when
-   * not; the form's Manual / GPS option moves it from there. (It used
-   * to arm the template first and wait for "Add at center" when GPS
-   * had no fix yet, and skip that step once it had one, so the same
-   * button did two different things.) A line or polygon arms vertex
-   * collection: it needs its vertices before there is a form.
+   * Start collecting with a template. The form opens straight away for
+   * every geometry, as in ArcGIS Field Maps: the centre pin gives a
+   * point its first position and a line or polygon its first vertex,
+   * and the form's location bar moves the point or adds the next
+   * vertex. (A line or polygon used to arm a footer first and open the
+   * form only after Finish.)
    */
   const startCollect = useCallback(
-    (tpl: Parameters<typeof commitTemplateAt>[0]) => {
-      if (tpl.layer.geometryType === 'point') {
-        const pos = gps.position;
-        if (pos) {
-          commitTemplateAt(tpl, pos.lon, pos.lat);
-          return;
-        }
-        const map = mapRef.current;
-        if (map) {
-          const c = map.getCenter();
-          commitTemplateAt(tpl, c.lng, c.lat);
-          return;
-        }
-      }
-      setActiveTemplate(tpl);
+    (tpl: FieldTemplate) => {
+      clearPendingMarker();
+      setFormModal({
+        layer: tpl.layer,
+        mode: 'add',
+        featureId: newGlobalId(),
+        geometry: null,
+        presetAttributes: tpl.presetAttributes,
+      });
     },
-    [gps.position, commitTemplateAt],
+    [clearPendingMarker],
   );
-
-  // #273: map-click handler that pushes a vertex while a line/
-  // polygon template is armed. Mirrors the isPointAddCollect
-  // handler structure (gated useEffect that attaches/detaches the
-  // listener) so the tap-to-popup, tap-to-override-point, and
-  // tap-to-add-vertex flows don't fight each other. Lives below
-  // commitTemplateAt's declaration so the closure captures the
-  // helper without a use-before-declaration error.
-  useEffect(() => {
-    if (!isLineOrPolyArming) return;
-    const map = mapRef.current;
-    if (!map) return;
-    const tpl = activeTemplate;
-    if (!tpl) return;
-    function onMapClick(e: maplibregl.MapMouseEvent) {
-      const { lng, lat } = e.lngLat;
-      commitTemplateAt(tpl!, lng, lat);
-    }
-    map.on('click', onMapClick);
-    return () => {
-      map.off('click', onMapClick);
-    };
-  }, [isLineOrPolyArming, activeTemplate, commitTemplateAt]);
 
   // ---- Feature editing ---------------------------------------------
   //
-  // Built like the map builder's (map/feature-editing.tsx): Edit loads
-  // the feature from the server, its shape goes live on the map in a
-  // terra-draw session (the same useTerraDraw / useGeometryEdit hooks
-  // the builder and the editor runtime use) and is dragged there, and
-  // Update writes the changed fields and the moved shape together.
-  const { draw } = useTerraDraw(liveMap, { snapping: false });
-  const shapeRequest = useMemo<GeometryEditRequest | null>(() => {
-    if (!formModal || formModal.mode !== 'edit') return null;
-    const gt = formModal.layer.geometryType;
-    if (!gt || !formModal.geometry) return null;
-    return {
-      key: `field:${formModal.layer.dataLayerId}:${formModal.layer.layerKey}`,
-      featureId: formModal.featureId,
-      geometryType: gt,
-      geometry: formModal.geometry,
-    };
-  }, [formModal]);
-  const geometryEdit = useGeometryEdit(draw, shapeRequest);
-  // Hand the map back once no shape is being edited: a started
-  // terra-draw keeps listening to the pointer.
-  const shapeActive = shapeRequest !== null;
+  // Edit loads the feature from the server (see openFeatureEdit). Its
+  // point or vertices change through the centre pin, as an add does,
+  // and Update writes the changed fields and the new shape together.
   useEffect(() => {
     if (!formModal) focusOnRef.current = null;
   }, [formModal]);
-  useEffect(() => {
-    if (!draw || shapeActive) return;
-    try {
-      draw.stop();
-    } catch {
-      /* never started */
-    }
-  }, [draw, shapeActive]);
 
-  // ---- Placing the open form's point ---------------------------------
+  // The pin takes the colour of what is being collected.
+  const pinColor =
+    templates.find(
+      (tpl) =>
+        formModal !== null &&
+        tpl.layer.dataLayerId === formModal.layer.dataLayerId &&
+        tpl.layer.layerKey === formModal.layer.layerKey,
+    )?.color ??
+    '#0f766e';
+
+  // ---- The centre pin ------------------------------------------------
   //
-  // Manual: tap the map, or drag the point (the marker of an add, the
-  // terra-draw handle of an edit). GPS: the point follows the live fix
-  // until the collector moves it by hand.
-  const formModalRef = useRef(formModal);
-  formModalRef.current = formModal;
-  const placePoint = useCallback(
-    (lng: number, lat: number) => {
-      const fm = formModalRef.current;
-      if (!fm || fm.layer.geometryType !== 'point') return;
-      const point: GeoJSON.Point = { type: 'Point', coordinates: [lng, lat] };
-      if (fm.mode === 'edit') {
-        // Through the shape session, so the move is the same edit a
-        // drag would be: the Shape section reports it and Update
-        // sends it.
-        if (!draw) return;
-        try {
-          // terra-draw refuses coordinates finer than the precision it
-          // was built with, and a tap's lng/lat carries ~15 decimals.
-          draw.updateFeatureGeometry(
-            fm.featureId,
-            roundCoordsToPrecision(point) as GeoJSON.Point,
-          );
-          // A tap on the map deselects in terra-draw; keep the handle.
-          draw.selectFeature(fm.featureId);
-        } catch {
-          /* session not loaded yet */
-        }
-        return;
-      }
-      const map = mapRef.current;
-      if (pendingMarkerRef.current) pendingMarkerRef.current.setLngLat([lng, lat]);
-      else if (map) pendingMarkerRef.current = attachPendingMarker(map, lng, lat);
-      setFormModal((prev) => {
-        if (!prev || prev.mode !== 'add') return prev;
-        const c = prev.geometry?.type === 'Point' ? prev.geometry.coordinates : null;
-        if (c && c[0] === lng && c[1] === lat) return prev;
-        return { ...prev, geometry: point };
-      });
-    },
-    [draw, attachPendingMarker],
-  );
+  // As in ArcGIS Field Maps: while a point's form is open a pin stays in
+  // the middle of the map, and the form's Add point / Update point button
+  // puts the point there. Its source is the GPS fix once the map's
+  // Locate button is used, and the pin once the map is moved by hand,
+  // until the other one is used. The placed point is marked on the map.
+  // A line or polygon being drawn uses the same pin for "Vertex at
+  // center".
+  // An edited point's new position; null until Update point moves it.
+  const [editPoint, setEditPoint] = useState<GeoJSON.Point | null>(null);
+  // The pin sits on something it would snap to (live, as the map moves).
+  const [pinSnapped, setPinSnapped] = useState(false);
+  const placePoint = useCallback((lng: number, lat: number) => {
+    const fm = formModalRef.current;
+    if (!fm || fm.layer.geometryType !== 'point') return;
+    const point: GeoJSON.Point = { type: 'Point', coordinates: [lng, lat] };
+    if (fm.mode === 'edit') {
+      setEditPoint(point);
+      return;
+    }
+    setFormModal((prev) => {
+      if (!prev || prev.mode !== 'add' || prev.featureId !== fm.featureId) return prev;
+      return { ...prev, geometry: point };
+    });
+  }, []);
   placePointRef.current = placePoint;
 
-  // Each form starts in manual: the point is where the collector put
-  // it (the tap, Add at center, the feature's own position) until they
-  // ask for GPS. An add whose point has no marker yet (Copy) gets one,
-  // so it can be seen and dragged.
-  const formKey = formModal ? `${formModal.mode}:${formModal.featureId}` : null;
-  const lastGpsPointRef = useRef<[number, number] | null>(null);
-  useEffect(() => {
-    setPointMode('manual');
-    lastGpsPointRef.current = null;
+  const pointFormOpen = formModal !== null && formModal.layer.geometryType === 'point';
+  // A line or polygon form whose shape can be changed here: a single
+  // line or a single ring. One with several parts keeps its shape.
+  const [vertexEditable, setVertexEditable] = useState(false);
+  // An edit's vertices were changed (Add vertex / Undo).
+  const [verticesTouched, setVerticesTouched] = useState(false);
+  const vertexFormOpen =
+    formModal !== null &&
+    (formModal.layer.geometryType === 'line' || formModal.layer.geometryType === 'polygon') &&
+    vertexEditable;
+  const pinActive = pointFormOpen || vertexFormOpen;
+  const pinSkipId = formModal?.mode === 'edit' ? formModal.featureId : undefined;
+  // The point as it stands: placed (add), or moved / original (edit).
+  const placedPoint: GeoJSON.Geometry | null = !pointFormOpen
+    ? null
+    : formModal.mode === 'edit'
+      ? (editPoint ?? formModal.geometry)
+      : formModal.geometry;
+
+  /**
+   * Where the centre pin puts a point or a vertex. While the map follows
+   * GPS the pin is on the fix, and the fix itself is used (the camera
+   * rounds to whole pixels, and a fix is not snapped); otherwise the
+   * pin's spot, snapped when snapping is on.
+   */
+  const pinCoordinate = useCallback((): [number, number] | null => {
     const fm = formModalRef.current;
     const map = mapRef.current;
-    if (
-      fm &&
-      fm.mode === 'add' &&
-      fm.layer.geometryType === 'point' &&
-      fm.geometry?.type === 'Point' &&
-      !pendingMarkerRef.current &&
-      map
-    ) {
-      const [lng, lat] = fm.geometry.coordinates as [number, number];
-      pendingMarkerRef.current = attachPendingMarker(map, lng, lat);
-    }
-  }, [formKey, attachPendingMarker]);
+    if (!fm || !map) return null;
+    const fix = gpsPositionRef.current;
+    if (gpsFollowRef.current && fix) return [fix.lon, fix.lat];
+    const c = map.getCenter();
+    const p = map.project(c);
+    const skip = fm.mode === 'edit' ? fm.featureId : undefined;
+    return snapAt(p.x, p.y, skip) ?? [c.lng, c.lat];
+  }, [snapAt]);
 
-  // GPS mode: follow each fix, with the map. Choosing GPS takes the
-  // camera to the fix (zoomed in at least as far as the locate button
-  // does), and later fixes keep it there, so the point being placed is
-  // always in the part of the map the sheet leaves showing. focusOnRef
-  // carries it through the sheet's own padding animation.
-  const gpsLon = gps.position?.lon ?? null;
-  const gpsLat = gps.position?.lat ?? null;
+  /** Update point: the point goes where the centre pin is. */
+  const capturePoint = useCallback(() => {
+    const fm = formModalRef.current;
+    if (!fm || fm.layer.geometryType !== 'point') return;
+    const at = pinCoordinate();
+    if (!at) return;
+    focusOnRef.current = gpsFollowRef.current ? null : at;
+    placePoint(at[0], at[1]);
+  }, [pinCoordinate, placePoint]);
+  const capturePointRef = useRef(capturePoint);
+  capturePointRef.current = capturePoint;
+
+  /** Add vertex: the next vertex goes where the centre pin is. */
+  const addVertex = useCallback(() => {
+    const at = pinCoordinate();
+    if (!at) return;
+    focusOnRef.current = gpsFollowRef.current ? null : at;
+    setPendingVertices((prev) => [...prev, at]);
+    setVerticesTouched(true);
+  }, [pinCoordinate]);
+  const addVertexRef = useRef(addVertex);
+  addVertexRef.current = addVertex;
+  const undoVertex = useCallback(() => {
+    setPendingVertices((prev) => (prev.length === 0 ? prev : prev.slice(0, -1)));
+    setVerticesTouched(true);
+  }, []);
+
+  // A new point starts where the centre pin is; an edit or a copy
+  // brings its own point under the pin.
+  const formKey = formModal ? `${formModal.mode}:${formModal.featureId}` : null;
   useEffect(() => {
-    if (pointMode !== 'gps' || gpsLon === null || gpsLat === null) return;
-    lastGpsPointRef.current = [gpsLon, gpsLat];
-    placePointRef.current(gpsLon, gpsLat);
+    setEditPoint(null);
+    setPinSnapped(false);
+    setVerticesTouched(false);
+    clearVertices();
+    centerSnapperRef.current?.clearLive();
+    const fm = formModalRef.current;
     const map = mapRef.current;
-    if (!map || !formModalRef.current) return;
-    focusOnRef.current = [gpsLon, gpsLat];
-    map.easeTo({
-      center: [gpsLon, gpsLat],
-      zoom: Math.max(map.getZoom(), 16),
-      duration: 400,
-    });
-  }, [pointMode, gpsLon, gpsLat, formKey]);
-
-  // A drag of the edit handle while following GPS hands the point
-  // back to the collector; otherwise the next fix would undo it.
-  useEffect(() => {
-    const last = lastGpsPointRef.current;
-    const g = geometryEdit.currentGeometry;
-    if (pointMode !== 'gps' || !last || !g || g.type !== 'Point') return;
-    const [x, y] = g.coordinates as [number, number];
-    if (Math.abs(x - last[0]) > 1e-6 || Math.abs(y - last[1]) > 1e-6) {
-      setPointMode('manual');
+    const gt = fm?.layer.geometryType;
+    if (!fm || !map || (gt !== 'line' && gt !== 'polygon')) setVertexEditable(false);
+    if (fm && map && (gt === 'line' || gt === 'polygon')) {
+      if (fm.geometry) {
+        // An edit (or a copy): its own vertices, when it has one part.
+        const verts = editableVertices(fm.geometry);
+        setVertexEditable(verts !== null);
+        if (verts) setPendingVertices(verts);
+        return;
+      }
+      // A new line or polygon: the first vertex where the pin is.
+      setVertexEditable(true);
+      addVertexRef.current();
+      return;
     }
-  }, [geometryEdit.currentGeometry, pointMode]);
+    if (!fm || !map || fm.layer.geometryType !== 'point') return;
+    if (fm.geometry?.type !== 'Point') {
+      if (fm.mode === 'add') capturePointRef.current();
+      return;
+    }
+    const [lng, lat] = fm.geometry.coordinates as [number, number];
+    focusOnRef.current = [lng, lat];
+    map.easeTo({ center: [lng, lat], duration: 350 });
+  }, [formKey]);
 
-  const choosePointMode = useCallback(
-    (mode: PointMode) => {
-      if (mode === 'gps' && gps.status === 'idle') gps.start();
-      setPointMode(mode);
+  // The line or polygon as it stands: drawn on the map with a dot per
+  // vertex, and, for an add, handed to the form.
+  useEffect(() => {
+    for (const m of vertexMarkersRef.current) {
+      try {
+        m.remove();
+      } catch {
+        /* already gone */
+      }
+    }
+    vertexMarkersRef.current = [];
+    const fm = formModalRef.current;
+    const map = mapRef.current;
+    if (!vertexFormOpen || !fm || !map) return;
+    const isPolygon = fm.layer.geometryType === 'polygon';
+    refreshPreviewGeom(pendingVertices, pinColor, isPolygon);
+    for (const v of pendingVertices) {
+      vertexMarkersRef.current.push(
+        new maplibregl.Marker({ color: pinColor, scale: 0.6 }).setLngLat(v).addTo(map),
+      );
+    }
+    if (fm.mode === 'add') {
+      const geometry = verticesToGeometry(pendingVertices, isPolygon);
+      setFormModal((prev) =>
+        prev && prev.mode === 'add' && prev.featureId === fm.featureId
+          ? { ...prev, geometry }
+          : prev,
+      );
+    }
+  }, [vertexFormOpen, pendingVertices, pinColor, refreshPreviewGeom]);
+
+  // The placed point, marked on the map: the pin shows where Update
+  // point would put it, the marker where it is.
+  const placedMarkerRef = useRef<maplibregl.Marker | null>(null);
+  const placedLng = placedPoint?.type === 'Point' ? (placedPoint.coordinates[0] as number) : null;
+  const placedLat = placedPoint?.type === 'Point' ? (placedPoint.coordinates[1] as number) : null;
+  useEffect(() => {
+    const map = liveMap;
+    if (!map || placedLng === null || placedLat === null) {
+      placedMarkerRef.current?.remove();
+      placedMarkerRef.current = null;
+      return;
+    }
+    if (placedMarkerRef.current) {
+      placedMarkerRef.current.setLngLat([placedLng, placedLat]);
+    } else {
+      placedMarkerRef.current = new maplibregl.Marker({ color: pinColor, scale: 0.8 })
+        .setLngLat([placedLng, placedLat])
+        .addTo(map);
+    }
+  }, [liveMap, placedLng, placedLat, pinColor]);
+  useEffect(
+    () => () => {
+      placedMarkerRef.current?.remove();
+      placedMarkerRef.current = null;
     },
-    [gps],
+    [],
   );
+
+  // The snap marker follows the pin while the map moves.
+  const refreshPinSnapRef = useRef<() => void>(() => {});
+  useEffect(() => {
+    if (!pinActive || !liveMap) return;
+    const map = liveMap;
+    let frame = 0;
+    const refresh = () => {
+      // Following GPS: the fix is used as it is, never snapped.
+      if (formModalRef.current && gpsFollowRef.current) {
+        centerSnapperRef.current?.clearLive();
+        setPinSnapped(false);
+        return;
+      }
+      const p = map.project(map.getCenter());
+      setPinSnapped(snapAt(p.x, p.y, pinSkipId) !== null);
+    };
+    refreshPinSnapRef.current = refresh;
+    const onMove = () => {
+      if (frame) return;
+      frame = requestAnimationFrame(() => {
+        frame = 0;
+        refresh();
+      });
+    };
+    const onDragStart = (e: { originalEvent?: unknown }) => {
+      // The camera stays where the collector put it.
+      if (e.originalEvent && formModalRef.current) focusOnRef.current = null;
+    };
+    map.on('move', onMove);
+    map.on('dragstart', onDragStart);
+    return () => {
+      cancelAnimationFrame(frame);
+      map.off('move', onMove);
+      map.off('dragstart', onDragStart);
+      refreshPinSnapRef.current = () => {};
+      centerSnapperRef.current?.clearLive();
+    };
+  }, [pinActive, liveMap, snapAt, pinSkipId]);
+  useEffect(() => {
+    refreshPinSnapRef.current();
+  }, [snapping, gps.follow]);
+
+  // Panning by hand stops GPS follow, as in Field Maps; otherwise the
+  // next fix would pull the map, and the pin, straight back.
+  const toggleFollowRef = useRef(gps.toggleFollow);
+  toggleFollowRef.current = gps.toggleFollow;
+  useEffect(() => {
+    if (!liveMap) return;
+    const onDragStart = (e: { originalEvent?: unknown }) => {
+      if (e.originalEvent && gpsFollowRef.current) toggleFollowRef.current();
+    };
+    liveMap.on('dragstart', onDragStart);
+    return () => {
+      liveMap.off('dragstart', onDragStart);
+    };
+  }, [liveMap]);
+
 
   /** Redraw what a write changed: the queued copy offline, the layer's
    *  source online. */
@@ -2714,7 +2692,10 @@ export function FieldRuntime({
           hidden in #249): placing or moving a point needs the map's
           own tools, and the form sheet keeps its Cancel / Submit
           header below it. */}
-      <header className="flex shrink-0 items-center gap-2 border-b border-border bg-surface-1 px-2 py-2 pt-[max(0.5rem,env(safe-area-inset-top))]">
+      <header
+        ref={headerRef}
+        className="flex shrink-0 items-center gap-2 border-b border-border bg-surface-1 px-2 py-2 pt-[max(0.5rem,env(safe-area-inset-top))]"
+      >
         <Link
           href={backHref}
           className="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-full text-accent hover:bg-surface-2"
@@ -2791,6 +2772,8 @@ export function FieldRuntime({
           onRemoveCache={() => void removeCache()}
           handedness={handedness}
           onHandednessChange={changeHandedness}
+          snapping={snapping}
+          onToggleSnapping={toggleSnapping}
         />
       </header>
 
@@ -2832,7 +2815,7 @@ export function FieldRuntime({
       <div className="relative min-h-0 flex-1">
         <MapCanvas
           ref={canvasRef}
-          map={effectiveMapData}
+          map={canvasMapData}
           basemaps={basemaps}
           // #71: when a prepared area's archive is on this device,
           // draw from it instead of from the deployment's basemap,
@@ -2868,15 +2851,17 @@ export function FieldRuntime({
           suppressPopup
         />
 
-        {/* Crosshair reticle: only visible while a template is armed.
-            Centered absolutely over the canvas with pointer-events:none
-            so the maplibre canvas stays interactive underneath. The
-            color is tinted from the active template so the user sees
-            the symbology of the feature they're about to drop. */}
-        {activeTemplate ? (
+        {/* The centre pin: while a point's form is open, or a line or
+            polygon is being drawn. It sits in the middle of the part of
+            the map the sheet leaves showing (the map's own padding puts
+            the camera centre there), with pointer-events:none so the
+            map moves under it. Tinted with what is being collected;
+            the inner ring turns magenta while it is snapped. */}
+        {pinActive ? (
           <div
             aria-hidden="true"
-            className="pointer-events-none absolute inset-0 flex items-center justify-center"
+            className="pointer-events-none absolute inset-x-0 top-0 z-[5] flex items-center justify-center"
+            style={{ bottom: mapPadBottom }}
           >
             <div className="relative h-16 w-16">
               {/* Outer ring -- low-contrast halo */}
@@ -2887,12 +2872,12 @@ export function FieldRuntime({
               {/* Inner colored ring (the template's color) */}
               <div
                 className="absolute inset-2 rounded-full border-2"
-                style={{ borderColor: activeTemplate.color }}
+                style={{ borderColor: pinSnapped ? SNAP_MARKER_COLOR : pinColor }}
               />
               {/* Center dot */}
               <div
                 className="absolute left-1/2 top-1/2 h-2 w-2 -translate-x-1/2 -translate-y-1/2 rounded-full"
-                style={{ backgroundColor: activeTemplate.color }}
+                style={{ backgroundColor: pinColor }}
               />
               {/* Crosshair lines */}
               <div className="absolute left-1/2 top-0 h-3 w-px -translate-x-1/2 bg-white/85" />
@@ -2905,30 +2890,23 @@ export function FieldRuntime({
 
         {/* Layer-toggle button, top of the thumb stack above Locate
             and + (#772), next to the bottom sheet it opens. Mirrors
-            with the left-handed setting. Stays up while a form is
-            open, riding above the sheet, so the basemap can be
-            switched to place a point. */}
+            with the left-handed setting. With a form open only Locate
+            stays on the map, as in Field Maps. */}
+        {showRuntimeChrome ? (
         <button
           type="button"
           onClick={() => setLayerPanelOpen((v) => !v)}
           className={`absolute ${handedness === 'left' ? 'left-4' : 'right-4'} z-10 inline-flex h-12 w-12 items-center justify-center rounded-full border border-border bg-surface-1 shadow-card hover:bg-surface-2`}
           // Top of the thumb stack, 0.75rem above Locate (h-12). Same
           // three cases as Locate's bottom, plus 3.75rem.
-          style={{
-            bottom:
-              formModal !== null
-                ? `calc(${sheetCoveredPx}px + 4.5rem)`
-                : activeTemplate !== null
-                ? '5rem'
-                : templates.length > 0
-                  ? 'calc(9.25rem + env(safe-area-inset-bottom, 0px))'
-                  : 'calc(11.75rem + env(safe-area-inset-bottom, 0px))',
-          }}
+          style={{ bottom: layersBottom }}
           aria-label={t('fieldRuntime.toggleLayersAria')}
           aria-pressed={layerPanelOpen}
         >
           <Layers className="h-6 w-6 text-accent" />
         </button>
+        ) : null}
+
 
         {/* #249.15: zoom + compass cluster at top-right. Replaces
             MapLibre's default NavigationControl (29px buttons) with
@@ -2937,13 +2915,15 @@ export function FieldRuntime({
             match Layers / Search / Locate / FAB so the right rail
             reads as one consistent set of map tools. Compass is
             de-emphasized (text-muted) in north-up state and brightens
-            when the bearing/pitch is non-default. Stays up while a
-            form is open: zooming in is how a point is placed precisely. */}
-        <FieldNavCluster
-          map={liveMap}
-          compassMode={compassMode}
-          onCompassTap={onCompassTap}
-        />
+            when the bearing/pitch is non-default. Hidden while a form
+            is open: only Locate stays on the map (pinch to zoom). */}
+        {showRuntimeChrome ? (
+          <FieldNavCluster
+            map={liveMap}
+            compassMode={compassMode}
+            onCompassTap={onCompassTap}
+          />
+        ) : null}
 
         {/* Locate-me FAB. Sits in the thumb corner, directly above
             the + collect button, so the two actions a collector uses
@@ -2971,8 +2951,6 @@ export function FieldRuntime({
           bottom={
             formModal !== null
               ? `calc(${sheetCoveredPx}px + 0.75rem)`
-              : activeTemplate !== null
-              ? '1.25rem'
               : templates.length > 0
                 ? 'calc(5.5rem + env(safe-area-inset-bottom, 0px))'
                 : 'calc(8rem + env(safe-area-inset-bottom, 0px))'
@@ -2983,6 +2961,17 @@ export function FieldRuntime({
             // let the compass be asked for only from a gesture, and the
             // dot's cone needs it even if GPS was started some other way.
             void deviceHeading.request();
+            // With a point, line or polygon form open, Locate puts the
+            // centre pin on GPS: the map follows the fix until it is
+            // moved by hand.
+            if (pinActive) {
+              focusOnRef.current = null;
+              if (!gps.follow) gps.toggleFollow();
+              else if (gps.position && map) {
+                map.easeTo({ center: [gps.position.lon, gps.position.lat], duration: 600 });
+              }
+              return;
+            }
             if (gps.status === 'idle') {
               gps.start();
               return;
@@ -3006,9 +2995,9 @@ export function FieldRuntime({
             is a magnifier icon; tapping expands an input. Right edge is
             held at right-14 when expanded so the input never extends
             under MapLibre's NavigationControl (zoom +/- + compass) at
-            top-right. Stays up while a form is open, to find the spot a
-            point belongs. */}
-        {searchExpanded ? (
+            top-right. Hidden while a form is open: only Locate stays on
+            the map. */}
+        {!showRuntimeChrome ? null : searchExpanded ? (
             <div className="absolute left-3 right-14 top-3 z-10">
               <div className="w-full max-w-xs">
                 <FieldAddressSearch
@@ -3035,7 +3024,7 @@ export function FieldRuntime({
 
         {/* #249: Field Maps-style circular FAB at bottom-right.
             Replaces the previous full-width footer button. Only
-            renders in the default state (no activeTemplate, layers
+            renders in the default state (layers
             available, no active collect). Tap opens the template
             picker; if there's exactly one template AND GPS is
             watching, the picker auto-dismisses and the form opens
@@ -3049,9 +3038,7 @@ export function FieldRuntime({
             nothing behind it: `disabled` then greyed it to 50% on a
             dark FAB, which reads as an enabled button that ignores
             you. Reported as "I press this and nothing happens". */}
-        {showRuntimeChrome &&
-        activeTemplate === null &&
-        templates.length > 0 ? (
+        {showRuntimeChrome && templates.length > 0 ? (
           <button
             type="button"
             onClick={() => {
@@ -3088,9 +3075,7 @@ export function FieldRuntime({
             the confusion, so say what is wrong and where it is fixed.
             Only in the idle state, and only when the deployment really
             has nothing to add to. */}
-        {showRuntimeChrome &&
-        activeTemplate === null &&
-        templates.length === 0 ? (
+        {showRuntimeChrome && templates.length === 0 ? (
           <div
             className="absolute inset-x-3 z-10 rounded-md border border-border bg-surface-1/95 p-2.5 shadow-overlay"
             style={{ bottom: 'calc(1.25rem + env(safe-area-inset-bottom, 0px))' }}
@@ -3199,146 +3184,15 @@ export function FieldRuntime({
       </div>
 
       {/* #249: Footer only renders when there's something to put in it
-          (activeTemplate location-pick step or the empty-layers
-          message). Default state moves to a circular FAB at
+          (the empty-layers message). Default state moves to a circular FAB at
           bottom-right of the canvas (rendered separately above), so
           the map gets the full height when nothing is happening. */}
-      {(editableLayers.length === 0 || activeTemplate !== null) ? (
+      {editableLayers.length === 0 ? (
       <footer className="flex shrink-0 items-center gap-2 border-t border-border bg-surface-1 p-2 pb-[max(0.5rem,env(safe-area-inset-bottom))]">
         {editableLayers.length === 0 ? (
           <p className="flex-1 text-center text-sm text-muted">
             {t('fieldRuntime.noEditableLayersInMap')}
           </p>
-        ) : activeTemplate ? (
-          (() => {
-            const isMultiVertex =
-              activeTemplate.layer.geometryType === 'line' ||
-              activeTemplate.layer.geometryType === 'polygon';
-            const isPolygon =
-              activeTemplate.layer.geometryType === 'polygon';
-            const minVerts = isPolygon ? 3 : 2;
-            const canFinish = pendingVertices.length >= minVerts;
-            return (
-              <>
-                <div className="flex min-w-0 flex-1 items-center gap-2 rounded-md border border-border bg-surface-0 px-2 py-1.5">
-                  <span
-                    aria-hidden="true"
-                    className="h-4 w-4 shrink-0 rounded-sm border border-border"
-                    style={{ backgroundColor: activeTemplate.color }}
-                  />
-                  <div className="min-w-0 flex-1">
-                    <p className="truncate text-sm font-medium text-ink-0">
-                      {activeTemplate.label}
-                    </p>
-                    <p className="truncate text-xs text-muted">
-                      {/* #273: in vertex-collection mode the
-                          subtitle reports the in-progress vertex
-                          count + the threshold so the worker knows
-                          how close they are to being able to
-                          Finish. Falls back to the template's
-                          sublabel for point templates. */}
-                      {isMultiVertex
-                        ? `${t('fieldRuntime.vertexCountLabel', {
-                            count: pendingVertices.length,
-                          })}${
-                            canFinish
-                              ? t('fieldRuntime.vertexTapFinishSuffix')
-                              : t('fieldRuntime.vertexNeedMoreSuffix', {
-                                  remaining:
-                                    minVerts - pendingVertices.length,
-                                })
-                          }`
-                        : activeTemplate.sublabel}
-                    </p>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => setActiveTemplate(null)}
-                    className="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-md text-ink-1 hover:bg-surface-2"
-                    aria-label={t('fieldRuntime.cancelCollectAria')}
-                  >
-                    <X className="h-5 w-5" />
-                  </button>
-                </div>
-                {/* #273: line/polygon path adds Undo + Finish to
-                    the action row; the GPS / center buttons reuse
-                    the same commitAt* callbacks (which now PUSH a
-                    vertex instead of committing) but get relabeled
-                    so the worker reads "Vertex at GPS" instead of
-                    "Add at GPS". */}
-                {isMultiVertex ? (
-                  <>
-                    <button
-                      type="button"
-                      onClick={undoLastVertex}
-                      disabled={pendingVertices.length === 0}
-                      title={t('fieldRuntime.undoVertexTitle')}
-                      className="inline-flex h-11 shrink-0 items-center gap-1 rounded-md border border-border bg-surface-1 px-2 text-sm font-medium text-ink-1 hover:bg-surface-2 disabled:opacity-50"
-                    >
-                      <ArrowLeft className="h-4 w-4" />
-                      {t('fieldRuntime.undoVertex')}
-                    </button>
-                    <button
-                      type="button"
-                      onClick={finishVertices}
-                      disabled={!canFinish}
-                      title={
-                        canFinish
-                          ? t('fieldRuntime.finishVerticesTitle')
-                          : t('fieldRuntime.finishNeedVertices', {
-                              count: minVerts,
-                            })
-                      }
-                      className="inline-flex h-11 shrink-0 items-center gap-1 rounded-md bg-accent px-3 text-sm font-semibold text-accent-foreground shadow-card hover:opacity-90 disabled:opacity-50"
-                    >
-                      <Check className="h-4 w-4" />
-                      {t('fieldRuntime.finishVertices')}
-                    </button>
-                  </>
-                ) : null}
-                {/* Vertex at GPS / Vertex at center for a line or
-                    polygon being drawn. A point template no longer
-                    arms this footer: it opens its form straight away
-                    (see startCollect), so the "Add at" labels below
-                    only show for a template armed some other way. */}
-                {gps.status === 'watching' && gps.position ? (
-                  <button
-                    type="button"
-                    onClick={commitAtGps}
-                    title={t('fieldRuntime.dropAtGpsTitle', {
-                      kind: isMultiVertex
-                        ? t('fieldRuntime.dropKindVertex')
-                        : t('fieldRuntime.dropKindFeature'),
-                      accuracy:
-                        gps.position.accuracyM < 1
-                          ? '<1'
-                          : Math.round(gps.position.accuracyM),
-                    })}
-                    className="inline-flex h-11 shrink-0 items-center gap-2 rounded-md bg-accent px-3 text-sm font-semibold text-accent-foreground shadow-card hover:opacity-90"
-                  >
-                    <LocateFixed className="h-4 w-4" />
-                    {isMultiVertex
-                      ? t('fieldRuntime.vertexAtGps')
-                      : t('fieldRuntime.addAtGps')}
-                  </button>
-                ) : null}
-                <button
-                  type="button"
-                  onClick={commitAtCenter}
-                  className={`inline-flex h-11 shrink-0 items-center gap-2 rounded-md px-3 text-sm font-semibold shadow-card hover:opacity-90 ${
-                    gps.status === 'watching' && gps.position
-                      ? 'border border-border bg-surface-1 text-ink-1'
-                      : 'bg-accent text-accent-foreground'
-                  }`}
-                >
-                  <MapPin className="h-4 w-4" />
-                  {isMultiVertex
-                    ? t('fieldRuntime.vertexAtCenter')
-                    : t('fieldRuntime.addAtCenter')}
-                </button>
-              </>
-            );
-          })()
         ) : null}
       </footer>
       ) : null}
@@ -3348,8 +3202,7 @@ export function FieldRuntime({
           templates={templates}
           onPick={(tpl) => {
             setPickerOpen(false);
-            // A point opens its form straight away; a line or polygon
-            // enters vertex collection (#273). See startCollect.
+            // The form opens straight away (see startCollect).
             startCollect(tpl);
           }}
           onClose={() => setPickerOpen(false)}
@@ -3416,18 +3269,17 @@ export function FieldRuntime({
               if (isServerStampedField(k) || classifyGpsField(k)) continue;
               presetAttributes[k] = typeof v === 'string' ? v : String(v);
             }
-            // A line or polygon copy needs a shape of its own. Opening
-            // the form with no geometry saved a row that could never
-            // be tapped again, so go through vertex collection with
-            // the copied attributes instead.
+            // A line or polygon copy needs a shape of its own: its
+            // form opens like a new one, vertices from the centre pin,
+            // with the copied attributes.
             if (hit.editable.geometryType !== 'point') {
               setFeatureSheet(null);
-              setActiveTemplate({
-                id: `copy:${hit.editable.dataLayerId}:${hit.editable.layerKey}`,
+              clearPendingMarker();
+              setFormModal({
                 layer: hit.editable,
-                label: hit.editable.layerLabel,
-                sublabel: hit.editable.dataLayerTitle,
-                color: '#888888',
+                mode: 'add',
+                featureId: newGlobalId(),
+                geometry: null,
                 presetAttributes,
               });
               return;
@@ -3477,13 +3329,22 @@ export function FieldRuntime({
           gpsPosition={gps.position}
           editableLayers={editableLayers}
           shape={
-            shapeRequest
+            formModal.mode === 'edit' && vertexFormOpen
               ? {
-                  dirty: geometryEdit.dirty,
-                  currentGeometry: geometryEdit.currentGeometry,
-                  error: geometryEdit.loadError,
+                  dirty: verticesTouched,
+                  currentGeometry: verticesToGeometry(
+                    pendingVertices,
+                    formModal.layer.geometryType === 'polygon',
+                  ),
+                  error: null,
                 }
-              : null
+              : formModal.mode === 'edit' && editPoint
+                ? {
+                    dirty: !samePoint(editPoint, formModal.geometry),
+                    currentGeometry: editPoint,
+                    error: null,
+                  }
+                : null
           }
           onClose={() => {
             clearPendingMarker();
@@ -3511,8 +3372,19 @@ export function FieldRuntime({
           onLayerWritten={refreshAfterWrite}
           onCoveredHeightChange={setSheetCoveredPx}
           onLocalWriteApplied={() => setOfflineWriteCounter((n) => n + 1)}
-          pointMode={pointMode}
-          onPointModeChange={choosePointMode}
+          mapTopPx={mapTopPx}
+          onUpdatePoint={capturePoint}
+          vertexControl={
+            formModal.layer.geometryType === 'line' || formModal.layer.geometryType === 'polygon'
+              ? {
+                  locked: !vertexEditable,
+                  count: pendingVertices.length,
+                  min: formModal.layer.geometryType === 'polygon' ? 3 : 2,
+                  onAdd: addVertex,
+                  onUndo: undoVertex,
+                }
+              : undefined
+          }
         />
       ) : null}
 
@@ -3570,10 +3442,6 @@ function canWriteLayer(
   currentUserId: string,
 ): layer is EditableLayer {
   return !!layer && layer.addable !== false && currentUserId !== '';
-}
-
-function isPointGeometry(t: LayerGeometryType): boolean {
-  return t === 'point';
 }
 
 /**
@@ -4659,14 +4527,81 @@ function LayerSwatch({
 }
 
 /** How a form's point is placed: by hand, or following the GPS fix. */
-type PointMode = 'manual' | 'gps';
 
 /** "lat, lon" in signed decimal degrees, or null for no point. */
-function formatPoint(g: GeoJSON.Geometry | null): string | null {
+/** Add vertex / Undo for a line or polygon form. */
+interface VertexControl {
+  /** The shape has several parts and is kept as it is. */
+  locked: boolean;
+  count: number;
+  /** Vertices it needs: 2 for a line, 3 for a polygon. */
+  min: number;
+  onAdd: () => void;
+  onUndo: () => void;
+}
+
+/** A line or polygon from its vertices, or null with too few. A
+ *  polygon's ring is closed here. */
+function verticesToGeometry(
+  verts: Array<[number, number]>,
+  isPolygon: boolean,
+): GeoJSON.Geometry | null {
+  if (isPolygon) {
+    return verts.length >= 3
+      ? { type: 'Polygon', coordinates: [[...verts, verts[0]!]] }
+      : null;
+  }
+  return verts.length >= 2 ? { type: 'LineString', coordinates: verts } : null;
+}
+
+/**
+ * The vertices of a one-part line or polygon (the ring without its
+ * closing point), or null for a shape the field app cannot change
+ * vertex by vertex: several parts, or a polygon with holes.
+ */
+function editableVertices(g: GeoJSON.Geometry | null): Array<[number, number]> | null {
+  if (!g) return null;
+  const xy = (c: GeoJSON.Position): [number, number] => [c[0] as number, c[1] as number];
+  let line: GeoJSON.Position[] | null = null;
+  let ring: GeoJSON.Position[] | null = null;
+  if (g.type === 'LineString') line = g.coordinates;
+  else if (g.type === 'MultiLineString' && g.coordinates.length === 1) line = g.coordinates[0]!;
+  else if (g.type === 'Polygon' && g.coordinates.length === 1) ring = g.coordinates[0]!;
+  else if (
+    g.type === 'MultiPolygon' &&
+    g.coordinates.length === 1 &&
+    g.coordinates[0]!.length === 1
+  ) {
+    ring = g.coordinates[0]![0]!;
+  }
+  if (line) return line.map(xy);
+  if (ring) {
+    const pts = ring.map(xy);
+    const [a, b] = [pts[0], pts[pts.length - 1]];
+    if (pts.length > 1 && a && b && a[0] === b[0] && a[1] === b[1]) pts.pop();
+    return pts;
+  }
+  return null;
+}
+
+/** Two points within about a millimetre of each other. */
+function samePoint(a: GeoJSON.Geometry | null, b: GeoJSON.Geometry | null): boolean {
+  if (a?.type !== 'Point' || b?.type !== 'Point') return false;
+  const [ax, ay] = a.coordinates as [number, number];
+  const [bx, by] = b.coordinates as [number, number];
+  return Math.abs(ax - bx) < 1e-8 && Math.abs(ay - by) < 1e-8;
+}
+
+/** localStorage key of the field app's snapping choice ('on' / 'off'). */
+const SNAPPING_STORAGE_KEY = 'gratis.field.snapping';
+
+/** A point as upstream shows it: 6.288000°S  107.176000°E. The
+ *  hemisphere comes from the sign, on the absolute value. */
+function formatHemisphere(g: GeoJSON.Geometry | null): string | null {
   if (!g || g.type !== 'Point') return null;
   const [lon, lat] = g.coordinates as [number, number];
   if (typeof lon !== 'number' || typeof lat !== 'number') return null;
-  return `${lat.toFixed(6)}, ${lon.toFixed(6)}`;
+  return `${Math.abs(lat).toFixed(6)}°${lat < 0 ? 'S' : 'N'}  ${Math.abs(lon).toFixed(6)}°${lon < 0 ? 'W' : 'E'}`;
 }
 
 /** The shape session the runtime runs on the map while an edit form is open. */
@@ -4709,8 +4644,9 @@ function FormModal({
   onDeleted,
   onLayerWritten,
   onLocalWriteApplied,
-  pointMode,
-  onPointModeChange,
+  onUpdatePoint,
+  mapTopPx,
+  vertexControl,
   onCoveredHeightChange,
 }: {
   dataCollectionId: string;
@@ -4746,8 +4682,13 @@ function FormModal({
   onLocalWriteApplied: () => void;
   /** How the feature's point is placed (Point layers): by hand or
    *  following GPS. The runtime does the placing on the map. */
-  pointMode: PointMode;
-  onPointModeChange: (mode: PointMode) => void;
+  /** Update point: move the feature's own point to the centre pin. */
+  onUpdatePoint: () => void;
+  /** Where the map starts below the header; the sheet sizes against
+   *  the map, not the whole screen. */
+  mapTopPx: number;
+  /** Add vertex / Undo for a line or polygon's own form. */
+  vertexControl?: VertexControl | undefined;
   /** Reports how much of the map this sheet covers, so the runtime
    *  pads the camera out from under it: the feature being edited, and
    *  the point being placed, stay in the part of the map still showing. */
@@ -4972,11 +4913,10 @@ function FormModal({
           ? t('fieldCollect.addAria', { layer: modal.layer.layerLabel })
           : t('fieldCollect.editAria', { layer: modal.layer.layerLabel })
       }
-      // Taller than the old 60vh because the sheet now measures the
-      // VISIBLE viewport, so this is 62% of what the collector can
-      // actually see rather than 60% of a viewport that pretends the
-      // iOS URL bar is hidden. Expanding to 92% is for long forms.
-      snapPoints={[0.62, 0.92]}
+      // Half of the map below the header, so the other half and the
+      // centre pin stay in view; expanding to 95% is for long forms.
+      snapPoints={[0.5, 0.95]}
+      reserveTopPx={mapTopPx}
       // A downward flick must not be able to throw away a filled-in
       // form. Dragging still moves between the two snap points.
       dismissOnDrag={false}
@@ -5042,7 +4982,8 @@ function FormModal({
             }}
             onSaved={onSaved}
             onNoChanges={onClose}
-            position={{ mode: pointMode, onModeChange: onPointModeChange }}
+            onUpdatePoint={onUpdatePoint}
+            vertexControl={vertexControl}
           >
             {modal.mode === 'edit' && (modal.layer.childLayers ?? []).length > 0 ? (
               <RelatedRecordsSection
@@ -5148,7 +5089,8 @@ function FeatureForm({
   onNoChanges,
   onLocalWriteApplied,
   onSubmittingChange,
-  position,
+  onUpdatePoint,
+  vertexControl,
   children,
 }: {
   dataCollectionId: string;
@@ -5171,7 +5113,11 @@ function FeatureForm({
   onSubmittingChange: (busy: boolean) => void;
   /** Point layers, the feature's own form: the Manual / GPS choice.
    *  Absent on a related record's form. */
-  position?: { mode: PointMode; onModeChange: (mode: PointMode) => void };
+  /** The feature's own form: Update point moves its point to the
+   *  centre pin. */
+  onUpdatePoint?: () => void;
+  /** The feature's own form, a line or polygon: its vertices. */
+  vertexControl?: VertexControl | undefined;
   children?: ReactNode;
 }) {
   const [error, setError] = useState<string | null>(null);
@@ -5184,6 +5130,24 @@ function FeatureForm({
   const [activeGeometry, setActiveGeometry] = useState<
     GeoJSON.Geometry | null
   >(modal.geometry);
+  // Whether this point has a position yet (Add point vs Update point).
+  const pointPlaced =
+    (modal.mode === 'edit' ? (shape?.currentGeometry ?? modal.geometry) : activeGeometry)?.type ===
+    'Point';
+  // "Place the point first" is answered once the point is placed, and
+  // "add more vertices" once the shape has enough.
+  const notPlacedMessage = t('fieldRuntime.pointNotPlaced');
+  useEffect(() => {
+    if (pointPlaced) setError((e) => (e === notPlacedMessage ? null : e));
+  }, [pointPlaced, notPlacedMessage]);
+  const shapeNeedsMessage = t('fieldRuntime.shapeNeedsVertices', {
+    count: vertexControl?.min ?? 2,
+  });
+  const shapeComplete =
+    !!vertexControl && vertexControl.count >= vertexControl.min;
+  useEffect(() => {
+    if (shapeComplete) setError((e) => (e === shapeNeedsMessage ? null : e));
+  }, [shapeComplete, shapeNeedsMessage]);
   // #249: keep activeGeometry in sync with modal.geometry so a parent
   // update (e.g. tap-on-map-to-override) flows into the coord readout
   // without remounting the form.
@@ -5253,6 +5217,27 @@ function FeatureForm({
 
   async function submitResponse(response: FormResponse) {
     setError(null);
+    if (
+      modal.mode === 'add' &&
+      modal.layer.geometryType === 'point' &&
+      activeGeometry?.type !== 'Point'
+    ) {
+      setError(t('fieldRuntime.pointNotPlaced'));
+      // Refuse the submit without FormRuntime repeating the message (it
+      // shows a non-empty one): this form shows it, and clears it once
+      // the point is placed.
+      throw new Error('');
+    }
+    const needsVertices =
+      vertexControl && !vertexControl.locked
+        ? modal.mode === 'add'
+          ? activeGeometry === null
+          : shape?.dirty === true && !shape.currentGeometry
+        : false;
+    if (needsVertices) {
+      setError(shapeNeedsMessage);
+      throw new Error('');
+    }
     // GPS fix metadata stamping (#225 item 3). For add-mode features
     // only -- on edit, the existing fix was the one that mattered.
     // Walk the layer's declared fields and populate any whose name
@@ -5552,76 +5537,82 @@ function FeatureForm({
     // interaction anywhere in the form without FormRuntime having to
     // report dirtiness.
     <div className="flex min-h-0 flex-1 flex-col" onInput={onDirty} onChange={onDirty}>
-      {/* #249: where the point goes. Manual: tap the map or drag the
-          point (the runtime handles both on the map). GPS: the point
-          follows the live fix. Point layers only (a line or polygon is
-          reshaped by its vertices), and the feature's own form only. */}
-      {position && modal.layer.geometryType === 'point' ? (
-        <div className="shrink-0 space-y-1.5 border-b border-border bg-surface-0 px-3 py-2">
-          <div className="flex items-center gap-3">
-            <div className="min-w-0 flex-1">
-              <p className="text-xs font-medium uppercase tracking-wide text-muted">
-                {t('fieldRuntime.location')}
-              </p>
-              <p className="truncate font-mono text-sm tabular-nums text-ink-0">
-                {formatPoint(
-                  modal.mode === 'edit'
-                    ? (shape?.currentGeometry ?? modal.geometry)
-                    : activeGeometry,
-                ) ?? t('fieldRuntime.notSet')}
-              </p>
-            </div>
-            <div
-              role="radiogroup"
-              aria-label={t('fieldRuntime.pointModeAria')}
-              className="inline-flex shrink-0 rounded-md border border-border bg-surface-1 p-0.5"
-            >
-              {(['manual', 'gps'] as const).map((m) => (
-                <button
-                  key={m}
-                  type="button"
-                  role="radio"
-                  aria-checked={position.mode === m}
-                  onClick={() => position.onModeChange(m)}
-                  className={
-                    'inline-flex h-9 items-center gap-1.5 rounded px-3 text-sm font-medium ' +
-                    (position.mode === m
-                      ? 'bg-accent text-accent-foreground shadow-card'
-                      : 'text-ink-1 hover:bg-surface-2')
-                  }
-                >
-                  {m === 'manual' ? (
-                    <Hand className="h-4 w-4" />
-                  ) : (
-                    <LocateFixed className="h-4 w-4" />
-                  )}
-                  {m === 'manual'
-                    ? t('fieldRuntime.pointModeManual')
-                    : t('fieldRuntime.pointModeGps')}
-                </button>
-              ))}
-            </div>
+      {/* #249: Field Maps-style location bar, as upstream's: the
+          point's coordinates and Update point. Here Update point takes
+          the centre pin on the map (which follows GPS after Locate)
+          rather than the GPS fix. Point layers only (a line or polygon
+          is reshaped by its vertices), and the feature's own form only. */}
+      {onUpdatePoint && modal.layer.geometryType === 'point' ? (
+        <div className="flex shrink-0 items-center gap-3 border-b border-border bg-surface-0 px-3 py-2">
+          <div className="min-w-0 flex-1">
+            <p className="text-xs font-medium uppercase tracking-wide text-muted">
+              {t('fieldRuntime.location')}
+            </p>
+            <p className="truncate font-mono text-sm tabular-nums text-ink-0">
+              {formatHemisphere(
+                modal.mode === 'edit'
+                  ? (shape?.currentGeometry ?? modal.geometry)
+                  : activeGeometry,
+              ) ?? t('fieldRuntime.notSet')}
+            </p>
           </div>
-          <p className="text-xs text-muted">
-            {position.mode === 'manual'
-              ? t('fieldRuntime.pointManualHint')
-              : gpsPosition
-                ? t('fieldRuntime.pointGpsHint', {
-                    accuracy:
-                      gpsPosition.accuracyM < 1
-                        ? '<1'
-                        : Math.round(gpsPosition.accuracyM),
-                  })
-                : t('fieldRuntime.pointGpsWaiting')}
-          </p>
+          <button
+            type="button"
+            onClick={onUpdatePoint}
+            title={t('fieldRuntime.updatePointTitle')}
+            className="inline-flex h-10 shrink-0 items-center gap-1.5 rounded-md bg-accent px-3 text-sm font-semibold text-accent-foreground shadow-card hover:opacity-90 disabled:opacity-50"
+          >
+            <Crosshair className="h-4 w-4" />
+            {t('fieldRuntime.updatePoint')}
+          </button>
+        </div>
+      ) : null}
+      {/* The same bar for a line or polygon: its vertex count, Undo and
+          Add vertex, which puts the next vertex at the centre pin. */}
+      {vertexControl ? (
+        <div className="flex shrink-0 items-center gap-2 border-b border-border bg-surface-0 px-3 py-2">
+          <div className="min-w-0 flex-1">
+            <p className="text-xs font-medium uppercase tracking-wide text-muted">
+              {t('featureEdit.shapeHeading')}
+            </p>
+            <p className="truncate text-sm text-ink-0">
+              {vertexControl.locked
+                ? t('fieldRuntime.shapeMultipart')
+                : `${t('fieldRuntime.vertexCountLabel', { count: vertexControl.count })}${
+                    vertexControl.count < vertexControl.min
+                      ? t('fieldRuntime.vertexNeedMoreSuffix', {
+                          remaining: vertexControl.min - vertexControl.count,
+                        })
+                      : ''
+                  }`}
+            </p>
+          </div>
+          {!vertexControl.locked ? (
+            <>
+              <button
+                type="button"
+                onClick={vertexControl.onUndo}
+                disabled={vertexControl.count === 0}
+                title={t('fieldRuntime.undoVertexTitle')}
+                className="inline-flex h-10 shrink-0 items-center gap-1 rounded-md border border-border bg-surface-1 px-2.5 text-sm font-medium text-ink-1 hover:bg-surface-2 disabled:opacity-50"
+              >
+                <Undo2 className="h-4 w-4" />
+                {t('fieldRuntime.undoVertex')}
+              </button>
+              <button
+                type="button"
+                onClick={vertexControl.onAdd}
+                title={t('fieldRuntime.addVertexTitle')}
+                className="inline-flex h-10 shrink-0 items-center gap-1.5 rounded-md bg-accent px-3 text-sm font-semibold text-accent-foreground shadow-card hover:opacity-90"
+              >
+                <Crosshair className="h-4 w-4" />
+                {t('fieldRuntime.addVertex')}
+              </button>
+            </>
+          ) : null}
         </div>
       ) : null}
       <div className="min-h-0 flex-1 overflow-y-auto p-3">
-        {shape ? (
-          <div className="mb-3">
-            <ShapeStatus dirty={shape.dirty} error={shape.error} />
-          </div>
-        ) : null}
         <FormRuntime
           form={form}
           initial={initial}
@@ -6609,6 +6600,8 @@ function FieldMoreMenu({
   onSaveCopy,
   handedness,
   onHandednessChange,
+  snapping,
+  onToggleSnapping,
 }: {
   mapTitle: string;
   isOnline: boolean;
@@ -6633,6 +6626,8 @@ function FieldMoreMenu({
   onSaveCopy: () => void;
   handedness: Handedness;
   onHandednessChange: (next: Handedness) => void;
+  snapping: boolean;
+  onToggleSnapping: () => void;
 }) {
   const t = useT();
   const [open, setOpen] = useState(false);
@@ -6699,9 +6694,11 @@ function FieldMoreMenu({
         <MoreVertical className="h-6 w-6" strokeWidth={2.25} />
       </button>
       {open ? (
+        // Above the bottom sheets (z-30): the menu is used with a form
+        // open too, and its lower items sat under the sheet.
         <div
           role="menu"
-          className="absolute right-0 top-full z-30 mt-1 w-64 overflow-hidden rounded-md border border-border bg-surface-1 shadow-overlay"
+          className="absolute right-0 top-full z-40 mt-1 w-64 overflow-hidden rounded-md border border-border bg-surface-1 shadow-overlay"
         >
           <div className="border-b border-border px-3 py-2">
             <p className="text-xs font-medium uppercase tracking-wide text-muted">
@@ -6921,6 +6918,35 @@ function FieldMoreMenu({
                 <span
                   className={`absolute top-[1px] h-[27px] w-[27px] rounded-full bg-white shadow-card transition-transform ${
                     handedness === 'left' ? 'translate-x-[21px]' : 'translate-x-[1px]'
+                  }`}
+                />
+              </span>
+            </button>
+            {/* Snapping for new points and vertices and for reshaping,
+                kept on this device. Leaves the menu open, like the
+                setting above. */}
+            <button
+              type="button"
+              role="switch"
+              aria-checked={snapping}
+              onClick={onToggleSnapping}
+              className="flex w-full items-start gap-3 rounded px-2 py-2 text-left text-sm text-ink-0 hover:bg-surface-2"
+            >
+              <span className="min-w-0 flex-1">
+                <span className="block">{t('fieldRuntime.snapToFeatures')}</span>
+                <span className="block text-xs text-ink-1">
+                  {t('fieldRuntime.snapToFeaturesHint')}
+                </span>
+              </span>
+              <span
+                aria-hidden="true"
+                className={`relative mt-0.5 inline-flex h-[31px] w-[51px] shrink-0 rounded-full border transition-colors ${
+                  snapping ? 'border-accent bg-accent' : 'border-border bg-surface-2'
+                }`}
+              >
+                <span
+                  className={`absolute top-[1px] h-[27px] w-[27px] rounded-full bg-white shadow-card transition-transform ${
+                    snapping ? 'translate-x-[21px]' : 'translate-x-[1px]'
                   }`}
                 />
               </span>
