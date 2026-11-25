@@ -118,9 +118,8 @@ export interface RelatedRecordRef {
  * did. Deriving the mode instead makes the exclusivity a property of
  * the type rather than of three conditions agreeing by hand.
  *
- *   - 'collect-point'   a point is being collected; a tap moves it
- *   - 'collect-vertex'  a line/polygon template is armed; a tap adds
- *                       a vertex to the run in progress
+ *   - 'collect-point'   a form is open for a point, line or polygon;
+ *                       a tap brings the spot under the centre pin
  *   - 'inspect'         nothing is armed; a tap opens the feature
  *                       sheet for whatever is under the finger
  *   - 'inert'           the map ignores taps
@@ -131,7 +130,6 @@ export interface RelatedRecordRef {
  */
 export type MapInteractionMode =
   | 'collect-point'
-  | 'collect-vertex'
   | 'inspect'
   | 'inert';
 

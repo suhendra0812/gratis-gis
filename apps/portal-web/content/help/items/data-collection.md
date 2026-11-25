@@ -71,26 +71,46 @@ the deployment; editing still follows each data layer's permissions.
 
 ## Adding, editing and deleting features
 
-The map controls stay on screen while a form is open: the header,
-the GPS accuracy strip, **Layers** (with the basemap), search, zoom,
-the compass and **Locate**. Only the **+** button gives way.
+While a form is open, **Locate** is the only button left on the
+map, as in ArcGIS Field Maps; the header and its GPS accuracy strip
+stay above it. Pinch to zoom. The form opens over half of the map,
+and can be dragged up for a long form.
 
 - **Add**. Tap **+** (pick a feature type first when the deployment
-  has more than one). A point feature's form opens straight away,
-  with the point at your GPS fix, or at the map centre when there is
-  no fix. A line or polygon asks for its vertices first.
+  has more than one). The form opens straight away for a point, a
+  line or a polygon, with the pin in the middle of the map giving the
+  point its position, or the line or polygon its first vertex.
 - **Tap a feature** to open its details: **Zoom to**, **Edit**,
   **Copy** and **Delete**. Delete asks first.
 - **Edit** opens the feature's form with the row as the portal holds
   it. Change any field; **Update** sends only the fields you changed
   and the shape, if you moved it, in one save. **Delete** is at the
   foot of the form.
-- **Shape**. While an edit form is open, drag the vertices on the
-  map. The form's **Shape** section says when the shape has changed.
-- **Point position** (point layers, add and edit). Choose **Manual**
-  to tap the map or drag the point, or **GPS** to have the point,
-  and the map, follow your position. Tapping or dragging switches
-  back to Manual.
+- **Line and polygon vertices** (add and edit). The form's **Shape**
+  bar shows how many vertices there are. **Add vertex** puts the next
+  one where the pin is, the same way **Update point** works for a
+  point (so it follows GPS after **Locate**), and **Undo** removes
+  the last one. The shape is drawn on the map as it grows; a line
+  needs 2 vertices and a polygon 3, which closes itself. An edit
+  starts from the feature's own vertices and adds to the end. A shape
+  with several parts, or a polygon with holes, is kept as it is; change
+  it in the map builder.
+- **Point position** (point layers, add and edit). A pin stays in
+  the middle of the map while the form is open, and the form's
+  **Location** shows the point's coordinates. A new point starts
+  where the pin is. **Update point** moves the point to the pin, and
+  the placed point is marked on the map; the point never moves by
+  itself. The pin goes where the map goes:
+  - tap **Locate** on the map and the map, with the pin, follows your
+    GPS position (Update point then uses the fix itself);
+  - move the map by hand, or tap a spot, and the pin stays where you
+    put it until you tap **Locate** again.
+- **Snapping**. New points and vertices snap to
+  the nearest vertex, or failing that the nearest edge, of a feature
+  already on the map, as in the map builder. The pin's ring turns
+  magenta when it would snap. Turn it on or off with **Snap to
+  features** in the **⋮** menu; the choice is kept on the device. A
+  GPS position is never snapped.
 - **Related records**. An edit form lists the rows of each related
   table for that feature. Open a row to update or delete it, or
   **Add** one with its link to the feature filled in (tables, and

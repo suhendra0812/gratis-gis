@@ -41,10 +41,26 @@ versioning policy is in [docs/VERSIONING.md](./docs/VERSIONING.md).
   unsaved edits. Offline, edits and deletes queue; a record with
   unsynced edits always goes through the queue, and one captured and
   deleted before it synced never reaches the server.
-- Field app: a point's position can be **Manual** (tap the map or
-  drag the point) or follow **GPS**, which also keeps the map on the
-  point. The GPS dot shows a heading cone from the device compass,
-  and the compass button switches the map to heading-up.
+- Field app: a point is placed with a pin in the middle of the map,
+  as in ArcGIS Field Maps. A new point starts where the pin is, and
+  the form's location bar (as upstream's: coordinates and **Update
+  point**) moves it to the pin, which follows GPS after the map's
+  **Locate** button and stays where the map is moved by hand. The
+  placed point is marked on the map and only Update point moves it.
+  With a form open, Locate is the only button on the map, and the
+  form opens over half of the map below the header. The GPS dot
+  shows a heading cone from the device compass, and the compass
+  button switches the map to heading-up.
+- Field app: lines and polygons follow the point's flow. Their form
+  opens straight away with the first vertex at the centre pin, and the
+  form's **Shape** bar has **Add vertex** (at the pin, or the GPS fix
+  while following) and **Undo**. An edit starts from the feature's own
+  vertices the same way; vertices are no longer dragged on the map,
+  and a shape with several parts is kept as it is. The **Finish**
+  footer is gone.
+- Field app: snapping for points and line and polygon vertices onto the features already on the map, with the
+  map builder's snapping. **Snap to features** in the **⋮** menu turns
+  it off; the choice is kept on the device.
 - Map builder: a **Source** tab in a layer's settings, after
   Actions. It shows where the layer's data comes from (data layer and
   sublayer, ArcGIS service, GeoJSON URL, PostGIS table, point cloud,
@@ -119,6 +135,13 @@ versioning policy is in [docs/VERSIONING.md](./docs/VERSIONING.md).
 
 ### Fixed
 
+- Field app and maps: a table sublayer (a related table such as
+  inspections) asked for a TileJSON it does not have, and the 404 was
+  asked again every 15 seconds. The field app no longer hands table
+  sublayers to the map, and a 404 TileJSON is taken as "default zoom
+  range" instead of a failure to retry.
+- Field app: the **⋮** menu opened under an open form's sheet, so its
+  lower items could not be tapped.
 - Map popups: a form submissions layer showed "[object Object]" for
   geopoint, photo and signature answers. The popup now skips
   structured values in **All fields**, **Picked** and templates, and
