@@ -235,6 +235,10 @@ model Organization {
   /// today(); null means UTC.
   timeZone String? @map("time_zone")
 
+  /// Sites the Embed widget may frame on this org's app pages
+  /// (https://example.org form). Normalized again on every read.
+  embedOrigins String[] @default([]) @map("embed_origins")
+
   /// #147 Phase 3: admin getting-started checklist state. Most
   /// checklist items derive done-ness from live system state (SMTP
   /// configured, member count, seeded items), so this stores only
@@ -336,6 +340,56 @@ model StorageUploadGrant {
 
   @@index([createdAt])
   @@map("storage_upload_grant")
+}
+
+/// An area of interest for What's Here (#796): a drawn shape, a
+/// buffered point or line, or the union of picked features, resolved
+/// once so each layer read can name it by id (`?area=`). The id is a
+/// hash of the geometry, so the same area is one row. Holds a shape
+/// and nothing else: no feature data, no owner, no org. Rows unused
+/// for a week are pruned on the next registration.
+model AreaOfInterest {
+  id           String                                @id
+  geom         Unsupported("geometry(Geometry, 4326)")
+  squareMeters Float                                 @map("square_meters")
+  createdAt    DateTime                              @default(now()) @map("created_at") @db.Timestamptz(6)
+  lastUsedAt   DateTime                              @default(now()) @map("last_used_at") @db.Timestamptz(6)
+
+  @@index([lastUsedAt])
+  @@map("area_of_interest")
+}
+/// Integer ObjectIDs for the Esri FeatureServer interface, so ArcGIS
+/// Pro can name a feature. One per (scope, entity), numbered by a
+/// trigger on observation as features are first written; older layers
+/// are backfilled by FeatureOidService. Never reused or changed.
+model FeatureOid {
+  scope  String
+  entity String @db.Uuid
+  oid    BigInt @unique @default(autoincrement())
+
+  @@id([scope, entity])
+  @@index([scope, oid])
+  @@map("feature_oid")
+}
+
+/// Layers whose features from before feature_oid existed are numbered.
+model FeatureOidScope {
+  scope        String   @id
+  backfilledAt DateTime @default(now()) @map("backfilled_at") @db.Timestamptz(6)
+
+  @@map("feature_oid_scope")
+}
+
+/// FeatureServer layer numbers: given on first sight, never changed.
+model FeatureServerLayer {
+  itemId     String   @map("item_id") @db.Uuid
+  layerId    String   @map("layer_id")
+  layerIndex Int      @map("layer_index")
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@id([itemId, layerId])
+  @@unique([itemId, layerIndex])
+  @@map("featureserver_layer")
 }
 
 /// Bytes held by one staged upload or queued import. Released when
@@ -992,6 +1046,7 @@ model SearchIndexBuild {
 
   @@index([orgId, createdAt])
   @@index([status, createdAt])
+  @@index([orgId, startedAt], map: "search_index_build_org_id_started_at_idx")
   @@map("search_index_build")
 }
 
@@ -1502,6 +1557,7 @@ model ImportJob {
 
   @@index([orgId, itemId, status], map: "import_job_org_item_status_idx")
   @@index([status, createdAt], map: "import_job_status_created_idx")
+  @@index([orgId, startedAt], map: "import_job_org_id_started_at_idx")
   @@map("import_job")
 }
 
@@ -1865,6 +1921,7 @@ model ScriptRun {
   @@index([state, createdAt])
   /// Run history for one script, newest first.
   @@index([scriptId, createdAt])
+  @@index([orgId, startedAt], map: "script_run_org_id_started_at_idx")
   @@map("script_run")
 }
 
@@ -2026,6 +2083,7 @@ model OfflinePackage {
 
   /// Serves the claim poll.
   @@index([status, createdAt], map: "offline_package_status_created_idx")
+  @@index([orgId, startedAt], map: "offline_package_org_id_started_at_idx")
   /// Serves "the current package for this area".
   @@index([itemId, areaId, status], map: "offline_package_item_area_status_idx")
   @@map("offline_package")

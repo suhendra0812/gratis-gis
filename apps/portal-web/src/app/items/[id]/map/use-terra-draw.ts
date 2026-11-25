@@ -75,7 +75,11 @@ export type DrawMode =
   | 'point'
   | 'linestring'
   | 'polygon'
-  | 'circle';
+  | 'circle'
+  // What's Here area shapes (#796). Rectangle is two taps, freehand
+  // is one drag; both finish as polygons.
+  | 'rectangle'
+  | 'freehand';
 
 export function drawModeFor(
   geometryType: DrawGeometryType | MarkupDrawTool,
@@ -160,6 +164,8 @@ function selectFlags(snapping: boolean, toCustom?: SnapToMap) {
     // Circles are materialised as polygons; allow the same vertex
     // handles so a reviewer can nudge the outline after place.
     circle: { feature: { draggable: true, coordinates } },
+    rectangle: { feature: { draggable: true, coordinates } },
+    freehand: { feature: { draggable: true, coordinates } },
   };
 }
 
@@ -260,6 +266,8 @@ export function useTerraDraw(
           // 32 segments matches shared-types DrawingFeature docs
           // (circle materialised as a polygon on finish).
           new td.TerraDrawCircleMode({ segments: 32 }),
+          new td.TerraDrawRectangleMode(),
+          new td.TerraDrawFreehandMode({ drawInteraction: 'click-drag' }),
           new td.TerraDrawSelectMode({ flags: selectFlags(snapping, custom) }),
         ],
       });

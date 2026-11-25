@@ -1,16 +1,11 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-import {
-  ForbiddenException,
-  Injectable,
-  Logger,
-  NotFoundException,
-  Optional,
-} from '@nestjs/common';
+import { Injectable, Logger, Optional } from '@nestjs/common';
 import type { ImportJob, ImportJobStatus } from '@prisma/client';
-import { Prisma } from '@prisma/client';
 
 import { PrismaService } from '../prisma/prisma.service.js';
 import type { AuthUser } from '../auth/auth-sync.service.js';
+import { nextQueuedJobSql } from '../common/fair-queue.js';
+import { inCallerOrgOrNotFound } from '../common/org-not-found.js';
 import { ResourceQuotaService } from '../admin/resource-quota.service.js';
 
 /**
@@ -141,14 +136,11 @@ export class ImportJobsService {
   /** Single-job lookup. Org-scoped so a leaked id in the URL bar
    *  can't leak data across orgs. */
   async get(user: AuthUser, jobId: string): Promise<ImportJob> {
-    const row = await this.prisma.importJob.findUnique({
-      where: { id: jobId },
-    });
-    if (!row) throw new NotFoundException(`Import job ${jobId} not found.`);
-    if (row.orgId !== user.orgId) {
-      throw new ForbiddenException('Job not in your organization.');
-    }
-    return row;
+    return inCallerOrgOrNotFound(
+      await this.prisma.importJob.findUnique({ where: { id: jobId } }),
+      user,
+      `Import job ${jobId} not found.`,
+    );
   }
 
   /**
@@ -182,15 +174,10 @@ export class ImportJobsService {
    */
   async claimNext(): Promise<ImportJob | null> {
     return this.prisma.$transaction(async (tx) => {
+      // Oldest first; organizations take turns when there are many
+      // (common/fair-queue.ts).
       const rows = await tx.$queryRaw<Array<{ id: string }>>(
-        Prisma.sql`
-          SELECT id
-          FROM import_job
-          WHERE status = 'queued'
-          ORDER BY created_at ASC
-          LIMIT 1
-          FOR UPDATE SKIP LOCKED
-        `,
+        nextQueuedJobSql('import_job'),
       );
       if (rows.length === 0) return null;
       const id = rows[0]!.id;

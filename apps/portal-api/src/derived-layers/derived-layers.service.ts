@@ -21,7 +21,7 @@ import {
 import { getGeneratorForStep } from './tools/registry.js';
 import {
   DerivedResultCache,
-  queryHash,
+  derivedResultKey,
   scopeVersions,
   scopesInSql,
   type DerivedRow,
@@ -147,7 +147,12 @@ export class DerivedLayersService {
   async validateAndEnrich(
     rawData: unknown,
     sourceItem: Pick<Item, 'id' | 'type' | 'data' | 'bbox'>,
-    opts: { expressionData?: DataResolver } = {},
+    opts: {
+      /** The org that owns (or will own) the derived layer. Its time
+       *  zone is used for today() in the recipe's expressions. */
+      orgId: string;
+      expressionData?: DataResolver;
+    },
   ): Promise<DerivedLayerData> {
     if (!rawData || typeof rawData !== 'object') {
       throw new BadRequestException('derived_layer data must be an object');
@@ -319,6 +324,7 @@ export class DerivedLayersService {
               sourceItem.data,
               validatedPipeline,
               schema,
+              opts.orgId,
             ),
           )
         : validated;
@@ -403,9 +409,11 @@ export class DerivedLayersService {
     sourceData: unknown,
     earlierSteps: ToolStep[],
     schema: FeatureField[],
+    orgId: string,
   ): Promise<ToolEnrichContext> {
     const sourceParams: unknown[] = [];
     const { ctes, finalAlias } = await this.composeReadCtes({
+      orgId,
       layerData: {
         version: 1,
         source,
@@ -552,6 +560,7 @@ export class DerivedLayersService {
 
     const queryParams: unknown[] = [];
     const { ctes, finalAlias, bboxDeferred } = await this.composeReadCtes({
+      orgId: item.orgId,
       layerData: data,
       depth: 0,
       params: queryParams,
@@ -586,7 +595,7 @@ export class DerivedLayersService {
     let cacheKey: string | null = null;
     try {
       const versions = await scopeVersions(this.prisma, scopesInSql(sql));
-      cacheKey = `${queryHash(sql, queryParams)}|${versions}`;
+      cacheKey = derivedResultKey(item.orgId, sql, queryParams, versions);
     } catch (err) {
       this.log.debug(
         `derived-layer cache: version probe failed, reading uncached: ${
@@ -636,6 +645,9 @@ export class DerivedLayersService {
    * filter semantics.
    */
   private async composeReadCtes(args: {
+    /** The org that owns the derived layer at this level of the
+     *  chain; its time zone is used for today(). */
+    orgId: string;
     layerData: DerivedLayerData;
     depth: number;
     params: unknown[];
@@ -695,7 +707,7 @@ export class DerivedLayersService {
       next.add(layerData.source.itemId);
       const parent = await this.prisma.item.findUnique({
         where: { id: layerData.source.itemId },
-        select: { id: true, type: true, data: true, deletedAt: true },
+        select: { id: true, orgId: true, type: true, data: true, deletedAt: true },
       });
       if (
         !parent ||
@@ -718,6 +730,7 @@ export class DerivedLayersService {
         );
       }
       const inner = await this.composeReadCtes({
+        orgId: parent.orgId,
         layerData: parentData,
         depth: depth + 1,
         params,
@@ -812,7 +825,7 @@ export class DerivedLayersService {
     let inputAlias = sourceAlias;
     let schema = inputSchema;
     const expressionData = await this.expressionDataFor(layerData.pipeline);
-    const timeZone = await expressionTimeZone(this.prisma);
+    const timeZone = await expressionTimeZone(this.prisma, args.orgId);
     for (let i = 0; i < layerData.pipeline.length; i++) {
       const step = layerData.pipeline[i]!;
       const generator = getGeneratorForStep(step);
@@ -845,6 +858,9 @@ export class DerivedLayersService {
    * access on the source.
    */
   async previewRecipe(args: {
+    /** The org the previewed layer would belong to (the caller's).
+     *  Its time zone is used for today(). */
+    orgId: string;
     /** Resolves layers the recipe's expressions read. */
     expressionData?: DataResolver;
     source: DerivedLayerData['source'];
@@ -953,6 +969,7 @@ export class DerivedLayersService {
               args.sourceItem.data,
               enrichedSteps,
               schema,
+              args.orgId,
             ),
           )
         : validated;
@@ -973,6 +990,7 @@ export class DerivedLayersService {
     };
     const fakeItem = {
       id: 'preview-recipe',
+      orgId: args.orgId,
       type: 'derived_layer' as const,
       data: fakeRecipe as unknown as Prisma.JsonValue,
       bbox: [] as unknown as number[] | [],

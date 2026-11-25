@@ -32,6 +32,7 @@ import {
   Gauge,
   Bookmark as BookmarkIcon,
   ChartSpline as ChartSplineIcon,
+  ScanSearch as ScanSearchIcon,
   Clock,
   ChevronLeft,
   ChevronRight,
@@ -109,7 +110,12 @@ import {
   migrateCustomAppData,
   newSourceId,
 } from '@gratis-gis/shared-types';
-import type { AppThemePresetId, AssetRef } from '@gratis-gis/shared-types';
+import type {
+  AppThemePresetId,
+  AssetRef,
+  WhatsHereAreaUnit,
+  WhatsHereLengthUnit,
+} from '@gratis-gis/shared-types';
 import { resolveAssetRefSync } from '@gratis-gis/shared-types';
 import { AssetPicker } from '@/components/asset-picker';
 import type { CustomBasemap } from '@/lib/custom-basemap';
@@ -1105,6 +1111,15 @@ export function CustomAppDetail({
       app={app}
       page={activePage}
       mapTitle={mapTitle}
+      mapLayerKeys={
+        app.mapId && previewMapData
+          ? new Set(
+              (previewMapData.layers ?? []).flatMap((l) =>
+                l.source.kind === 'data-layer' ? [`${l.source.itemId}:${l.source.layerKey}`] : [],
+              ),
+            )
+          : null
+      }
       canEdit={canEdit}
       themeOptions={themeOptions}
       onUpdateApp={updateApp}
@@ -1542,6 +1557,13 @@ const PALETTE_TILES: Array<{
     label: 'Elevation Profile',
     Icon: ChartSplineIcon,
     hint: 'Draw a line, chart the ground height along it',
+    category: 'map',
+  },
+  {
+    kind: 'whats-here',
+    label: "What's Here",
+    Icon: ScanSearchIcon,
+    hint: 'Pick an area, see what every layer has inside it',
     category: 'map',
   },
   {
@@ -3713,6 +3735,8 @@ function widgetPlaceholderText(
       return 'Show my location';
     case 'elevation-profile':
       return 'Draw a line, chart the ground height';
+    case 'whats-here':
+      return 'Pick an area, see what each layer has inside';
     case 'magic-outline':
       return 'Click imagery, trace a shape into a layer';
     case 'time-slider':
@@ -3782,6 +3806,7 @@ function summarizeWidget(w: CustomWidget): string {
     case 'coordinates':
     case 'my-location':
     case 'elevation-profile':
+    case 'whats-here':
     case 'magic-outline':
       return w.config.mapWidgetId
         ? `→ ${w.config.mapWidgetId.slice(0, 6)}`
@@ -3943,6 +3968,7 @@ function AppProperties({
   app,
   page,
   mapTitle,
+  mapLayerKeys,
   canEdit,
   themeOptions,
   onUpdateApp,
@@ -3955,6 +3981,9 @@ function AppProperties({
   app: CustomAppData;
   page: CustomPage;
   mapTitle: string | null;
+  /** item:layer keys of the default map's data layers, or null when
+   *  the app has no map (or it has not loaded). */
+  mapLayerKeys: Set<string> | null;
   canEdit: boolean;
   /**
    * #22: themes the picker renders.  Order = built-in starters
@@ -4190,6 +4219,10 @@ function AppProperties({
                   key={src.id}
                   source={src}
                   siblings={sources.filter((o) => o.id !== src.id)}
+                  notOnMap={
+                    mapLayerKeys !== null &&
+                    !mapLayerKeys.has(`${src.layer.dataLayerId}:${src.layer.layerKey}`)
+                  }
                   // Sources are app-level, so list maps on every page
                   // (and inside containers), named by page.
                   mapOptions={app.pages.flatMap((pg) =>
@@ -4265,6 +4298,7 @@ function AppProperties({
 function SourceRow({
   source,
   siblings,
+  notOnMap,
   mapOptions,
   canEdit,
   onChange,
@@ -4272,6 +4306,9 @@ function SourceRow({
 }: {
   source: AppDataSource;
   siblings: AppDataSource[];
+  /** The app has a map and this layer is not on it, so the app's map
+   *  does not draw it (#797). */
+  notOnMap: boolean;
   mapOptions: Array<{ id: string; pageTitle: string }>;
   canEdit: boolean;
   onChange: (patch: SourcePatch) => void;
@@ -4304,6 +4341,12 @@ function SourceRow({
           </button>
         )}
       </div>
+      {notOnMap ? (
+        <p className="mt-1 pl-5 text-2xs leading-snug text-warn">
+          Not on the map, so the map doesn&apos;t draw it. Charts and tables can still read
+          it. Remove it if nothing here uses it.
+        </p>
+      ) : null}
       <div className="mt-1 flex items-center gap-1.5 pl-5">
         <span className="shrink-0 text-2xs text-muted">Shows</span>
         <select
@@ -5025,6 +5068,72 @@ function WidgetConfigForm({
             the ground height along it, read from the map&apos;s
             elevation layer (or any elevation layer covering the
             line).
+          </p>
+        </>
+      );
+    case 'whats-here':
+      return (
+        <>
+          <MapBindingPicker
+            mapWidgetId={widget.config.mapWidgetId}
+            mapWidgets={mapWidgets}
+            canEdit={canEdit}
+            onChange={(next) => onChangeConfig({ mapWidgetId: next })}
+          />
+          <label className="flex items-center gap-2 text-xs text-ink-1">
+            <input
+              type="checkbox"
+              disabled={!canEdit}
+              checked={widget.config.showLabel !== false}
+              onChange={(e) => onChangeConfig({ showLabel: e.target.checked })}
+            />
+            Show label next to the icon
+          </label>
+          <label className="flex flex-col gap-1 text-xs text-ink-1">
+            Area unit
+            <select
+              disabled={!canEdit}
+              value={widget.config.areaUnit ?? ''}
+              onChange={(e) =>
+                onChangeConfig({
+                  areaUnit: (e.target.value || undefined) as WhatsHereAreaUnit | undefined,
+                })
+              }
+              className="h-8 rounded border border-border bg-surface-1 px-2 text-xs"
+            >
+              <option value="">Viewer&apos;s metric or imperial setting</option>
+              <option value="acres">Acres</option>
+              <option value="hectares">Hectares</option>
+              <option value="square-feet">Square feet</option>
+              <option value="square-meters">Square meters</option>
+              <option value="square-miles">Square miles</option>
+              <option value="square-kilometers">Square kilometers</option>
+            </select>
+          </label>
+          <label className="flex flex-col gap-1 text-xs text-ink-1">
+            Length unit
+            <select
+              disabled={!canEdit}
+              value={widget.config.lengthUnit ?? ''}
+              onChange={(e) =>
+                onChangeConfig({
+                  lengthUnit: (e.target.value || undefined) as WhatsHereLengthUnit | undefined,
+                })
+              }
+              className="h-8 rounded border border-border bg-surface-1 px-2 text-xs"
+            >
+              <option value="">Viewer&apos;s metric or imperial setting</option>
+              <option value="feet">Feet</option>
+              <option value="miles">Miles</option>
+              <option value="meters">Meters</option>
+              <option value="kilometers">Kilometers</option>
+            </select>
+          </label>
+          <p className="text-xs leading-snug text-muted">
+            Viewers draw an area, tap a point, search an address or pick
+            shapes such as parcels on the bound map, then see what every
+            visible layer has inside it. The units are where the panel
+            starts; viewers can switch, and their choice is remembered.
           </p>
         </>
       );
@@ -9538,6 +9647,7 @@ const WIDGETS_BIND_MAP_ID = new Set<CustomWidgetKind>([
   'coordinates',
   'my-location',
   'elevation-profile',
+  'whats-here',
   'magic-outline',
 ]);
 
@@ -9615,6 +9725,7 @@ function defaultLayoutForKind(kind: CustomWidgetKind): CustomLayout {
     case 'coordinates':
     case 'my-location':
     case 'elevation-profile':
+    case 'whats-here':
     case 'magic-outline':
     case 'create-feature':
     case 'edit-feature':
@@ -10288,6 +10399,19 @@ function stampWidget(kind: CustomWidgetKind, layout: CustomLayout): CustomWidget
         layout,
         config: {
           kind: 'elevation-profile',
+          mapWidgetId: '',
+          showLabel: false,
+        },
+      };
+    // Footprint is just the toggle; the panel portals into the bound
+    // map, like the profile tool's chart.
+    case 'whats-here':
+      return {
+        id,
+        kind,
+        layout,
+        config: {
+          kind: 'whats-here',
           mapWidgetId: '',
           showLabel: false,
         },

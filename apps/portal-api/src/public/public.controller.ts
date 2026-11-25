@@ -38,6 +38,7 @@ import {
   type MapLayerFilter,
 } from '@gratis-gis/shared-types';
 import { ExpressionsService } from '../expressions/expressions.service.js';
+import { AreaOfInterestService } from '../area-of-interest/area-of-interest.service.js';
 import type { TileComputed } from '../engine/data-layer.js';
 import { streamFeatureCollection } from '../data-layer/feature-stream.js';
 import { loadOsmPresetCatalog } from '../osm/preset-catalog.js';
@@ -60,7 +61,13 @@ import {
 } from '../data-layer/tile-settings.js';
 import { synthesizeThumbnailUrl } from '../items/thumbnail-url.js';
 import { withMetaUi } from '../items/meta-ui.js';
-import { readEmbedOrigins } from '../admin/embed-origins.js';
+import {
+  publicEmbedOriginsOrgId,
+  readEmbedOrigins,
+} from '../admin/embed-origins.js';
+import { resolvePublicOrg } from '../common/public-org.js';
+import { publicListScope, publicOrgNotFound } from '../common/list-scope.js';
+import { isMultiTenant } from '../common/tenancy.js';
 import { ItemsService } from '../items/items.service.js';
 import { redactItemData } from '../items/item-data-redact.js';
 import {
@@ -86,6 +93,7 @@ export class PublicController {
     private readonly prisma: PrismaService,
     private readonly v3: DataLayerFeaturesService,
     private readonly itemsService: ItemsService,
+    private readonly areas: AreaOfInterestService,
     @Optional() private readonly expressions?: ExpressionsService,
   ) {}
 
@@ -96,10 +104,9 @@ export class PublicController {
    *   - grid of public items (honoring featuredItemIds order) OR
    *     empty array when the toggle is off
    *
-   * The `org` query param is optional and resolves to the
-   * deployment's only organization. It is kept because older clients
-   * send it and because it makes the resolved org explicit in logs,
-   * not because a portal ever serves more than one.
+   * The `org` query param names the organization. Without it a
+   * single-organization install answers for its own organization; an
+   * install that serves many answers 404 (see resolvePublicOrg).
    */
   @Public()
   // Tighter than the global 300/min: org resolve + optional
@@ -107,16 +114,8 @@ export class PublicController {
   @Throttle({ default: { ttl: 60_000, limit: 60 } })
   @Get('landing')
   async landing(@Query('org') orgSlug?: string) {
-    const org = orgSlug
-      ? await this.prisma.organization.findUnique({ where: { slug: orgSlug } })
-      : await this.resolveSingleOrg();
-    if (!org) {
-      throw new NotFoundException(
-        orgSlug
-          ? `No organization with slug "${orgSlug}"`
-          : 'No organization configured on this portal yet',
-      );
-    }
+    const org = await resolvePublicOrg(this.prisma, { slug: orgSlug });
+    if (!org) throw this.orgNotFound(orgSlug);
 
     const items = org.landingShowPublicItems
       ? await this.publicItemsFor(org.id, org.landingFeaturedItemIds)
@@ -153,16 +152,8 @@ export class PublicController {
   @Throttle({ default: { ttl: 60_000, limit: 60 } })
   @Get('catalog.json')
   async catalog(@Req() req: Request, @Query('org') orgSlug?: string) {
-    const org = orgSlug
-      ? await this.prisma.organization.findUnique({ where: { slug: orgSlug } })
-      : await this.resolveSingleOrg();
-    if (!org) {
-      throw new NotFoundException(
-        orgSlug
-          ? `No organization with slug "${orgSlug}"`
-          : 'No organization configured on this portal yet',
-      );
-    }
+    const org = await resolvePublicOrg(this.prisma, { slug: orgSlug });
+    if (!org) throw this.orgNotFound(orgSlug);
 
     // Self URLs come from PORTAL_BASE_URL like every OGC document;
     // the request headers are only a dev fallback (see ogc/url.ts).
@@ -317,13 +308,20 @@ export class PublicController {
    * 28b-5). portal-web's middleware reads this to build `frame-src`
    * for /items/:id/custom/run, so it must answer without a session.
    * The list is site addresses an admin chose to allow; it holds
-   * nothing private.
+   * nothing private. `?org=<slug>` names the organization when the
+   * install serves many.
    */
   @Public()
   @Throttle({ default: { ttl: 60_000, limit: 120 } })
   @Get('embed-origins')
-  async embedOrigins(): Promise<{ origins: string[] }> {
-    return { origins: await readEmbedOrigins(this.prisma) };
+  async embedOrigins(@Query('org') orgSlug?: string): Promise<{ origins: string[] }> {
+    const orgId = await publicEmbedOriginsOrgId(this.prisma, orgSlug);
+    if (!orgId) {
+      // An install with no organization yet has no list.
+      if (!isMultiTenant()) return { origins: [] };
+      throw this.orgNotFound(orgSlug);
+    }
+    return { origins: await readEmbedOrigins(this.prisma, orgId) };
   }
 
   /**
@@ -338,7 +336,9 @@ export class PublicController {
    * admin's customised starter theme ('forest') instead of the stock
    * colours. Only themes shared publicly are served. `?orgId=` scopes
    * the list to the app's organization, so one org's "forest" never
-   * colours another org's app.
+   * colours another org's app. `?org=<slug>` names the organization
+   * the same way the other public lists do. An install that serves
+   * many organizations answers 404 when neither is given.
    *
    * Mirrors the authed list's paging contract so the runtime pages
    * can swap one for the other without branching: data_json is
@@ -358,6 +358,7 @@ export class PublicController {
     @Query('limit') limit?: string,
     @Query('offset') offset?: string,
     @Query('orgId') orgId?: string,
+    @Query('org') orgSlug?: string,
   ) {
     if (type !== 'basemap' && type !== 'theme') {
       // Keep the header present on the refusal path too so a pager
@@ -367,13 +368,14 @@ export class PublicController {
     }
     // A malformed orgId would make Postgres reject the uuid cast, so
     // it is treated as "no org filter" rather than a 500.
-    const orgFilter =
-      orgId && isUuidShape(orgId) ? { orgId } : {};
+    const { scope } = await publicListScope(this.prisma, { slug: orgSlug, orgId });
+    // The scope is a plain `{ orgId }`, so it merges flat into the
+    // filter: the query is the one this route has always run.
     const where = {
       type,
       access: 'public',
       deletedAt: null,
-      ...orgFilter,
+      ...(scope ?? {}),
     } as const;
     const parsedLimit = Number.parseInt(limit ?? '', 10);
     const take =
@@ -712,12 +714,14 @@ export class PublicController {
     }
 
     const via = await this.resolvePublicVia(parsed.via);
+    const areaOfInterestId = await this.areas.touch(parsed.areaId);
 
     const opts: {
       groupBy?: string[];
       aggs: typeof parsed.aggs;
       bbox?: [number, number, number, number];
       geoLimit?: unknown;
+      areaOfInterestId?: string;
       where?: typeof parsed.where;
       via?: EngineVia;
       bin?: typeof parsed.bin;
@@ -732,6 +736,7 @@ export class PublicController {
     if (parsed.bin) opts.bin = parsed.bin;
     if (parsed.limit !== undefined) opts.limit = parsed.limit;
     if (parsed.asOf !== undefined) opts.asOf = parsed.asOf;
+    if (areaOfInterestId) opts.areaOfInterestId = areaOfInterestId;
     const tierClip = await publicTierGeoLimit(
       this.prisma,
       item.publicGeoBoundaryId,
@@ -1273,12 +1278,8 @@ export class PublicController {
    * is unnecessary. Orders by createdAt so the original seed wins;
    * additional orgs (if any) can still be reached by explicit slug.
    */
-  private async resolveSingleOrg() {
-    const orgs = await this.prisma.organization.findMany({
-      orderBy: { createdAt: 'asc' },
-      take: 1,
-    });
-    return orgs[0] ?? null;
+  private orgNotFound(orgSlug: string | undefined): NotFoundException {
+    return publicOrgNotFound(orgSlug);
   }
 
   /**

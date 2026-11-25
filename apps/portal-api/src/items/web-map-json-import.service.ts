@@ -30,7 +30,7 @@ import type {
 
 import type { AuthUser } from '../auth/auth-sync.service.js';
 import { PrismaService } from '../prisma/prisma.service.js';
-import { ItemsService } from './items.service.js';
+import { ItemsService, mapLayerBackingItemId, mapLayerBackingItemIds } from './items.service.js';
 
 /**
  * Import an Esri WebMap JSON document and create a portal `map`
@@ -231,6 +231,39 @@ export class WebMapJsonImportService {
       layers.push(buildMapLayer({ lens, source: mapped, warnings }));
     }
 
+    // Resolve the basemap to a portal item by tileUrl match. No
+    // match -> empty string sentinel; the viewer falls back to
+    // the org default at render time.
+    let basemap = await this.resolveBasemap(user, webMap);
+
+    // A map save refuses a reference to an item the caller cannot
+    // read. An ArcGIS layer keeps working from its URL without the
+    // item link; any other such layer is skipped, so the rest of the
+    // map still imports. A matched basemap the caller cannot read is
+    // not used. One lookup covers the layers and the basemap.
+    const lookedUp = [...mapLayerBackingItemIds({ layers }), ...(basemap ? [basemap] : [])];
+    const unreadable = await this.items.unreadableItemIds(user, lookedUp);
+    if (basemap && unreadable.has(basemap)) basemap = '';
+    if (unreadable.size > 0) {
+      const kept: MapLayer[] = [];
+      for (const layer of layers) {
+        const id = mapLayerBackingItemId(layer);
+        if (id === null || !unreadable.has(id)) {
+          kept.push(layer);
+        } else if (layer.source.kind === 'arcgis-rest') {
+          const { sourceItemId: _dropped, ...source } = layer.source;
+          void _dropped;
+          kept.push({ ...layer, source });
+        } else {
+          skipped += 1;
+          warnings.push(`Layer "${layer.title}" refers to an item that was not found; skipped.`);
+        }
+      }
+      layers.splice(0, layers.length, ...kept);
+      const fields = fieldLayers.filter((f) => !unreadable.has(f.dataLayerItemId));
+      fieldLayers.splice(0, fieldLayers.length, ...fields);
+    }
+
     if (layers.length === 0) {
       throw new BadRequestException(
         'WebMap import produced zero usable layers. ' +
@@ -245,11 +278,6 @@ export class WebMapJsonImportService {
     // after the walk rather than by iterating backwards so warnings
     // stay in document order.
     layers.reverse();
-
-    // Resolve the basemap to a portal item by tileUrl match. No
-    // match -> empty string sentinel; the viewer falls back to
-    // the org default at render time.
-    const basemap = await this.resolveBasemap(user, webMap);
 
     // Build the canonical MapData payload. center / zoom come
     // from the WebMap's initialState if present; otherwise we
@@ -275,6 +303,9 @@ export class WebMapJsonImportService {
       ...(args.description !== undefined && { description: args.description }),
       data: mapData as unknown as Prisma.InputJsonValue,
       access: args.access ?? 'private',
+    }, {
+      // Found readable above; the save does not look them up again.
+      checkedReferenceIds: lookedUp.filter((id) => !unreadable.has(id)),
     });
 
     this.log.log(

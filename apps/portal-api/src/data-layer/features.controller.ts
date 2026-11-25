@@ -88,6 +88,7 @@ import {
   type EngineVia,
 } from './features.service.js';
 import { NotificationsService } from '../notifications/notifications.service.js';
+import { AreaOfInterestService } from '../area-of-interest/area-of-interest.service.js';
 import {
   csvColumnPlan,
   csvFeatureRow,
@@ -247,6 +248,7 @@ export class DataLayerFeaturesController {
     private readonly prisma: PrismaService,
     private readonly editorPolicy: EditorPolicyService,
     private readonly notifications: NotificationsService,
+    private readonly areas: AreaOfInterestService,
     @Optional() private readonly expressions?: ExpressionsService,
   ) {}
 
@@ -1029,12 +1031,14 @@ export class DataLayerFeaturesController {
     }
 
     const via = await this.resolveVia(user, parsed.via);
+    const areaOfInterestId = await this.areas.touch(parsed.areaId);
     const opts: {
       groupBy?: string[];
       aggs: typeof parsed.aggs;
       bbox?: [number, number, number, number];
       geoLimit?: unknown;
       boundaryClip?: unknown;
+      areaOfInterestId?: string;
       ownRowsOnly?: { userId: string };
       where?: typeof parsed.where;
       via?: EngineVia;
@@ -1050,6 +1054,7 @@ export class DataLayerFeaturesController {
     if (parsed.bin) opts.bin = parsed.bin;
     if (parsed.limit !== undefined) opts.limit = parsed.limit;
     if (parsed.asOf !== undefined) opts.asOf = parsed.asOf;
+    if (areaOfInterestId) opts.areaOfInterestId = areaOfInterestId;
     if (geoLimit) opts.geoLimit = geoLimit;
     if (rowScope === 'own') opts.ownRowsOnly = { userId: user.id };
     if (clip) {
@@ -1578,6 +1583,7 @@ export class DataLayerFeaturesController {
     } = { ...opts };
     if (at) iterOpts.at = at;
 
+    const signal = res.req ? requestAbortSignal(res.req, res) : undefined;
     if (geoParquetExportsRunning >= GEOPARQUET_EXPORT_SLOTS) {
       res.setHeader('Retry-After', '30');
       throw new HttpException(
@@ -1586,7 +1592,6 @@ export class DataLayerFeaturesController {
       );
     }
     geoParquetExportsRunning += 1;
-    const signal = res.req ? requestAbortSignal(res.req, res) : undefined;
 
     // mkdtemp: atomic + 0700, same rationale as the ingest temp
     // dirs (CodeQL js/insecure-temporary-file).
@@ -2027,7 +2032,7 @@ export class DataLayerFeaturesController {
     @Param('layerId') layerId: string,
     @Body() body: CalculateFieldDto,
   ) {
-    const { scope, isTable } = await this.assertV3Layer(
+    const { scope, isTable, item } = await this.assertV3Layer(
       user,
       itemId,
       layerId,
@@ -2035,6 +2040,7 @@ export class DataLayerFeaturesController {
     );
     return this.v3.calculateField({
       itemId,
+      orgId: item.orgId,
       layerId,
       expression: body.expression,
       outputName: body.outputName,

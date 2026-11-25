@@ -44,6 +44,7 @@ import {
   Pentagon,
   Plus,
   Printer,
+  ScanSearch,
   Wand2,
   Search as SearchIcon,
   Square as SquareIcon,
@@ -159,6 +160,7 @@ import {
   type MapCanvasHandle,
 } from '../map/map-canvas';
 import { ElevationProfileTool } from '../map/elevation-profile';
+import { useSharedWhatsHere, WhatsHereTool } from '../map/whats-here/whats-here-tool';
 import { resolveDemForBbox } from '@/lib/dem-resolver';
 import {
   geolocationBlock,
@@ -2133,6 +2135,8 @@ function renderWidget(widget: CustomWidget): React.ReactNode {
       return <MyLocationWidgetRender widget={widget} />;
     case 'elevation-profile':
       return <ElevationProfileWidgetRender widget={widget} />;
+    case 'whats-here':
+      return <WhatsHereWidgetRender widget={widget} />;
     case 'magic-outline':
       return <MagicOutlineWidgetRender widget={widget} />;
     case 'time-slider':
@@ -8062,6 +8066,65 @@ function ElevationProfileWidgetRender({ widget }: { widget: CustomWidget }) {
   );
 }
 
+/**
+ * What's Here widget (#796): a toggle that opens the shared panel on
+ * the bound Map widget. The panel portals into the map container, so
+ * the widget's footprint is the button. While open it holds popup
+ * suppression on that map, since its clicks pick areas and shapes.
+ */
+function WhatsHereWidgetRender({ widget }: { widget: CustomWidget }) {
+  const t = useT();
+  if (widget.config.kind !== 'whats-here') return null;
+  const ctx = useContext(CustomMapsContext);
+  const { mapWidgetId, areaUnit, lengthUnit, showLabel } = widget.config;
+  const map = ctx?.maps[mapWidgetId] ?? null;
+  const layers = ctx?.states[mapWidgetId]?.mapData.layers ?? NO_LAYERS;
+  const [active, setActive] = useState(false);
+  // A share link (#wh=) opens the panel on its area once the map is up.
+  const shared = useSharedWhatsHere();
+  useEffect(() => {
+    if (shared && map) setActive(true);
+  }, [shared, map]);
+
+  const setSuppressed = ctx?.setPopupSuppressed;
+  useEffect(() => {
+    if (!setSuppressed) return;
+    setSuppressed(mapWidgetId, active);
+    return () => setSuppressed(mapWidgetId, false);
+  }, [setSuppressed, mapWidgetId, active]);
+
+  return (
+    <>
+      <button
+        type="button"
+        onClick={() => setActive((v) => !v)}
+        disabled={!map}
+        aria-pressed={active}
+        title={t('whatsHere.title')}
+        style={active ? BAR_TOOL_ACTIVE_STYLE : undefined}
+        className={`${BAR_TOOL_CLASS} ${active ? '' : BAR_TOOL_IDLE}`}
+      >
+        <ScanSearch className="h-5 w-5" strokeWidth={1.75} />
+        {showLabel !== false ? (
+          <span className="text-2xs font-medium leading-none">{t('whatsHere.button')}</span>
+        ) : null}
+      </button>
+      <WhatsHereTool
+        map={map}
+        open={active}
+        onClose={() => setActive(false)}
+        mapLayers={layers}
+        shared={shared}
+        {...(areaUnit ? { defaultAreaUnit: areaUnit } : {})}
+        {...(lengthUnit ? { defaultLengthUnit: lengthUnit } : {})}
+      />
+    </>
+  );
+}
+
+/** Stable empty layer list for a map that has not loaded. */
+const NO_LAYERS: MapLayer[] = [];
+
 // #194: shared app-bar tool chrome for the mutation tool widgets
 // (magic outline, edit feature, delete feature). Mirrors the
 // ToolWidgetSlot in-bar geometry (icon over label, header-ink idle,
@@ -10292,6 +10355,7 @@ export const DESIGN_TIME_KINDS: ReadonlySet<CustomWidgetKind> = new Set([
   'coordinates',
   'my-location',
   'elevation-profile',
+  'whats-here',
   'magic-outline',
   'create-feature',
   'edit-feature',
@@ -10446,6 +10510,7 @@ export const KIND_ICON: Record<CustomWidgetKind, typeof MapIcon> = {
   // #361 part 2 mapcentric kinds.
   bookmark: BookmarkIcon,
   'elevation-profile': ChartSpline,
+  'whats-here': ScanSearch,
   'magic-outline': Wand2,
   coordinates: CrosshairIcon,
   'my-location': LocateIcon,
